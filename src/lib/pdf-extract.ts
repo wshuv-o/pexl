@@ -427,9 +427,20 @@ export async function extractFromRegions(
         }
       }
 
+      // Deduplicate: PDFs with OCR overlays or copy-paste artifacts often have
+      // two identical text items at the same position. Drop items whose text and
+      // position (within 4px) match an earlier item.
+      const deduped: typeof matchedItems = [];
+      for (const item of matchedItems) {
+        const isDup = deduped.some(
+          d => d.str === item.str && Math.abs(d.x - item.x) < 4 && Math.abs(d.y - item.y) < 4
+        );
+        if (!isDup) deduped.push(item);
+      }
+
       // Sort by reading order: top-to-bottom, then left-to-right within same line
       // Items within 6px vertical distance are considered the same line
-      matchedItems.sort((a, b) => {
+      deduped.sort((a, b) => {
         const lineDiff = a.y - b.y;
         if (Math.abs(lineDiff) > 6) return lineDiff;
         return a.x - b.x;
@@ -437,7 +448,7 @@ export async function extractFromRegions(
 
       // Join tokens in reading order, then strip parenthetical reference numbers
       // e.g. "(0023051011425) 8303 32 009" → "8303 32 009"
-      const rawJoined = matchedItems.map(i => i.str).join(' ');
+      const rawJoined = deduped.map(i => i.str).join(' ');
       const value = rawJoined
         .replace(/\(\d+\)/g, '')   // strip (numeric) groups
         .replace(/[()]/g, '')       // strip any lone brackets
