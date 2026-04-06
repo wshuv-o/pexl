@@ -103,7 +103,7 @@ export default function ExcelPanel({ data, filename, provider, onClose, onReExtr
           <div
             key={col}
             className={`px-4 py-2.5 cursor-pointer hover:bg-white/10 select-none transition-all duration-200
-              ${col === 'Page' ? 'w-14 shrink-0' : col === 'Field' ? 'w-32 shrink-0' : 'flex-1'}`}
+              ${col === 'Page' ? 'w-14 shrink-0' : col === 'Field' ? 'w-44 shrink-0' : 'flex-1 border-l border-white/10'}`}
             onClick={() => handleSort(col.toLowerCase())}
           >
             {col} {sortCol === col.toLowerCase() ? (sortAsc ? '↑' : '↓') : ''}
@@ -134,7 +134,6 @@ export default function ExcelPanel({ data, filename, provider, onClose, onReExtr
                   key={i}
                   className={`group/row flex items-stretch text-xs transition-all duration-200
                     ${i % 2 === 0 ? 'bg-card' : 'bg-muted/30'}
-                    ${isNull ? 'border-l-2 border-l-destructive/40' : ''}
                     ${row.edited ? 'border-l-2 border-l-warning/60' : ''}
                     hover:bg-primary/5`}
                 >
@@ -151,7 +150,7 @@ export default function ExcelPanel({ data, filename, provider, onClose, onReExtr
                   </div>
 
                   {/* Field */}
-                  <div className="w-32 shrink-0 px-3 py-3 flex items-center">
+                  <div className="w-44 shrink-0 px-3 py-3 flex items-center">
                     <span className="flex items-center gap-1.5">
                       <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: cfg.color }} />
                       <span className="text-foreground font-medium truncate">{cfg.label}</span>
@@ -160,7 +159,7 @@ export default function ExcelPanel({ data, filename, provider, onClose, onReExtr
 
                   {/* Value */}
                   <div
-                    className="flex-1 px-3 py-3 flex items-center cursor-text"
+                    className="flex-1 px-3 py-3 flex items-center cursor-text border-l border-border"
                     onDoubleClick={() => setEditingIdx(i)}
                     title="Double-click to edit"
                   >
