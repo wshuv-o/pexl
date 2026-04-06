@@ -62,7 +62,7 @@ async function verifyToken(): Promise<User | null> {
 
 async function apiFetchUsage(): Promise<UsageStats> {
   try {
-    const res = await fetch(`${ODIN_API}/bankstatement/usage`, { headers: bearer() });
+    const res = await fetch(`${ODIN_API}/pexl/usage`, { headers: bearer() });
     if (!res.ok) return EMPTY_USAGE;
     return await res.json();
   } catch {
@@ -74,7 +74,7 @@ async function apiPostUsage(body: object): Promise<void> {
   const token = getToken();
   if (!token) return;
   try {
-    await fetch(`${ODIN_API}/bankstatement/usage`, {
+    await fetch(`${ODIN_API}/pexl/usage`, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...bearer() },
       body: JSON.stringify(body),
