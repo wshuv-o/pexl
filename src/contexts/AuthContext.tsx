@@ -1,6 +1,7 @@
+/* eslint-disable no-empty */
 import { createContext, useContext, useState, useEffect, ReactNode } from "react";
 
-const ODIN_API = import.meta.env.VITE_ODIN_API_URL; // https://api.odinems.bulkscraper.cloud/api
+const ODIN_API = import.meta.env.VITE_ODIN_API_URL;
 const TOKEN_KEY = "auth_token";
 
 export interface User {
@@ -29,23 +30,19 @@ interface AuthContextType {
   usage: UsageStats;
   authLoading: boolean;
   login: (username: string, password: string) => Promise<{ ok: boolean; error?: string }>;
-  signup: (name: string, email: string, password: string) => { ok: boolean; error?: string };
   logout: () => void;
   trackUsage: (filesCount: number, statementsCount: number) => Promise<void>;
   trackDownload: () => Promise<void>;
 }
 
-const EMPTY_USAGE: UsageStats = {
-  files_processed: 0,
-  statements_extracted: 0,
-  downloads: 0,
-  last_used: null,
-};
-
+const EMPTY_USAGE: UsageStats = { files_processed: 0, statements_extracted: 0, downloads: 0, last_used: null };
 const AuthContext = createContext<AuthContextType | null>(null);
 
 const getToken = () => localStorage.getItem(TOKEN_KEY);
 const bearer = () => ({ Authorization: `Bearer ${getToken()}` });
+
+// ── Change "pexl" to your app name in these two URLs ──
+const USAGE_URL = `${ODIN_API}/pexl/usage`;
 
 async function verifyToken(): Promise<User | null> {
   const token = getToken();
@@ -62,7 +59,7 @@ async function verifyToken(): Promise<User | null> {
 
 async function apiFetchUsage(): Promise<UsageStats> {
   try {
-    const res = await fetch(`${ODIN_API}/pexl/usage`, { headers: bearer() });
+    const res = await fetch(USAGE_URL, { headers: bearer() });
     if (!res.ok) return EMPTY_USAGE;
     return await res.json();
   } catch {
@@ -74,14 +71,12 @@ async function apiPostUsage(body: object): Promise<void> {
   const token = getToken();
   if (!token) return;
   try {
-    await fetch(`${ODIN_API}/pexl/usage`, {
+    await fetch(USAGE_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...bearer() },
       body: JSON.stringify(body),
     });
-  } catch {
-    // Non-critical — silently ignore
-  }
+  } catch {}
 }
 
 export const AuthProvider = ({ children }: { children: ReactNode }) => {
@@ -110,9 +105,8 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
       });
       const data = await res.json();
       if (!res.ok) {
-        if (data.code === "ACCOUNT_INACTIVE") {
+        if (data.code === "ACCOUNT_INACTIVE")
           return { ok: false, error: "Your account is inactive. Check your email for an activation link." };
-        }
         return { ok: false, error: data.error || "Login failed" };
       }
       localStorage.setItem(TOKEN_KEY, data.token);
@@ -122,11 +116,6 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     } catch {
       return { ok: false, error: "Could not reach the server. Try again." };
     }
-  };
-
-  const signup = (_name: string, _email: string, _password: string): { ok: boolean; error?: string } => {
-    // Placeholder — implement actual signup API call
-    return { ok: false, error: "Signup is not yet implemented." };
   };
 
   const logout = () => {
@@ -146,7 +135,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   };
 
   return (
-    <AuthContext.Provider value={{ user, usage, authLoading, login, signup, logout, trackUsage, trackDownload }}>
+    <AuthContext.Provider value={{ user, usage, authLoading, login, logout, trackUsage, trackDownload }}>
       {children}
     </AuthContext.Provider>
   );

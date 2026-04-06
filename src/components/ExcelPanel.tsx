@@ -15,11 +15,12 @@ interface Props {
   onReExtract: () => void;
   onDataChange: (data: ExtractedRow[]) => void;
   multiFile?: boolean;
+  onDownload?: () => void;
 }
 
 const CONF_PCT: Record<string, number> = { high: 95, medium: 65, low: 25 };
 
-export default function ExcelPanel({ data, filename, provider, onClose, onReExtract, onDataChange, multiFile }: Props) {
+export default function ExcelPanel({ data, filename, provider, onClose, onReExtract, onDataChange, multiFile, onDownload }: Props) {
   const [editingIdx, setEditingIdx] = useState<number | null>(null);
   const [sortCol, setSortCol]       = useState<string | null>(null);
   const [sortAsc, setSortAsc]       = useState(true);
@@ -82,7 +83,7 @@ export default function ExcelPanel({ data, filename, provider, onClose, onReExtr
           <Button
             size="sm"
             className="flex-1 h-8 text-xs bg-primary hover:bg-primary/90 text-primary-foreground font-semibold"
-            onClick={() => exportToExcel(data, filename, provider)}
+            onClick={() => { exportToExcel(data, filename, provider); onDownload?.(); }}
           >
             <Download className="w-3.5 h-3.5 mr-1.5" /> Export .xlsx
           </Button>

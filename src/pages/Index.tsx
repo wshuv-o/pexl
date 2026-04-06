@@ -14,8 +14,10 @@ import ThemeToggle from '@/components/ThemeToggle';
 import type { PDFSession, Highlight, ExtractedRow, DocumentType } from '@/types/utilscraper';
 import { DOCUMENT_TYPES } from '@/types/utilscraper';
 import { processFile, extractRegions } from '@/lib/api';
+import { useAuth } from '@/contexts/AuthContext';
 
 export default function Index() {
+  const { trackUsage, trackDownload } = useAuth();
   const [sessions, setSessions]                 = useState<PDFSession[]>([]);
   const [openTabs, setOpenTabs]                 = useState<string[]>([]);
   const [activeTabId, setActiveTabId]           = useState<string | null>(null);
@@ -194,7 +196,10 @@ export default function Index() {
     toast.success(`Extracted ${totalExtracted} value${totalExtracted !== 1 ? 's' : ''} from ${targets.length} PDF${targets.length !== 1 ? 's' : ''}`);
     if (totalNull > 0) toast.warning(`${totalNull} field${totalNull !== 1 ? 's' : ''} returned empty`);
     setExtracting(false);
-  }, [sessions]);
+
+    // Track usage
+    trackUsage(targets.length, totalExtracted).catch(() => {});
+  }, [sessions, trackUsage]);
 
   const handleReExtractHighlight = useCallback(async (highlightId: string) => {
     if (!activeSession?.file) return;
@@ -512,6 +517,7 @@ export default function Index() {
                       })));
                     }}
                     multiFile={sessions.filter(s => s.extractedData.length > 0).length > 1}
+                    onDownload={() => trackDownload().catch(() => {})}
                   />
                 </div>
               )}
