@@ -11,6 +11,10 @@ export default defineConfig(() => ({
     hmr: {
       overlay: false,
     },
+    allowedHosts: true as const,
+  },
+  preview: {
+    allowedHosts: true as const,
   },
   build: {
     target: "esnext",
