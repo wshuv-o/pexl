@@ -30,8 +30,8 @@ export default function PDFViewer({
   extracting,
 }: PDFViewerProps) {
   const [currentPage, setCurrentPage]   = useState(session.startPage || 1);
-  const [zoom, setZoom]                 = useState<number | null>(null); // null = not yet computed
-  const [fineRotation, setFineRotation] = useState(0);     // fine: -15 … +15 degrees
+  const [zoom, setZoom]                 = useState<number | null>(null);
+  const [fineRotation, setFineRotation] = useState(0);
   const [tool, setTool]                 = useState<ViewerTool>('cursor');
   const [drawing, setDrawing]           = useState<{
     startX: number; startY: number;
@@ -56,7 +56,6 @@ export default function PDFViewer({
 
   const totalPages = numPages ?? session.total_pages;
 
-  // Memoised so useCallback deps don't change on every render
   const pageHighlights = useMemo(
     () => session.highlights[currentPage] ?? [],
     [session.highlights, currentPage],
@@ -67,7 +66,6 @@ export default function PDFViewer({
     [session.highlights],
   );
 
-  // Guard: pages array may be empty during upload/processing
   const currentPageInfo = useMemo(
     () => Array.isArray(session.pages)
       ? session.pages.find(p => p.page_number === currentPage)
@@ -75,7 +73,7 @@ export default function PDFViewer({
     [session.pages, currentPage],
   );
 
-  // Stable object URL from the File — revoked on unmount or file change
+  // Stable object URL from the File
   useEffect(() => {
     if (!session.file) return;
     const url = URL.createObjectURL(session.file);
@@ -83,11 +81,9 @@ export default function PDFViewer({
     return () => URL.revokeObjectURL(url);
   }, [session.file]);
 
-  // Compute fit-width zoom once we know the PDF's intrinsic page width
-  // and the scroll container width
+  // Compute fit-width zoom
   useEffect(() => {
     if (pdfPageWidth && scrollRef.current && zoom === null) {
-      // Subtract padding (p-6 = 24px each side) + pr-12 (48px right) + pr-6 (24px scrollbar)
       const available = scrollRef.current.clientWidth - 24 - 48 - 24;
       const fitZoom = Math.max(0.3, Math.min(2.5, available / pdfPageWidth));
       setZoom(parseFloat(fitZoom.toFixed(2)));
@@ -100,8 +96,7 @@ export default function PDFViewer({
     setPickerPos(null);
   }, [currentPage]);
 
-  // Global mouseUp fallback — fires if user drags outside the page div
-  // Without this, releasing the mouse outside leaves drawing stuck forever
+  // Global mouseUp fallback
   useEffect(() => {
     const handleGlobalMouseUp = () => {
       if (drawing) setDrawing(null);
@@ -123,42 +118,28 @@ export default function PDFViewer({
   // -----------------------------------------------------------------------
   const getRelativePos = useCallback((clientX: number, clientY: number) => {
     if (!pageRef.current) return null;
-
-    // Use the actual PDF canvas bounding rect, not the wrapper div.
-    // react-pdf renders a <canvas> inside the wrapper �� if it has any
-    // margin/padding the wrapper rect would cause an offset shift.
     const canvas = pageRef.current.querySelector('canvas');
     const target = canvas ?? pageRef.current;
     const rect   = target.getBoundingClientRect();
 
-    // When fine rotation is applied via CSS transform, getBoundingClientRect()
-    // returns the axis-aligned bounding box of the rotated element.
-    // We need to inverse-rotate the click point around the element center
-    // to get the correct position in the un-rotated element's local space.
     if (fineRotation !== 0) {
       const cx = rect.left + rect.width / 2;
       const cy = rect.top  + rect.height / 2;
       const dx = clientX - cx;
       const dy = clientY - cy;
-      const rad = (-fineRotation * Math.PI) / 180;   // inverse rotation
+      const rad = (-fineRotation * Math.PI) / 180;
       const cosA = Math.cos(rad);
       const sinA = Math.sin(rad);
       const localX = dx * cosA - dy * sinA;
       const localY = dx * sinA + dy * cosA;
-      // The un-rotated element dimensions are the canvas's actual size
       const uw = target.clientWidth  || rect.width;
       const uh = target.clientHeight || rect.height;
-      const x  = (localX + uw / 2) / uw;
-      const y  = (localY + uh / 2) / uh;
-      const px = localX + uw / 2;
-      const py = localY + uh / 2;
-      return { x, y, px, py };
+      return { x: (localX + uw / 2) / uw, y: (localY + uh / 2) / uh, px: localX + uw / 2, py: localY + uh / 2 };
     }
 
     return {
       x:  (clientX - rect.left) / rect.width,
       y:  (clientY - rect.top)  / rect.height,
-      // Pixel offset relative to the canvas (for picker positioning)
       px: clientX - rect.left,
       py: clientY - rect.top,
     };
@@ -188,18 +169,13 @@ export default function PDFViewer({
 
   const handleMouseUp = useCallback((e: React.MouseEvent) => {
     if (!drawing) return;
-
-    // Ignore tiny accidental clicks (< 1% of page in either dimension)
     if (drawing.w < 0.01 || drawing.h < 0.005) {
       setDrawing(null);
       return;
     }
-
     const pos = getRelativePos(e.clientX, e.clientY);
     const px  = pos?.px ?? e.clientX;
     const py  = pos?.py ?? e.clientY;
-
-    // Clamp picker to stay inside the page div
     setPickerPos({
       x:    Math.min(px, (pageRef.current?.offsetWidth  ?? 600) - 160),
       y:    Math.min(py, (pageRef.current?.offsetHeight ?? 800) - 200),
@@ -217,7 +193,6 @@ export default function PDFViewer({
       const hl: Highlight = {
         id:     `hl-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         page:   currentPage,
-        // Use customLabel as field value when provided (Custom... option)
         field:  customLabel ?? field,
         x:      pickerPos.rect.x,
         y:      pickerPos.rect.y,
@@ -247,13 +222,11 @@ export default function PDFViewer({
   const handleToolChange = useCallback(
     (t: ViewerTool) => {
       if (t === 'eraser') {
-        // Erase is a one-shot action — clear highlights then revert to cursor
         handleEraseAll();
         setTool('cursor');
       } else {
         setTool(t);
       }
-      // Always close picker when switching tools
       setPickerPos(null);
     },
     [handleEraseAll],
@@ -262,7 +235,6 @@ export default function PDFViewer({
   // -----------------------------------------------------------------------
   // Bulk highlight actions
   // -----------------------------------------------------------------------
-  // Clone current page's highlights to every page in this PDF
   const handleApplyToAllPages = useCallback(() => {
     if (pageHighlights.length === 0) return;
     const next = { ...session.highlights };
@@ -279,7 +251,6 @@ export default function PDFViewer({
     onHighlightsChange(session.id, next);
   }, [pageHighlights, session, totalPages, currentPage, onHighlightsChange]);
 
-  // Clone current page's highlights to a specific page range
   const handleApplyToPageRange = useCallback((from: number, to: number) => {
     if (pageHighlights.length === 0) return;
     const next = { ...session.highlights };
@@ -296,12 +267,10 @@ export default function PDFViewer({
     onHighlightsChange(session.id, next);
   }, [pageHighlights, session, currentPage, onHighlightsChange]);
 
-  // Erase highlights from ALL pages in this PDF
   const handleEraseAllPages = useCallback(() => {
     onHighlightsChange(session.id, {});
   }, [session.id, onHighlightsChange]);
 
-  // Send the full highlights map to Index for cross-PDF mirroring (page-for-page)
   const handleApplyToAllPdfs = useCallback(() => {
     if (allHighlights.length === 0) return;
     onApplyToAllPdfs(session.highlights);
@@ -323,7 +292,6 @@ export default function PDFViewer({
       const items = content.items as { str: string; transform: number[]; width?: number; height?: number }[];
       const queryLower = query.toLowerCase();
       const hits: { x: number; y: number; width: number; height: number }[] = [];
-
       for (const item of items) {
         if (!item.str || !item.transform) continue;
         if (!item.str.toLowerCase().includes(queryLower)) continue;
@@ -331,12 +299,7 @@ export default function PDFViewer({
         const itemTop = vp.height - item.transform[5];
         const itemH = item.height || Math.abs(item.transform[3]) || 12;
         const itemW = item.width || item.str.length * 6;
-        hits.push({
-          x: x / vp.width,
-          y: itemTop / vp.height,
-          width: itemW / vp.width,
-          height: itemH / vp.height,
-        });
+        hits.push({ x: x / vp.width, y: itemTop / vp.height, width: itemW / vp.width, height: itemH / vp.height });
       }
       setSearchResults(hits);
     } catch { setSearchResults([]); }
@@ -375,12 +338,16 @@ export default function PDFViewer({
     );
   }
 
+  const startPg  = session.startPage || 1;
+  const contentP = currentPage - startPg + 1;
+  const isCover  = startPg > 1 && currentPage < startPg;
+
   return (
     <div className="flex flex-col h-full">
       <ViewerToolbar
         currentPage={currentPage}
         totalPages={totalPages}
-        startPage={session.startPage || 1}
+        startPage={startPg}
         zoom={zoom ?? 1}
         tool={tool}
         isOcr={currentPageInfo?.is_ocr ?? false}
@@ -426,7 +393,7 @@ export default function PDFViewer({
             </span>
           )}
           <button
-            className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+            className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-200"
             onClick={() => { setSearchOpen(false); setSearchQuery(''); setSearchResults([]); }}
           >
             <span className="text-xs">Esc</span>
@@ -445,8 +412,6 @@ export default function PDFViewer({
         )}
 
         <div className="flex justify-center p-6 pr-12">
-          {/* pageRef shrink-wraps the canvas via inline-block so HighlightOverlay
-              (absolute inset-0) aligns pixel-perfectly with the rendered PDF */}
           <div
             ref={pageRef}
             className="relative shadow-2xl select-none"
@@ -456,7 +421,8 @@ export default function PDFViewer({
               cursor:     tool === 'highlight' ? 'crosshair' : 'default',
               userSelect: tool === 'highlight' ? 'none' : 'auto',
               transform:  fineRotation !== 0 ? `rotate(${fineRotation}deg)` : undefined,
-              transition: 'transform 0.15s ease',
+              transition: 'transform 0.3s ease',
+              opacity:    isCover ? 0.5 : 1,
             }}
             onMouseDown={handleMouseDown}
             onMouseMove={handleMouseMove}
@@ -467,7 +433,6 @@ export default function PDFViewer({
               onLoadSuccess={async (pdf) => {
                 setNumPages(pdf.numPages);
                 pdfDocRef.current = pdf;
-                // Read intrinsic width of page 1 to compute fit-width zoom
                 if (!pdfPageWidth) {
                   try {
                     const page = await pdf.getPage(1);
@@ -531,6 +496,16 @@ export default function PDFViewer({
                 onCancel={() => setPickerPos(null)}
               />
             )}
+
+            {/* Page number badge */}
+            <div
+              className="absolute top-2 right-2 z-20 text-[10px] font-medium px-2 py-0.5 rounded-md
+                         bg-black/50 text-white/80 backdrop-blur-sm select-none pointer-events-none
+                         transition-all duration-300"
+            >
+              {isCover ? 'Cover' : startPg > 1 ? `P${contentP}` : `${currentPage}`}
+              <span className="text-white/40 ml-1">/ {totalPages}</span>
+            </div>
           </div>
         </div>
 

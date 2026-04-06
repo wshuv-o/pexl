@@ -92,7 +92,7 @@ export default function HighlightOverlay({ highlights, drawing, onDelete, onReEx
               >
                 <button
                   className="w-5 h-5 rounded flex items-center justify-center
-                             bg-blue-600 hover:bg-blue-700 transition-colors"
+                             bg-blue-600 hover:bg-blue-700 transition-all duration-200"
                   onClick={e => { e.stopPropagation(); onReExtract(h.id); }}
                   title={`Re-extract ${cfg.label}`}
                 >
@@ -100,7 +100,7 @@ export default function HighlightOverlay({ highlights, drawing, onDelete, onReEx
                 </button>
                 <button
                   className="w-5 h-5 rounded flex items-center justify-center
-                             bg-red-500 hover:bg-red-600 transition-colors"
+                             bg-red-500 hover:bg-red-600 transition-all duration-200"
                   onClick={e => { e.stopPropagation(); onDelete(h.id); }}
                   title={`Remove ${cfg.label} highlight`}
                 >

@@ -111,7 +111,7 @@ export default function ViewerToolbar({
     <Tooltip>
       <TooltipTrigger asChild>
         <button
-          className={`p-1.5 rounded transition-colors ${
+          className={`p-1.5 rounded transition-all duration-200 ${
             tool === t
               ? 'bg-primary/15 text-primary'
               : 'text-muted-foreground hover:text-foreground hover:bg-muted'
@@ -137,7 +137,7 @@ export default function ViewerToolbar({
       <TooltipTrigger asChild>
         <button
           className="p-1.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted
-                     disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                     disabled:opacity-30 disabled:cursor-not-allowed transition-all duration-200"
           onClick={onClick}
           disabled={disabled}
           aria-label={label}
@@ -155,7 +155,7 @@ export default function ViewerToolbar({
       {/* Page navigation */}
       <div className="flex items-center gap-0.5 shrink-0">
         <button
-          className="p-1.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted disabled:opacity-30 transition-colors"
+          className="p-1.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted disabled:opacity-30 transition-all duration-200"
           disabled={currentPage <= 1}
           onClick={() => onPageChange(currentPage - 1)}
           aria-label="Previous page"
@@ -179,7 +179,7 @@ export default function ViewerToolbar({
         <span className="text-xs text-muted-foreground px-1">/ {totalPages}</span>
 
         <button
-          className="p-1.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted disabled:opacity-30 transition-colors"
+          className="p-1.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted disabled:opacity-30 transition-all duration-200"
           disabled={currentPage >= totalPages}
           onClick={() => onPageChange(currentPage + 1)}
           aria-label="Next page"
@@ -242,7 +242,7 @@ export default function ViewerToolbar({
       {/* Zoom controls */}
       <div className="flex items-center gap-0.5 shrink-0">
         <button
-          className="p-1.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+          className="p-1.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-200"
           onClick={() => onZoomChange(Math.max(0.3, parseFloat((zoom - 0.15).toFixed(2))))}
           aria-label="Zoom out"
         >
@@ -261,7 +261,7 @@ export default function ViewerToolbar({
         </Select>
 
         <button
-          className="p-1.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+          className="p-1.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-200"
           onClick={() => onZoomChange(Math.min(2.5, parseFloat((zoom + 0.15).toFixed(2))))}
           aria-label="Zoom in"
         >
@@ -278,7 +278,7 @@ export default function ViewerToolbar({
           <TooltipTrigger asChild>
             <button
               ref={fineBtnRef}
-              className={`p-1.5 rounded transition-colors ${
+              className={`p-1.5 rounded transition-all duration-200 ${
                 fineRotation !== 0 || fineOpen
                   ? 'bg-primary/15 text-primary'
                   : 'text-muted-foreground hover:text-foreground hover:bg-muted'
@@ -378,7 +378,7 @@ export default function ViewerToolbar({
       <Tooltip>
         <TooltipTrigger asChild>
           <button
-            className={`p-1.5 rounded transition-colors shrink-0 ${
+            className={`p-1.5 rounded transition-all duration-200 shrink-0 ${
               searchOpen
                 ? 'bg-primary/15 text-primary'
                 : 'text-muted-foreground hover:text-foreground hover:bg-muted'
@@ -483,7 +483,7 @@ function PageRangeButton({
           <button
             ref={btnRef}
             className="p-1.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted
-                       disabled:opacity-30 disabled:cursor-not-allowed transition-colors flex items-center gap-0.5"
+                       disabled:opacity-30 disabled:cursor-not-allowed transition-all duration-200 flex items-center gap-0.5"
             onClick={() => setOpen(o => !o)}
             disabled={disabled}
             aria-label="Copy highlights to page range"
