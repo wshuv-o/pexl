@@ -27,8 +27,10 @@ export default function PDFViewer({
   onApplyToAllPdfs,
   extracting,
 }: PDFViewerProps) {
-  const [currentPage, setCurrentPage]   = useState(1);
+  const [currentPage, setCurrentPage]   = useState(session.startPage || 1);
   const [zoom, setZoom]                 = useState<number | null>(null); // null = not yet computed
+  const [rotation, setRotation]         = useState(0);     // coarse: 0, 90, 180, 270
+  const [fineRotation, setFineRotation] = useState(0);     // fine: -15 … +15 degrees
   const [tool, setTool]                 = useState<ViewerTool>('cursor');
   const [drawing, setDrawing]           = useState<{
     startX: number; startY: number;
@@ -122,11 +124,35 @@ export default function PDFViewer({
     if (!pageRef.current) return null;
 
     // Use the actual PDF canvas bounding rect, not the wrapper div.
-    // react-pdf renders a <canvas> inside the wrapper — if it has any
+    // react-pdf renders a <canvas> inside the wrapper �� if it has any
     // margin/padding the wrapper rect would cause an offset shift.
     const canvas = pageRef.current.querySelector('canvas');
     const target = canvas ?? pageRef.current;
     const rect   = target.getBoundingClientRect();
+
+    // When fine rotation is applied via CSS transform, getBoundingClientRect()
+    // returns the axis-aligned bounding box of the rotated element.
+    // We need to inverse-rotate the click point around the element center
+    // to get the correct position in the un-rotated element's local space.
+    if (fineRotation !== 0) {
+      const cx = rect.left + rect.width / 2;
+      const cy = rect.top  + rect.height / 2;
+      const dx = clientX - cx;
+      const dy = clientY - cy;
+      const rad = (-fineRotation * Math.PI) / 180;   // inverse rotation
+      const cosA = Math.cos(rad);
+      const sinA = Math.sin(rad);
+      const localX = dx * cosA - dy * sinA;
+      const localY = dx * sinA + dy * cosA;
+      // The un-rotated element dimensions are the canvas's actual size
+      const uw = target.clientWidth  || rect.width;
+      const uh = target.clientHeight || rect.height;
+      const x  = (localX + uw / 2) / uw;
+      const y  = (localY + uh / 2) / uh;
+      const px = localX + uw / 2;
+      const py = localY + uh / 2;
+      return { x, y, px, py };
+    }
 
     return {
       x:  (clientX - rect.left) / rect.width,
@@ -135,7 +161,7 @@ export default function PDFViewer({
       px: clientX - rect.left,
       py: clientY - rect.top,
     };
-  }, []);
+  }, [fineRotation]);
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     if (tool !== 'highlight') return;
@@ -353,6 +379,7 @@ export default function PDFViewer({
       <ViewerToolbar
         currentPage={currentPage}
         totalPages={totalPages}
+        startPage={session.startPage || 1}
         zoom={zoom ?? 1}
         tool={tool}
         isOcr={currentPageInfo?.is_ocr ?? false}
@@ -374,6 +401,10 @@ export default function PDFViewer({
           setSearchOpen(o => !o);
           if (searchOpen) { setSearchQuery(''); setSearchResults([]); }
         }}
+        rotation={rotation}
+        fineRotation={fineRotation}
+        onRotate={(dir) => setRotation((rotation + (dir === 'cw' ? 90 : 270)) % 360)}
+        onFineRotationChange={setFineRotation}
       />
 
       {/* Search bar */}
@@ -424,6 +455,8 @@ export default function PDFViewer({
               lineHeight: 0,
               cursor:     tool === 'highlight' ? 'crosshair' : 'default',
               userSelect: tool === 'highlight' ? 'none' : 'auto',
+              transform:  fineRotation !== 0 ? `rotate(${fineRotation}deg)` : undefined,
+              transition: 'transform 0.15s ease',
             }}
             onMouseDown={handleMouseDown}
             onMouseMove={handleMouseMove}
@@ -455,6 +488,7 @@ export default function PDFViewer({
               <Page
                 pageNumber={currentPage}
                 scale={zoom ?? 1}
+                rotate={rotation}
                 renderTextLayer={false}
                 renderAnnotationLayer={false}
               />

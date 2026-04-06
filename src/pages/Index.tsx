@@ -80,6 +80,7 @@ export default function Index() {
         docType: pendingDocType,
         total_pages: 0, pages: [], status: 'processing',
         highlights: {}, extractedData: [],
+        startPage: 1,
       }]);
       setModalOpen(true); setModalStep(0); setModalDetail('');
       try {
@@ -123,6 +124,19 @@ export default function Index() {
 
   const handleHighlightsChange = useCallback((sessionId: string, highlights: Record<number, Highlight[]>) => {
     setSessions(prev => prev.map(s => s.id === sessionId ? { ...s, highlights } : s));
+  }, []);
+
+  const handleStartPageChange = useCallback((sessionId: string, startPage: number) => {
+    setSessions(prev => prev.map(s => s.id === sessionId ? { ...s, startPage } : s));
+  }, []);
+
+  const handleBulkStartPageChange = useCallback((startPage: number) => {
+    setSessions(prev => prev.map(s => {
+      // Only apply if the PDF actually has that many pages
+      const total = s.total_pages || s.pages.length;
+      if (startPage > total) return s;
+      return { ...s, startPage };
+    }));
   }, []);
 
   // Extract ALL sessions that have highlights (not just the active tab)
@@ -216,29 +230,39 @@ export default function Index() {
     setExtracting(false);
   }, [activeSession]);
 
-  // Mirror the active session's highlights (page-for-page) to all other PDFs
+  // Mirror the active session's highlights to all other PDFs, mapping via startPage offsets.
+  // Source page 3 with startPage=2 → relative page 1 → target page = target.startPage + 1 - 1
   const handleApplyToAllPdfs = useCallback((sourceHighlights: Record<number, Highlight[]>) => {
+    const sourceSession = sessions.find(s => s.id === activeTabId);
+    if (!sourceSession) return;
+    const srcStart = sourceSession.startPage || 1;
+
     setSessions(prev => prev.map(s => {
       if (s.id === activeTabId) return s; // skip the source session
       if (s.status !== 'ready' && s.status !== 'extracted') return s;
+      const tgtStart = s.startPage || 1;
+      const totalPgs = s.total_pages || s.pages.length;
       const next: Record<number, Highlight[]> = {};
+
       for (const [pageStr, pageHls] of Object.entries(sourceHighlights)) {
-        const pageNum = Number(pageStr);
-        // Only copy if target PDF has that page
-        const totalPgs = s.total_pages || s.pages.length;
-        if (pageNum > totalPgs) continue;
-        next[pageNum] = pageHls.map(h => ({
+        const srcPage = Number(pageStr);
+        // Map: source relative → target actual
+        const relPage = srcPage - srcStart;           // 0-based content page index
+        const tgtPage = tgtStart + relPage;           // target actual page
+        if (tgtPage < 1 || tgtPage > totalPgs) continue;
+
+        next[tgtPage] = pageHls.map(h => ({
           ...h,
-          id: `hl-${Date.now()}-${s.id.slice(-4)}-${pageNum}-${Math.random().toString(36).slice(2, 6)}`,
-          page: pageNum,
+          id: `hl-${Date.now()}-${s.id.slice(-4)}-${tgtPage}-${Math.random().toString(36).slice(2, 6)}`,
+          page: tgtPage,
           extractedValue: undefined,
           confidence: undefined,
         }));
       }
       return { ...s, highlights: next, extractedData: [], status: 'ready' as const };
     }));
-    toast.success('Highlights mirrored to all open PDFs (matching pages)');
-  }, [activeTabId]);
+    toast.success('Highlights mirrored to all open PDFs (offset-mapped)');
+  }, [activeTabId, sessions]);
 
   // Can we show a viewer?
   const hasActiveViewer = activeSession &&
@@ -324,10 +348,31 @@ export default function Index() {
                     <h2 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Your PDFs</h2>
                     <span className="ml-auto text-[10px] text-muted-foreground/60">{sessions.length} file{sessions.length !== 1 ? 's' : ''}</span>
                   </div>
+
+                  {/* Bulk start-page control — skip cover pages for ALL PDFs at once */}
+                  {sessions.length > 1 && (
+                    <div className="bg-muted/60 border border-border rounded-lg px-3 py-2 mb-2 flex items-center gap-2">
+                      <span className="text-[11px] text-muted-foreground whitespace-nowrap">All PDFs start at page</span>
+                      <input
+                        type="number"
+                        min={1}
+                        defaultValue={sessions[0]?.startPage ?? 1}
+                        className="w-12 h-6 text-center text-xs bg-background rounded border border-border
+                                   text-foreground outline-none focus:ring-1 focus:ring-primary"
+                        onChange={e => {
+                          const n = parseInt(e.target.value);
+                          if (!isNaN(n) && n >= 1) handleBulkStartPageChange(n);
+                        }}
+                      />
+                      <span className="text-[10px] text-muted-foreground/70">skip covers</span>
+                    </div>
+                  )}
+
                   <PDFCardList
                     sessions={sessions}
                     expandedId={activeTabId}
                     onToggle={openTab}
+                    onStartPageChange={handleStartPageChange}
                   />
                 </div>
               )}

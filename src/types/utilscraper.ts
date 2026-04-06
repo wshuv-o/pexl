@@ -24,6 +24,7 @@ export interface PDFSession {
   status: 'uploading' | 'processing' | 'ready' | 'extracted';
   highlights: Record<number, Highlight[]>;
   extractedData: ExtractedRow[];
+  startPage: number;         // first "content" page (1-based) — pages before this are cover pages
 }
 
 export interface Highlight {

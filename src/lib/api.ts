@@ -4,18 +4,117 @@ import { extractFromRegions } from './pdf-extract';
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000' ;
 
-// Strip emoji, dingbats, and decorative symbols from extracted text
+// Strip emoji, dingbats, decorative symbols, and hidden binary strings from extracted text
 function sanitizeValue(val: string | null | undefined): string | null {
   if (!val) return val ?? null;
   const cleaned = val
     .replace(/[^\p{L}\p{N}\p{P}\p{Z}\p{Sc}\p{Sm}]/gu, '')
+    .replace(/\b[01]{8,}\b/g, '')       // strip binary-encoded hidden numbers (8+ digits of only 0/1)
     .replace(/\s+/g, ' ')
     .trim();
   return cleaned || null;
 }
 
+// ---------------------------------------------------------------------------
+// Date normalisation for lease contracts and other date fields.
+//
+// Scanned PDFs frequently produce garbled date strings such as:
+//   "Ist.. day ofSeptember2025"  →  should become "09/01/2025"
+//   "3Oth day ofJune2026"        →  should become "06/30/2026"
+//
+// Steps:
+//  1. Fix common OCR digit↔letter swaps (I→1, O→0, l→1)
+//  2. Remove stray dots & scan noise
+//  3. Insert missing spaces between letters↔digits
+//  4. Strip ordinal suffixes (st, nd, rd, th) and filler words (day, of, the)
+//  5. Parse "D Month YYYY" or "Month D YYYY" into MM/DD/YYYY
+// ---------------------------------------------------------------------------
+const MONTH_MAP: Record<string, number> = {
+  january: 1, february: 2, march: 3, april: 4, may: 5, june: 6,
+  july: 7, august: 8, september: 9, october: 10, november: 11, december: 12,
+  jan: 1, feb: 2, mar: 3, apr: 4, jun: 6, jul: 7,
+  aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
+};
+
+function normalizeDateValue(raw: string): string {
+  let s = raw;
+
+  // --- OCR digit/letter fixes ---
+  s = s.replace(/\bIst\b/gi, '1st');
+  s = s.replace(/\bI(\d)/g, '1$1');        // "I5" → "15"
+  s = s.replace(/(\d)I\b/g, '$11');         // "2I" → "21"
+  s = s.replace(/\bl(\d)/g, '1$1');         // "l5" → "15"  (lowercase L)
+  s = s.replace(/(\d)l/g, '$11');           // "2l" → "21"
+  s = s.replace(/\bO(\d)/g, '0$1');         // "O5" → "05"
+  s = s.replace(/(\d)O/g, '$10');           // "3O" → "30"
+
+  // --- Remove stray dots (keep single dot in numeric dates like 01.15.2025) ---
+  s = s.replace(/\.{2,}/g, ' ');            // ".." or "..." → space
+  s = s.replace(/(?<=[a-zA-Z])\.(?=[a-zA-Z])/g, ' '); // dot between letters → space
+
+  // --- Insert missing spaces between letters and digits ---
+  s = s.replace(/([a-zA-Z])(\d)/g, '$1 $2');   // "September2025" → "September 2025"
+  s = s.replace(/(\d)([a-zA-Z])/g, '$1 $2');   // "15September"   → "15 September"
+
+  // --- Strip ordinal suffixes ---
+  s = s.replace(/(\d+)\s*(?:st|nd|rd|th)\b/gi, '$1');
+
+  // --- Strip filler words ---
+  s = s.replace(/\bday\b/gi, '');
+  s = s.replace(/\bof\b/gi, '');
+  s = s.replace(/\bthe\b/gi, '');
+
+  // --- Normalise whitespace ---
+  s = s.replace(/[,]+/g, ' ');
+  s = s.replace(/\s+/g, ' ').trim();
+
+  // --- Try to parse "D Month YYYY" or "Month D YYYY" ---
+  // Pattern A: "1 September 2025"
+  const patA = s.match(/^(\d{1,2})\s+([a-zA-Z]+)\s+(\d{4})$/);
+  if (patA) {
+    const month = MONTH_MAP[patA[2].toLowerCase()];
+    if (month) {
+      const day = parseInt(patA[1], 10);
+      return `${String(month).padStart(2, '0')}/${String(day).padStart(2, '0')}/${patA[3]}`;
+    }
+  }
+
+  // Pattern B: "September 1 2025"
+  const patB = s.match(/^([a-zA-Z]+)\s+(\d{1,2})\s+(\d{4})$/);
+  if (patB) {
+    const month = MONTH_MAP[patB[1].toLowerCase()];
+    if (month) {
+      const day = parseInt(patB[2], 10);
+      return `${String(month).padStart(2, '0')}/${String(day).padStart(2, '0')}/${patB[3]}`;
+    }
+  }
+
+  // Pattern C: "Month YYYY" (no day — default to 1st)
+  const patC = s.match(/^([a-zA-Z]+)\s+(\d{4})$/);
+  if (patC) {
+    const month = MONTH_MAP[patC[1].toLowerCase()];
+    if (month) {
+      return `${String(month).padStart(2, '0')}/01/${patC[2]}`;
+    }
+  }
+
+  // If already in a numeric date format, return as-is (e.g. "09/01/2025", "9-1-2025")
+  return s;
+}
+
+const DATE_FIELDS = new Set([
+  'billing_date', 'statement_date', 'appraised_date',
+  'lease_date', 'lease_begin_date', 'lease_end_date',
+]);
+
 function sanitizeResults(results: ExtractedRow[]): ExtractedRow[] {
-  return results.map(r => ({ ...r, value: sanitizeValue(r.value) }));
+  return results.map(r => {
+    let value = sanitizeValue(r.value);
+    if (value && DATE_FIELDS.has(r.field)) {
+      value = normalizeDateValue(value);
+    }
+    return { ...r, value };
+  });
 }
 
 let backendOnline = false;

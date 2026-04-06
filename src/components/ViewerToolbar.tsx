@@ -3,6 +3,7 @@ import {
   ChevronLeft, ChevronRight, ZoomIn, ZoomOut,
   MousePointer2, Square, Eraser, Loader2,
   CopyPlus, Files, Trash2, ListChecks, ChevronDown, Search,
+  RotateCw, RotateCcw, SlidersHorizontal,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -13,6 +14,7 @@ import type { ViewerTool } from '@/types/utilscraper';
 interface ViewerToolbarProps {
   currentPage: number;
   totalPages: number;
+  startPage: number;
   zoom: number;
   tool: ViewerTool;
   isOcr: boolean;
@@ -30,6 +32,11 @@ interface ViewerToolbarProps {
   onApplyToPageRange: (from: number, to: number) => void;
   searchOpen: boolean;
   onSearchToggle: () => void;
+  // Rotation
+  rotation: number;
+  fineRotation: number;
+  onRotate: (dir: 'cw' | 'ccw') => void;
+  onFineRotationChange: (deg: number) => void;
 }
 
 const ZOOM_OPTIONS = [
@@ -42,12 +49,42 @@ const ZOOM_OPTIONS = [
 ];
 
 export default function ViewerToolbar({
-  currentPage, totalPages, zoom, tool, isOcr, hasHighlightsOnPage,
+  currentPage, totalPages, startPage, zoom, tool, isOcr, hasHighlightsOnPage,
   onPageChange, onZoomChange, onToolChange,
   onExtract, extracting, hasHighlights,
   onApplyToAllPages, onApplyToAllPdfs, onEraseAllPages, onApplyToPageRange,
   searchOpen, onSearchToggle,
+  rotation, fineRotation, onRotate, onFineRotationChange,
 }: ViewerToolbarProps) {
+  // Relative page numbering when startPage > 1 (cover pages skipped)
+  const hasOffset    = startPage > 1;
+  const contentPage  = currentPage - startPage + 1;  // can be 0 or negative for cover pages
+  const contentTotal = totalPages - startPage + 1;
+  const [fineOpen, setFineOpen] = useState(false);
+  const fineBtnRef = useRef<HTMLButtonElement>(null);
+  const finePopRef = useRef<HTMLDivElement>(null);
+  const [finePos, setFinePos] = useState<{ top: number; left: number } | null>(null);
+
+  // Position the fine-rotation popover
+  useEffect(() => {
+    if (fineOpen && fineBtnRef.current) {
+      const r = fineBtnRef.current.getBoundingClientRect();
+      setFinePos({ top: r.bottom + 4, left: r.left - 40 });
+    }
+  }, [fineOpen]);
+
+  // Close on outside click
+  useEffect(() => {
+    if (!fineOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (finePopRef.current && !finePopRef.current.contains(e.target as Node) &&
+          fineBtnRef.current && !fineBtnRef.current.contains(e.target as Node)) {
+        setFineOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [fineOpen]);
 
   const toolBtn = (t: ViewerTool, icon: React.ReactNode, label: string) => (
     <Tooltip>
@@ -128,6 +165,26 @@ export default function ViewerToolbar({
         >
           <ChevronRight className="w-4 h-4" />
         </button>
+
+        {/* Relative content page indicator when startPage > 1 */}
+        {hasOffset && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className={`text-[11px] px-1.5 py-0.5 rounded-full font-medium ml-1 cursor-default ${
+                contentPage >= 1
+                  ? 'bg-primary/15 text-primary'
+                  : 'bg-amber-100 text-amber-700'
+              }`}>
+                {contentPage >= 1 ? `P${contentPage}` : 'Cover'}
+              </span>
+            </TooltipTrigger>
+            <TooltipContent side="bottom" className="text-xs">
+              {contentPage >= 1
+                ? `Content page ${contentPage} of ${contentTotal}`
+                : `Cover page (before start page ${startPage})`}
+            </TooltipContent>
+          </Tooltip>
+        )}
       </div>
 
       {/* Separator */}
@@ -161,6 +218,95 @@ export default function ViewerToolbar({
         >
           <ZoomIn className="w-4 h-4" />
         </button>
+      </div>
+
+      {/* Separator */}
+      <div className="w-px h-5 bg-border shrink-0" />
+
+      {/* Rotation controls */}
+      <div className="flex items-center gap-0.5 shrink-0">
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              className="p-1.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+              onClick={() => onRotate('ccw')}
+              aria-label="Rotate 90° counter-clockwise"
+            >
+              <RotateCcw className="w-4 h-4" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom" className="text-xs">Rotate 90° CCW</TooltipContent>
+        </Tooltip>
+
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              className="p-1.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+              onClick={() => onRotate('cw')}
+              aria-label="Rotate 90° clockwise"
+            >
+              <RotateCw className="w-4 h-4" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom" className="text-xs">Rotate 90° CW</TooltipContent>
+        </Tooltip>
+
+        {/* Fine rotation (straighten skewed scans) */}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              ref={fineBtnRef}
+              className={`p-1.5 rounded transition-colors ${
+                fineRotation !== 0 || fineOpen
+                  ? 'bg-primary/15 text-primary'
+                  : 'text-muted-foreground hover:text-foreground hover:bg-muted'
+              }`}
+              onClick={() => setFineOpen(o => !o)}
+              aria-label="Fine rotation — straighten skewed scans"
+            >
+              <SlidersHorizontal className="w-4 h-4" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom" className="text-xs">
+            Straighten ({fineRotation !== 0 ? `${fineRotation > 0 ? '+' : ''}${fineRotation}°` : 'fine rotate'})
+          </TooltipContent>
+        </Tooltip>
+
+        {fineOpen && finePos && (
+          <div
+            ref={finePopRef}
+            className="fixed bg-card border border-border rounded-lg shadow-xl p-3 z-[100] w-56"
+            style={{ top: finePos.top, left: finePos.left }}
+          >
+            <p className="text-xs font-semibold text-foreground mb-2">
+              Straighten skewed scan
+            </p>
+            <input
+              type="range"
+              min={-15}
+              max={15}
+              step={0.5}
+              value={fineRotation}
+              onChange={e => onFineRotationChange(parseFloat(e.target.value))}
+              className="w-full h-1.5 bg-muted rounded-lg appearance-none cursor-pointer accent-primary"
+            />
+            <div className="flex items-center justify-between mt-1.5">
+              <span className="text-[11px] text-muted-foreground">-15°</span>
+              <span className="text-xs font-mono font-medium text-foreground">
+                {fineRotation > 0 ? '+' : ''}{fineRotation}°
+              </span>
+              <span className="text-[11px] text-muted-foreground">+15°</span>
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              className="w-full h-7 text-xs mt-2"
+              onClick={() => { onFineRotationChange(0); setFineOpen(false); }}
+            >
+              Reset to 0°
+            </Button>
+          </div>
+        )}
       </div>
 
       {/* Separator */}

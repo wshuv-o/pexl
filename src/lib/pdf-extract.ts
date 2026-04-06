@@ -23,6 +23,7 @@ export async function extractTextFromPdf(file: File): Promise<Map<number, string
     const text = content.items
       .map((item: any) => item.str)
       .join(' ')
+      .replace(/\b[01]{8,}\b/g, '')  // strip binary-encoded hidden numbers
       .replace(/\s+/g, ' ')
       .trim();
     pageTexts.set(i, text);
@@ -104,6 +105,60 @@ function isScannedPage(items: any[]): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Axis-aligned bounding box for a text item, accounting for rotation.
+//
+// pdfjs transform = [a, b, c, d, tx, ty]  (2×3 affine matrix)
+//   Non-rotated: a=scaleX, b=0, c=0, d=scaleY
+//   Rotated by θ: a=cos(θ)*s, b=sin(θ)*s, c=-sin(θ)*s, d=cos(θ)*s
+//   tx = x from left,  ty = y from page BOTTOM
+//
+// Some scanned-then-converted PDFs have slight rotation (< ~15°).
+// Without this, highlights and bounding boxes miss the text entirely.
+// ---------------------------------------------------------------------------
+interface ItemAABB {
+  left: number;   right: number;
+  top: number;    bottom: number;  // top-down (from page top)
+  centerX: number; centerY: number;
+  width: number;  height: number;
+}
+
+function itemAABB(item: any, pageHeight: number): ItemAABB {
+  const [a, b, , , tx, ty] = item.transform;
+  const w  = item.width  || item.str.length * 6;
+  const h  = item.height || Math.abs(item.transform[3]) || 12;
+  const angle = Math.atan2(b, a);
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+
+  // Four corners in PDF coords (origin = baseline-left, y-up)
+  //   Along width direction: (cos, sin)
+  //   Along height direction (upward from baseline): (-sin, cos)
+  const corners = [
+    { x: tx,                          y: ty },
+    { x: tx + w * cos,                y: ty + w * sin },
+    { x: tx - h * sin,                y: ty + h * cos },
+    { x: tx + w * cos - h * sin,      y: ty + w * sin + h * cos },
+  ];
+
+  const xs = corners.map(c => c.x);
+  const ys = corners.map(c => c.y);
+
+  const left   = Math.min(...xs);
+  const right  = Math.max(...xs);
+  // Convert to top-down Y (from page top)
+  const top    = pageHeight - Math.max(...ys);
+  const bottom = pageHeight - Math.min(...ys);
+
+  return {
+    left, right, top, bottom,
+    centerX: (left + right) / 2,
+    centerY: (top + bottom) / 2,
+    width: right - left,
+    height: bottom - top,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Auto-extract with highlight positions
 // ---------------------------------------------------------------------------
 export async function autoExtractWithHighlights(
@@ -133,6 +188,7 @@ export async function autoExtractWithHighlights(
     const fullText = content.items
       .map((item: any) => item.str)
       .join(' ')
+      .replace(/\b[01]{8,}\b/g, '')  // strip binary-encoded hidden numbers
       .replace(/\s+/g, ' ')
       .trim();
 
@@ -252,9 +308,9 @@ function findTextPosition(
   // Primary field values on utility bills always appear near the top of the page —
   // the mailing stub and footnotes at the bottom are duplicates we want to skip.
   const sorted = best.slice().sort((a, b) => {
-    const yA = pageHeight - a.transform[5]; // top-down Y for item A
-    const yB = pageHeight - b.transform[5]; // top-down Y for item B
-    return yA - yB;
+    const bbA = itemAABB(a, pageHeight);
+    const bbB = itemAABB(b, pageHeight);
+    return bbA.top - bbB.top;
   });
   // Take only the topmost item to get the tightest, most accurate box
   const selected = [sorted[0]];
@@ -262,18 +318,11 @@ function findTextPosition(
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
 
   for (const item of selected) {
-    const x = item.transform[4];
-    // transform[5] is distance from PAGE BOTTOM to text top edge
-    // So top-down Y (from page top) = pageHeight - transform[5]
-    const itemTop = pageHeight - item.transform[5];
-    const itemH = item.height || Math.abs(item.transform[3]) || 12;
-    const itemBottom = itemTop + itemH;
-    const itemRight = x + (item.width || item.str.length * 6);
-
-    minX = Math.min(minX, x);
-    minY = Math.min(minY, itemTop);
-    maxX = Math.max(maxX, itemRight);
-    maxY = Math.max(maxY, itemBottom);
+    const bb = itemAABB(item, pageHeight);
+    minX = Math.min(minX, bb.left);
+    minY = Math.min(minY, bb.top);
+    maxX = Math.max(maxX, bb.right);
+    maxY = Math.max(maxY, bb.bottom);
   }
 
   // Add small padding
@@ -361,25 +410,20 @@ export async function extractFromRegions(
         if (!item.str || !item.transform) continue;
         const str = item.str;
         if (!str.trim()) continue;
+        // Skip items that are purely binary-encoded hidden numbers
+        if (/^[01]{8,}$/.test(str.trim())) continue;
 
-        const itemX      = item.transform[4];
-        const itemH      = item.height || Math.abs(item.transform[3]) || 12;
-        const itemW      = item.width  || str.length * 6;
-        const itemTop    = pageHeight - item.transform[5];
-        const itemBottom = itemTop + itemH;
-        const itemRight  = itemX + itemW;
-
-        const itemCenterY = (itemTop + itemBottom) / 2;
+        const bb = itemAABB(item, pageHeight);
 
         // Row filter: center-Y must be inside highlight (prevents above/below row bleed)
-        const inRow = itemCenterY >= hlTop && itemCenterY <= hlBottom;
+        const inRow = bb.centerY >= hlTop && bb.centerY <= hlBottom;
 
         // Column filter: at least 40% of item width must overlap highlight horizontally
-        const xOverlap = Math.min(itemRight, hlRight) - Math.max(itemX, hlLeft);
-        const inCol = itemW > 0 && (xOverlap / itemW) >= 0.4;
+        const xOverlap = Math.min(bb.right, hlRight) - Math.max(bb.left, hlLeft);
+        const inCol = bb.width > 0 && (xOverlap / bb.width) >= 0.4;
 
         if (inRow && inCol) {
-          matchedItems.push({ x: itemX, y: itemTop, str });
+          matchedItems.push({ x: bb.left, y: bb.top, str });
         }
       }
 
@@ -398,6 +442,7 @@ export async function extractFromRegions(
         .replace(/\(\d+\)/g, '')   // strip (numeric) groups
         .replace(/[()]/g, '')       // strip any lone brackets
         .replace(/[^\p{L}\p{N}\p{P}\p{Z}\p{Sc}\p{Sm}]/gu, '') // strip emoji & decorative symbols, keep letters/numbers/punctuation/spaces/currency/math
+        .replace(/\b[01]{8,}\b/g, '')  // strip binary-encoded hidden numbers (8+ digits of only 0/1)
         .replace(/\s+/g, ' ')
         .trim() || null;
 
