@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import * as XLSX from 'xlsx';
+import * as XLSX from 'xlsx-js-style';
 import type { ExtractedRow } from '@/types/utilscraper';
 import { getFieldLabelsForType, DOCUMENT_TYPES, type DocumentType } from '@/types/utilscraper';
 
