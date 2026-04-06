@@ -3,7 +3,7 @@ import {
   ChevronLeft, ChevronRight, ZoomIn, ZoomOut,
   MousePointer2, Square, Eraser, Loader2,
   CopyPlus, Files, Trash2, ListChecks, ChevronDown, Search,
-  RotateCw, RotateCcw, SlidersHorizontal,
+  SlidersHorizontal,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -33,10 +33,10 @@ interface ViewerToolbarProps {
   searchOpen: boolean;
   onSearchToggle: () => void;
   // Rotation
-  rotation: number;
   fineRotation: number;
-  onRotate: (dir: 'cw' | 'ccw') => void;
   onFineRotationChange: (deg: number) => void;
+  // Start page
+  onStartPageChange: (startPage: number) => void;
 }
 
 const ZOOM_OPTIONS = [
@@ -54,12 +54,33 @@ export default function ViewerToolbar({
   onExtract, extracting, hasHighlights,
   onApplyToAllPages, onApplyToAllPdfs, onEraseAllPages, onApplyToPageRange,
   searchOpen, onSearchToggle,
-  rotation, fineRotation, onRotate, onFineRotationChange,
+  fineRotation, onFineRotationChange,
+  onStartPageChange,
 }: ViewerToolbarProps) {
   // Relative page numbering when startPage > 1 (cover pages skipped)
   const hasOffset    = startPage > 1;
   const contentPage  = currentPage - startPage + 1;  // can be 0 or negative for cover pages
   const contentTotal = totalPages - startPage + 1;
+
+  // Inline start-page editing (double-click the badge)
+  const [editingStartPage, setEditingStartPage] = useState(false);
+  const [startPageDraft, setStartPageDraft]     = useState(String(startPage));
+  const startPageInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (editingStartPage && startPageInputRef.current) {
+      startPageInputRef.current.focus();
+      startPageInputRef.current.select();
+    }
+  }, [editingStartPage]);
+
+  const commitStartPage = () => {
+    const n = parseInt(startPageDraft);
+    if (!isNaN(n) && n >= 1 && n <= totalPages) {
+      onStartPageChange(n);
+    }
+    setEditingStartPage(false);
+  };
   const [fineOpen, setFineOpen] = useState(false);
   const fineBtnRef = useRef<HTMLButtonElement>(null);
   const finePopRef = useRef<HTMLDivElement>(null);
@@ -166,22 +187,50 @@ export default function ViewerToolbar({
           <ChevronRight className="w-4 h-4" />
         </button>
 
-        {/* Relative content page indicator when startPage > 1 */}
-        {hasOffset && (
+        {/* Start page badge — double-click to set which page is "page 1" */}
+        {editingStartPage ? (
+          <input
+            ref={startPageInputRef}
+            type="number"
+            min={1}
+            max={totalPages}
+            value={startPageDraft}
+            onChange={e => setStartPageDraft(e.target.value)}
+            onBlur={commitStartPage}
+            onKeyDown={e => {
+              if (e.key === 'Enter') commitStartPage();
+              if (e.key === 'Escape') setEditingStartPage(false);
+            }}
+            className="w-12 h-5 text-center text-[11px] bg-background rounded border border-primary
+                       text-foreground outline-none ml-1"
+          />
+        ) : (
           <Tooltip>
             <TooltipTrigger asChild>
-              <span className={`text-[11px] px-1.5 py-0.5 rounded-full font-medium ml-1 cursor-default ${
-                contentPage >= 1
-                  ? 'bg-primary/15 text-primary'
-                  : 'bg-amber-100 text-amber-700'
-              }`}>
-                {contentPage >= 1 ? `P${contentPage}` : 'Cover'}
+              <span
+                className={`text-[11px] px-1.5 py-0.5 rounded-full font-medium ml-1 cursor-pointer select-none ${
+                  hasOffset
+                    ? contentPage >= 1
+                      ? 'bg-primary/15 text-primary'
+                      : 'bg-amber-100 text-amber-700'
+                    : 'bg-muted text-muted-foreground'
+                }`}
+                onDoubleClick={() => {
+                  setStartPageDraft(String(startPage));
+                  setEditingStartPage(true);
+                }}
+              >
+                {hasOffset
+                  ? contentPage >= 1 ? `P${contentPage}` : 'Cover'
+                  : 'P1'}
               </span>
             </TooltipTrigger>
-            <TooltipContent side="bottom" className="text-xs">
-              {contentPage >= 1
-                ? `Content page ${contentPage} of ${contentTotal}`
-                : `Cover page (before start page ${startPage})`}
+            <TooltipContent side="bottom" className="text-xs max-w-[200px]">
+              {hasOffset
+                ? contentPage >= 1
+                  ? `Content page ${contentPage} of ${contentTotal} (start=${startPage})`
+                  : `Cover page (before start page ${startPage})`
+                : 'Double-click to set start page (skip covers)'}
             </TooltipContent>
           </Tooltip>
         )}
@@ -223,35 +272,8 @@ export default function ViewerToolbar({
       {/* Separator */}
       <div className="w-px h-5 bg-border shrink-0" />
 
-      {/* Rotation controls */}
+      {/* Rotation — fine straighten only */}
       <div className="flex items-center gap-0.5 shrink-0">
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              className="p-1.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-              onClick={() => onRotate('ccw')}
-              aria-label="Rotate 90° counter-clockwise"
-            >
-              <RotateCcw className="w-4 h-4" />
-            </button>
-          </TooltipTrigger>
-          <TooltipContent side="bottom" className="text-xs">Rotate 90° CCW</TooltipContent>
-        </Tooltip>
-
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              className="p-1.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-              onClick={() => onRotate('cw')}
-              aria-label="Rotate 90° clockwise"
-            >
-              <RotateCw className="w-4 h-4" />
-            </button>
-          </TooltipTrigger>
-          <TooltipContent side="bottom" className="text-xs">Rotate 90° CW</TooltipContent>
-        </Tooltip>
-
-        {/* Fine rotation (straighten skewed scans) */}
         <Tooltip>
           <TooltipTrigger asChild>
             <button

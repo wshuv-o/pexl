@@ -491,6 +491,7 @@ export default function Index() {
                   onExtract={handleExtract}
                   onReExtract={handleReExtractHighlight}
                   onApplyToAllPdfs={handleApplyToAllPdfs}
+                  onStartPageChange={handleStartPageChange}
                   extracting={extracting}
                 />
               </div>

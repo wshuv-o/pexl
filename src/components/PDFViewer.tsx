@@ -16,6 +16,7 @@ interface PDFViewerProps {
   onExtract: () => void;
   onReExtract: (highlightId: string) => void;
   onApplyToAllPdfs: (sourceHighlights: Record<number, Highlight[]>) => void;
+  onStartPageChange: (sessionId: string, startPage: number) => void;
   extracting: boolean;
 }
 
@@ -25,11 +26,11 @@ export default function PDFViewer({
   onExtract,
   onReExtract,
   onApplyToAllPdfs,
+  onStartPageChange,
   extracting,
 }: PDFViewerProps) {
   const [currentPage, setCurrentPage]   = useState(session.startPage || 1);
   const [zoom, setZoom]                 = useState<number | null>(null); // null = not yet computed
-  const [rotation, setRotation]         = useState(0);     // coarse: 0, 90, 180, 270
   const [fineRotation, setFineRotation] = useState(0);     // fine: -15 … +15 degrees
   const [tool, setTool]                 = useState<ViewerTool>('cursor');
   const [drawing, setDrawing]           = useState<{
@@ -401,10 +402,9 @@ export default function PDFViewer({
           setSearchOpen(o => !o);
           if (searchOpen) { setSearchQuery(''); setSearchResults([]); }
         }}
-        rotation={rotation}
         fineRotation={fineRotation}
-        onRotate={(dir) => setRotation((rotation + (dir === 'cw' ? 90 : 270)) % 360)}
         onFineRotationChange={setFineRotation}
+        onStartPageChange={(sp) => onStartPageChange(session.id, sp)}
       />
 
       {/* Search bar */}
@@ -488,7 +488,6 @@ export default function PDFViewer({
               <Page
                 pageNumber={currentPage}
                 scale={zoom ?? 1}
-                rotate={rotation}
                 renderTextLayer={false}
                 renderAnnotationLayer={false}
               />
