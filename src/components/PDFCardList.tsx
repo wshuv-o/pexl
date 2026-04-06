@@ -48,7 +48,7 @@ export default function PDFCardList({ sessions, expandedId, onToggle, onStartPag
               aria-expanded={expanded}
               aria-disabled={isLoading}
               className={[
-                'w-full text-left rounded-lg px-3 py-2.5 flex items-center gap-2.5 transition-colors',
+                'w-full text-left rounded-lg px-3 py-2.5 flex items-center gap-2.5 transition-all duration-200',
                 isLoading  ? 'opacity-60 cursor-not-allowed bg-muted/50' :
                 expanded   ? 'bg-primary/10 border border-primary/20 cursor-pointer' :
                              'bg-muted/50 border border-transparent hover:border-border hover:bg-card cursor-pointer',

@@ -18,7 +18,7 @@ export default function ThemeToggle() {
       <TooltipTrigger asChild>
         <button
           className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground
-                     hover:bg-muted transition-colors"
+                     hover:bg-muted transition-all duration-200"
           onClick={() => setDark(d => !d)}
           aria-label={dark ? 'Switch to light mode' : 'Switch to dark mode'}
         >

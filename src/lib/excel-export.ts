@@ -185,8 +185,8 @@ function buildSheetForFile(
   const push = (cells: any[]) => { wsData.push(cells); return ri++; };
   const sc = (r: number, c: number, s: any) => styles.push({ row: r, col: c, style: s });
 
-  // Header row
-  const headerCells = allColumns.map(c => c.label);
+  // Header row — use field names (keys) as headers
+  const headerCells = allColumns.map(c => c.key);
   const r0 = push(headerCells);
   for (let c = 0; c < headerCells.length; c++) {
     sc(r0, c, hdr(headerColor.bg, headerColor.font));

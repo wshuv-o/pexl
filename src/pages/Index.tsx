@@ -277,8 +277,8 @@ export default function Index() {
                          flex flex-col transition-all duration-200 z-30 overflow-hidden`}>
 
         {/* Logo row */}
-        <div className={`flex items-center gap-2.5 px-4 h-14 border-b border-border shrink-0 ${navCollapsed ? 'justify-center' : ''}`}>
-          <img src="/favicon.ico" alt="Pexl" className="w-7 h-7 rounded-lg shrink-0" />
+        <div className={`flex items-center gap-2.5 h-14 border-b border-border shrink-0 ${navCollapsed ? 'justify-center px-2' : 'px-4'}`}>
+          <img src="/favicon.ico" alt="Pexl" className={`${navCollapsed ? 'w-5 h-5' : 'w-7 h-7'} rounded-lg shrink-0 transition-all duration-200`} />
           {!navCollapsed && <span className="font-bold text-foreground text-sm tracking-tight">Pexl</span>}
         </div>
 

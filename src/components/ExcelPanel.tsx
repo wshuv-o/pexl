@@ -61,7 +61,7 @@ export default function ExcelPanel({ data, filename, provider, onClose, onReExtr
             </p>
           </div>
           <button
-            className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+            className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-200"
             onClick={onClose}
             aria-label="Close panel"
           >
@@ -93,7 +93,7 @@ export default function ExcelPanel({ data, filename, provider, onClose, onReExtr
       <div className="bg-primary text-primary-foreground text-[11px] font-semibold flex shrink-0">
         {multiFile && (
           <div
-            className="w-28 shrink-0 px-3 py-2.5 cursor-pointer hover:bg-white/10 select-none transition-colors truncate"
+            className="w-28 shrink-0 px-3 py-2.5 cursor-pointer hover:bg-white/10 select-none transition-all duration-200 truncate"
             onClick={() => handleSort('filename')}
           >
             File {sortCol === 'filename' ? (sortAsc ? '↑' : '↓') : ''}
@@ -102,7 +102,7 @@ export default function ExcelPanel({ data, filename, provider, onClose, onReExtr
         {['Page', 'Field', 'Value'].map(col => (
           <div
             key={col}
-            className={`px-4 py-2.5 cursor-pointer hover:bg-white/10 select-none transition-colors
+            className={`px-4 py-2.5 cursor-pointer hover:bg-white/10 select-none transition-all duration-200
               ${col === 'Page' ? 'w-14 shrink-0' : col === 'Field' ? 'w-32 shrink-0' : 'flex-1'}`}
             onClick={() => handleSort(col.toLowerCase())}
           >
@@ -132,7 +132,7 @@ export default function ExcelPanel({ data, filename, provider, onClose, onReExtr
               return (
                 <div
                   key={i}
-                  className={`group/row flex items-stretch text-xs transition-colors
+                  className={`group/row flex items-stretch text-xs transition-all duration-200
                     ${i % 2 === 0 ? 'bg-card' : 'bg-muted/30'}
                     ${isNull ? 'border-l-2 border-l-destructive/40' : ''}
                     ${row.edited ? 'border-l-2 border-l-warning/60' : ''}

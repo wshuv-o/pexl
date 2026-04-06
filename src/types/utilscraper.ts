@@ -64,6 +64,7 @@ export type FieldLabel =
   // Appraisal fields
   | 'appraised_date'
   | 'appraised_as_is_value'
+  | 'property_type'
   // Lease contract fields
   | 'lease_date'
   | 'parties'
@@ -110,6 +111,7 @@ export const FIELD_LABELS: FieldLabelOption[] = [
   // ── Appraisal fields ──────────────────────────────────────────────
   { value: 'appraised_date',        label: 'Appraised Date',      color: '#7c3aed', bgColor: 'rgba(124,58,237,0.18)',  docTypes: ['appraisal'] },
   { value: 'appraised_as_is_value', label: 'Appraised As-Is Value', color: '#dc2626', bgColor: 'rgba(220,38,38,0.18)', docTypes: ['appraisal'] },
+  { value: 'property_type',        label: 'Property Type',          color: '#0891b2', bgColor: 'rgba(8,145,178,0.18)',  docTypes: ['appraisal'] },
   // ── Lease contract fields ───────────────────────────────────────────
   { value: 'lease_date',                label: 'Date of Lease',            color: '#7c3aed', bgColor: 'rgba(124,58,237,0.18)',  docTypes: ['lease_contract'] },
   { value: 'parties',                   label: 'Parties',                  color: '#1d4ed8', bgColor: 'rgba(29,78,216,0.18)',   docTypes: ['lease_contract'] },

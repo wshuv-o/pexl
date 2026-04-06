@@ -33,6 +33,7 @@ export default function PDFViewer({
   const [zoom, setZoom]                 = useState<number | null>(null);
   const [fineRotation, setFineRotation] = useState(0);
   const [tool, setTool]                 = useState<ViewerTool>('cursor');
+  const [drawingPage, setDrawingPage]   = useState<number | null>(null);
   const [drawing, setDrawing]           = useState<{
     startX: number; startY: number;
     x: number; y: number; w: number; h: number;
@@ -40,6 +41,7 @@ export default function PDFViewer({
   const [pickerPos, setPickerPos]       = useState<{
     x: number; y: number;
     rect: { x: number; y: number; w: number; h: number };
+    page: number;
   } | null>(null);
   const [showFirstHint, setShowFirstHint] = useState(true);
   const [numPages, setNumPages]         = useState<number | null>(null);
@@ -48,8 +50,9 @@ export default function PDFViewer({
   const [searchOpen, setSearchOpen]     = useState(false);
   const [searchQuery, setSearchQuery]   = useState('');
   const [searchResults, setSearchResults] = useState<{ x: number; y: number; width: number; height: number }[]>([]);
+  const [pdfLoaded, setPdfLoaded]       = useState(false);
 
-  const pageRef = useRef<HTMLDivElement>(null);
+  const pageRefs  = useRef<Record<number, HTMLDivElement | null>>({});
   const scrollRef = useRef<HTMLDivElement>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const pdfDocRef = useRef<any>(null);
@@ -85,21 +88,56 @@ export default function PDFViewer({
   useEffect(() => {
     if (pdfPageWidth && scrollRef.current && zoom === null) {
       const available = scrollRef.current.clientWidth - 24 - 48 - 24;
-      const fitZoom = Math.max(0.3, Math.min(2.5, available / pdfPageWidth));
+      const fitZoom = Math.max(0.3, Math.min(1.75, available / pdfPageWidth));
       setZoom(parseFloat(fitZoom.toFixed(2)));
     }
   }, [pdfPageWidth, zoom]);
 
-  // Clear drawing + picker when page changes
+  // Scroll to startPage after PDF renders
   useEffect(() => {
-    setDrawing(null);
-    setPickerPos(null);
-  }, [currentPage]);
+    if (!pdfLoaded) return;
+    const sp = session.startPage || 1;
+    if (sp > 1) {
+      const t = setTimeout(() => {
+        const el = pageRefs.current[sp];
+        if (el) el.scrollIntoView({ behavior: 'auto', block: 'start' });
+      }, 200);
+      return () => clearTimeout(t);
+    }
+  }, [pdfLoaded]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Track current page via scroll position
+  useEffect(() => {
+    const container = scrollRef.current;
+    if (!container || !pdfLoaded) return;
+
+    const handleScroll = () => {
+      const containerRect = container.getBoundingClientRect();
+      const containerMid  = containerRect.top + containerRect.height / 2;
+      let closest = currentPage;
+      let closestDist = Infinity;
+
+      for (const [pStr, el] of Object.entries(pageRefs.current)) {
+        if (!el) continue;
+        const r = el.getBoundingClientRect();
+        const mid = r.top + r.height / 2;
+        const dist = Math.abs(mid - containerMid);
+        if (dist < closestDist) {
+          closestDist = dist;
+          closest = Number(pStr);
+        }
+      }
+      if (closest !== currentPage) setCurrentPage(closest);
+    };
+
+    container.addEventListener('scroll', handleScroll, { passive: true });
+    return () => container.removeEventListener('scroll', handleScroll);
+  }, [pdfLoaded, currentPage]);
 
   // Global mouseUp fallback
   useEffect(() => {
     const handleGlobalMouseUp = () => {
-      if (drawing) setDrawing(null);
+      if (drawing) { setDrawing(null); setDrawingPage(null); }
     };
     window.addEventListener('mouseup', handleGlobalMouseUp);
     return () => window.removeEventListener('mouseup', handleGlobalMouseUp);
@@ -114,12 +152,11 @@ export default function PDFViewer({
   );
 
   // -----------------------------------------------------------------------
-  // Mouse drawing handlers
+  // Mouse drawing handlers — page-aware
   // -----------------------------------------------------------------------
-  const getRelativePos = useCallback((clientX: number, clientY: number) => {
-    if (!pageRef.current) return null;
-    const canvas = pageRef.current.querySelector('canvas');
-    const target = canvas ?? pageRef.current;
+  const getRelativePos = useCallback((clientX: number, clientY: number, pageEl: HTMLDivElement) => {
+    const canvas = pageEl.querySelector('canvas');
+    const target = canvas ?? pageEl;
     const rect   = target.getBoundingClientRect();
 
     if (fineRotation !== 0) {
@@ -145,18 +182,23 @@ export default function PDFViewer({
     };
   }, [fineRotation]);
 
-  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+  const handlePageMouseDown = useCallback((e: React.MouseEvent, pageNum: number) => {
     if (tool !== 'highlight') return;
-    const pos = getRelativePos(e.clientX, e.clientY);
+    const el = pageRefs.current[pageNum];
+    if (!el) return;
+    const pos = getRelativePos(e.clientX, e.clientY, el);
     if (!pos) return;
     e.preventDefault();
+    setDrawingPage(pageNum);
     setDrawing({ startX: pos.x, startY: pos.y, x: pos.x, y: pos.y, w: 0, h: 0 });
     setPickerPos(null);
   }, [tool, getRelativePos]);
 
   const handleMouseMove = useCallback((e: React.MouseEvent) => {
-    if (!drawing) return;
-    const pos = getRelativePos(e.clientX, e.clientY);
+    if (!drawing || drawingPage === null) return;
+    const el = pageRefs.current[drawingPage];
+    if (!el) return;
+    const pos = getRelativePos(e.clientX, e.clientY, el);
     if (!pos) return;
     setDrawing({
       ...drawing,
@@ -165,53 +207,62 @@ export default function PDFViewer({
       w: Math.abs(pos.x - drawing.startX),
       h: Math.abs(pos.y - drawing.startY),
     });
-  }, [drawing, getRelativePos]);
+  }, [drawing, drawingPage, getRelativePos]);
 
   const handleMouseUp = useCallback((e: React.MouseEvent) => {
-    if (!drawing) return;
+    if (!drawing || drawingPage === null) return;
     if (drawing.w < 0.01 || drawing.h < 0.005) {
-      setDrawing(null);
+      setDrawing(null); setDrawingPage(null);
       return;
     }
-    const pos = getRelativePos(e.clientX, e.clientY);
+    const el = pageRefs.current[drawingPage];
+    if (!el) { setDrawing(null); setDrawingPage(null); return; }
+    const pos = getRelativePos(e.clientX, e.clientY, el);
     const px  = pos?.px ?? e.clientX;
     const py  = pos?.py ?? e.clientY;
     setPickerPos({
-      x:    Math.min(px, (pageRef.current?.offsetWidth  ?? 600) - 160),
-      y:    Math.min(py, (pageRef.current?.offsetHeight ?? 800) - 200),
+      x:    Math.min(px, (el.offsetWidth  ?? 600) - 160),
+      y:    Math.min(py, (el.offsetHeight ?? 800) - 200),
       rect: { x: drawing.x, y: drawing.y, w: drawing.w, h: drawing.h },
+      page: drawingPage,
     });
     setDrawing(null);
-  }, [drawing, getRelativePos]);
+    setDrawingPage(null);
+  }, [drawing, drawingPage, getRelativePos]);
 
   // -----------------------------------------------------------------------
-  // Label selection
+  // Label selection — uses pickerPos.page
   // -----------------------------------------------------------------------
   const handleLabelSelect = useCallback(
     (field: FieldLabel, customLabel?: string) => {
       if (!pickerPos) return;
+      const pg = pickerPos.page;
       const hl: Highlight = {
         id:     `hl-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-        page:   currentPage,
+        page:   pg,
         field:  customLabel ?? field,
         x:      pickerPos.rect.x,
         y:      pickerPos.rect.y,
         width:  pickerPos.rect.w,
         height: pickerPos.rect.h,
       };
-      updateHighlights(currentPage, [...pageHighlights, hl]);
+      const existing = session.highlights[pg] ?? [];
+      updateHighlights(pg, [...existing, hl]);
       setPickerPos(null);
       setShowFirstHint(false);
     },
-    [pickerPos, currentPage, pageHighlights, updateHighlights],
+    [pickerPos, session.highlights, updateHighlights],
   );
 
   // -----------------------------------------------------------------------
   // Toolbar actions
   // -----------------------------------------------------------------------
   const handleDeleteHighlight = useCallback(
-    (id: string) => updateHighlights(currentPage, pageHighlights.filter(h => h.id !== id)),
-    [currentPage, pageHighlights, updateHighlights],
+    (id: string, pageNum: number) => {
+      const hls = session.highlights[pageNum] ?? [];
+      updateHighlights(pageNum, hls.filter(h => h.id !== id));
+    },
+    [session.highlights, updateHighlights],
   );
 
   const handleEraseAll = useCallback(
@@ -276,6 +327,13 @@ export default function PDFViewer({
     onApplyToAllPdfs(session.highlights);
   }, [allHighlights, session.highlights, onApplyToAllPdfs]);
 
+  // Toolbar page nav → scroll to page
+  const scrollToPage = useCallback((p: number) => {
+    const clamped = Math.max(1, Math.min(p, totalPages));
+    const el = pageRefs.current[clamped];
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, [totalPages]);
+
   // -----------------------------------------------------------------------
   // Text search
   // -----------------------------------------------------------------------
@@ -338,9 +396,7 @@ export default function PDFViewer({
     );
   }
 
-  const startPg  = session.startPage || 1;
-  const contentP = currentPage - startPg + 1;
-  const isCover  = startPg > 1 && currentPage < startPg;
+  const startPg = session.startPage || 1;
 
   return (
     <div className="flex flex-col h-full">
@@ -352,9 +408,7 @@ export default function PDFViewer({
         tool={tool}
         isOcr={currentPageInfo?.is_ocr ?? false}
         hasHighlightsOnPage={pageHighlights.length > 0}
-        onPageChange={(p) => {
-          setCurrentPage(Math.max(1, Math.min(p, totalPages)));
-        }}
+        onPageChange={scrollToPage}
         onZoomChange={setZoom}
         onToolChange={handleToolChange}
         onExtract={onExtract}
@@ -401,7 +455,13 @@ export default function PDFViewer({
         </div>
       )}
 
-      <div ref={scrollRef} className="flex-1 overflow-auto bg-viewer relative custom-scrollbar pr-6">
+      {/* Scrollable container — all pages like Acrobat */}
+      <div
+        ref={scrollRef}
+        className="flex-1 overflow-auto bg-viewer relative custom-scrollbar pr-6"
+        onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp}
+      >
         {/* First-use hint overlay */}
         {showFirstHint && tool === 'highlight' && allHighlights.length === 0 && (
           <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none">
@@ -411,103 +471,123 @@ export default function PDFViewer({
           </div>
         )}
 
-        <div className="flex justify-center p-6 pr-12">
-          <div
-            ref={pageRef}
-            className="relative shadow-2xl select-none"
-            style={{
-              display:    'inline-block',
-              lineHeight: 0,
-              cursor:     tool === 'highlight' ? 'crosshair' : 'default',
-              userSelect: tool === 'highlight' ? 'none' : 'auto',
-              transform:  fineRotation !== 0 ? `rotate(${fineRotation}deg)` : undefined,
-              transition: 'transform 0.3s ease',
-              opacity:    isCover ? 0.5 : 1,
-            }}
-            onMouseDown={handleMouseDown}
-            onMouseMove={handleMouseMove}
-            onMouseUp={handleMouseUp}
-          >
-            <Document
-              file={fileUrl}
-              onLoadSuccess={async (pdf) => {
-                setNumPages(pdf.numPages);
-                pdfDocRef.current = pdf;
-                if (!pdfPageWidth) {
-                  try {
-                    const page = await pdf.getPage(1);
-                    const vp = page.getViewport({ scale: 1 });
-                    setPdfPageWidth(vp.width);
-                  } catch { /* ignore */ }
-                }
-              }}
-              loading={
-                <div className="w-[600px] h-[800px] bg-white/10 animate-pulse rounded" />
-              }
-              error={
-                <div className="w-[600px] h-[400px] flex items-center justify-center text-red-400 text-sm bg-white rounded">
-                  Failed to load PDF
-                </div>
-              }
-            >
-              <Page
-                pageNumber={currentPage}
-                scale={zoom ?? 1}
-                renderTextLayer={false}
-                renderAnnotationLayer={false}
-              />
-            </Document>
-
-            <HighlightOverlay
-              highlights={pageHighlights}
-              drawing={drawing ? { x: drawing.x, y: drawing.y, w: drawing.w, h: drawing.h } : null}
-              onDelete={handleDeleteHighlight}
-              onReExtract={onReExtract}
-              tool={tool}
-            />
-
-            {/* Search result highlights */}
-            {searchResults.length > 0 && (
-              <div className="absolute inset-0 pointer-events-none overflow-hidden">
-                {searchResults.map((r, i) => (
-                  <div
-                    key={i}
-                    className="absolute rounded-sm"
-                    style={{
-                      left:            `${r.x * 100}%`,
-                      top:             `${r.y * 100}%`,
-                      width:           `${r.width * 100}%`,
-                      height:          `${r.height * 100}%`,
-                      backgroundColor: 'rgba(250, 204, 21, 0.4)',
-                      border:          '1px solid rgba(250, 204, 21, 0.8)',
-                      zIndex:          5,
-                    }}
-                  />
-                ))}
-              </div>
-            )}
-
-            {pickerPos && (
-              <FieldLabelPicker
-                x={pickerPos.x}
-                y={pickerPos.y}
-                docType={session.docType}
-                onSelect={handleLabelSelect}
-                onCancel={() => setPickerPos(null)}
-              />
-            )}
-
-            {/* Page number badge */}
-            <div
-              className="absolute top-2 right-2 z-20 text-[10px] font-medium px-2 py-0.5 rounded-md
-                         bg-black/50 text-white/80 backdrop-blur-sm select-none pointer-events-none
-                         transition-all duration-300"
-            >
-              {isCover ? 'Cover' : startPg > 1 ? `P${contentP}` : `${currentPage}`}
-              <span className="text-white/40 ml-1">/ {totalPages}</span>
+        <Document
+          file={fileUrl}
+          onLoadSuccess={async (pdf) => {
+            setNumPages(pdf.numPages);
+            pdfDocRef.current = pdf;
+            setPdfLoaded(true);
+            if (!pdfPageWidth) {
+              try {
+                const p = await pdf.getPage(1);
+                const vp = p.getViewport({ scale: 1 });
+                setPdfPageWidth(vp.width);
+              } catch { /* ignore */ }
+            }
+          }}
+          loading={
+            <div className="flex justify-center p-6">
+              <div className="w-[600px] h-[800px] bg-white/10 animate-pulse rounded" />
             </div>
+          }
+          error={
+            <div className="flex justify-center p-6">
+              <div className="w-[600px] h-[400px] flex items-center justify-center text-red-400 text-sm bg-white rounded">
+                Failed to load PDF
+              </div>
+            </div>
+          }
+        >
+          {/* Pages stacked vertically */}
+          <div className="flex flex-col items-center gap-6 p-6 pr-12">
+            {Array.from({ length: totalPages }, (_, i) => i + 1).map(pageNum => {
+              const pgHls   = session.highlights[pageNum] ?? [];
+              const contentP = pageNum - startPg + 1;
+              const isCover  = startPg > 1 && pageNum < startPg;
+
+              return (
+                <div
+                  key={pageNum}
+                  ref={el => { pageRefs.current[pageNum] = el; }}
+                  className="relative shadow-2xl select-none"
+                  style={{
+                    display:    'inline-block',
+                    lineHeight: 0,
+                    cursor:     tool === 'highlight' ? 'crosshair' : 'default',
+                    userSelect: tool === 'highlight' ? 'none' : 'auto',
+                    transform:  fineRotation !== 0 ? `rotate(${fineRotation}deg)` : undefined,
+                    transition: 'transform 0.3s ease',
+                    opacity:    isCover ? 0.5 : 1,
+                  }}
+                  onMouseDown={e => handlePageMouseDown(e, pageNum)}
+                >
+                  <Page
+                    pageNumber={pageNum}
+                    scale={zoom ?? 1}
+                    renderTextLayer={false}
+                    renderAnnotationLayer={false}
+                    loading={
+                      <div className="w-[600px] h-[800px] bg-white/5 animate-pulse rounded" />
+                    }
+                  />
+
+                  {/* Highlights for this page */}
+                  <HighlightOverlay
+                    highlights={pgHls}
+                    drawing={drawingPage === pageNum && drawing
+                      ? { x: drawing.x, y: drawing.y, w: drawing.w, h: drawing.h }
+                      : null}
+                    onDelete={id => handleDeleteHighlight(id, pageNum)}
+                    onReExtract={onReExtract}
+                    tool={tool}
+                  />
+
+                  {/* Search highlights (shown on current page) */}
+                  {pageNum === currentPage && searchResults.length > 0 && (
+                    <div className="absolute inset-0 pointer-events-none overflow-hidden">
+                      {searchResults.map((r, i) => (
+                        <div
+                          key={i}
+                          className="absolute rounded-sm"
+                          style={{
+                            left:            `${r.x * 100}%`,
+                            top:             `${r.y * 100}%`,
+                            width:           `${r.width * 100}%`,
+                            height:          `${r.height * 100}%`,
+                            backgroundColor: 'rgba(250, 204, 21, 0.4)',
+                            border:          '1px solid rgba(250, 204, 21, 0.8)',
+                            zIndex:          5,
+                          }}
+                        />
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Field label picker — on the page where drawing happened */}
+                  {pickerPos && pickerPos.page === pageNum && (
+                    <FieldLabelPicker
+                      x={pickerPos.x}
+                      y={pickerPos.y}
+                      docType={session.docType}
+                      onSelect={handleLabelSelect}
+                      onCancel={() => setPickerPos(null)}
+                    />
+                  )}
+
+                  {/* Page number badge */}
+                  <div
+                    className="absolute top-2 right-2 z-20 text-[10px] font-medium px-2 py-0.5 rounded-md
+                               bg-black/50 text-white/80 backdrop-blur-sm select-none pointer-events-none
+                               transition-all duration-300"
+                  >
+                    {isCover ? 'Cover' : startPg > 1 ? `P${contentP}` : `${pageNum}`}
+                    <span className="text-white/40 ml-1">/ {totalPages}</span>
+                  </div>
+                </div>
+              );
+            })}
           </div>
-        </div>
+        </Document>
 
         {allHighlights.length > 0 && (
           <HighlightLegend highlights={allHighlights} />

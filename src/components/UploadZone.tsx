@@ -51,7 +51,7 @@ export default function UploadZone({
         <div
           role="button"
           tabIndex={0}
-          className={`border border-dashed rounded-lg p-3 flex items-center gap-2.5 cursor-pointer transition-colors text-sm
+          className={`border border-dashed rounded-lg p-3 flex items-center gap-2.5 cursor-pointer transition-all duration-200 text-sm
             ${dragOver ? 'border-primary bg-primary/5' : 'border-border hover:border-primary/50 hover:bg-primary/5'}`}
           onClick={() => inputRef.current?.click()}
           onKeyDown={handleKeyDown}
@@ -95,7 +95,7 @@ export default function UploadZone({
         role="button"
         tabIndex={0}
         className={`border-2 border-dashed rounded-xl p-8 flex flex-col items-center justify-center
-                    cursor-pointer transition-colors text-center
+                    cursor-pointer transition-all duration-200 text-center
           ${dragOver ? 'border-primary bg-primary/5' : 'border-border hover:border-primary/50 hover:bg-primary/5'}`}
         onClick={() => inputRef.current?.click()}
         onKeyDown={handleKeyDown}
@@ -103,9 +103,9 @@ export default function UploadZone({
         onDragLeave={() => setDragOver(false)}
         onDrop={handleDrop}
       >
-        <div className={`w-12 h-12 rounded-full flex items-center justify-center mb-3 transition-colors
+        <div className={`w-12 h-12 rounded-full flex items-center justify-center mb-3 transition-all duration-200
           ${dragOver ? 'bg-primary/15' : 'bg-muted'}`}>
-          <Upload className={`w-6 h-6 transition-colors ${dragOver ? 'text-primary' : 'text-muted-foreground'}`} />
+          <Upload className={`w-6 h-6 transition-all duration-200 ${dragOver ? 'text-primary' : 'text-muted-foreground'}`} />
         </div>
         <p className="text-sm font-semibold text-foreground">Click to upload or drag and drop</p>
         <p className="text-xs text-muted-foreground mt-1">PDF files only · multiple allowed</p>
@@ -144,7 +144,7 @@ function DocTypeDropdown({ docType, onChange }: { docType: DocumentType; onChang
     <div className="relative">
       <button
         className="w-full flex items-center justify-between gap-2 px-3 py-2 rounded-lg border border-border
-                   bg-card text-xs font-medium text-foreground hover:border-primary/30 transition-colors"
+                   bg-card text-xs font-medium text-foreground hover:border-primary/30 transition-all duration-200"
         onClick={() => setOpen(o => !o)}
       >
         <span className="flex items-center gap-2">
@@ -159,7 +159,7 @@ function DocTypeDropdown({ docType, onChange }: { docType: DocumentType; onChang
           {DOCUMENT_TYPES.map(dt => (
             <button
               key={dt.value}
-              className={`w-full flex items-center gap-2 px-3 py-2 text-xs text-left transition-colors
+              className={`w-full flex items-center gap-2 px-3 py-2 text-xs text-left transition-all duration-200
                 ${docType === dt.value ? 'bg-muted font-semibold text-foreground' : 'text-muted-foreground hover:bg-muted/50'}`}
               onClick={() => { onChange(dt.value); setOpen(false); }}
             >
