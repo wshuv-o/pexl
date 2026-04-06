@@ -121,7 +121,7 @@ let backendOnline = false;
 
 async function checkBackend(): Promise<boolean> {
   try {
-    const res = await fetch(`${BACKEND_URL}/api/health`, {
+    const res = await fetch(`${BACKEND_URL}/api/utility/health`, {
       signal: AbortSignal.timeout(2000),
     });
     backendOnline = res.ok;
