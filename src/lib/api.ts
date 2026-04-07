@@ -129,17 +129,52 @@ function normalizeAmountValue(raw: string): string {
   // Remove $ and commas
   s = s.replace(/[$,]/g, '');
 
-  // Handle multiple dots: "12.12.1531" → keep only last dot as decimal
+  // Detect two amounts glued together: "32965.1416883.36"
+  // Pattern: a number with decimals immediately followed by another number with decimals
+  const concatMatch = s.match(/^(-?\d+\.\d{2})(\d+\.\d{2})$/);
+  if (concatMatch) {
+    // Take only the first amount
+    s = concatMatch[1];
+  }
+
+  // Also catch: "145693032624.10" where "14569.30" + "32624.10" lost the dot
+  // Heuristic: if there's exactly one dot and the digits before it are > 8 chars,
+  // it's likely two amounts concatenated. Extract the first valid amount.
+  const dotIdx = s.indexOf('.');
+  if (dotIdx >= 0) {
+    const beforeDot = s.slice(0, dotIdx);
+    const afterDot = s.slice(dotIdx + 1);
+    // If after the decimal there are more than 2 digits, something is wrong
+    // e.g. "160287633819.74" — the "74" is fine, but the integer part is suspiciously long
+    // Check if the raw string had spaces or multiple numbers
+    if (afterDot.length === 2 && beforeDot.length > 6) {
+      // Try to find a valid split: look for a .XX pattern in the original raw text
+      const amounts = raw.match(/-?\$?[\d,]+\.\d{2}/g);
+      if (amounts && amounts.length >= 1) {
+        const first = amounts[0].replace(/[$,]/g, '');
+        const num = parseFloat(first);
+        if (!isNaN(num)) return num.toFixed(2);
+      }
+    }
+  }
+
+  // Handle multiple dots: "12.12.1531" → two amounts, take the first
   const dotCount = (s.match(/\./g) || []).length;
   if (dotCount > 1) {
-    const lastDot = s.lastIndexOf('.');
-    // Remove all dots except the last one
-    s = s.slice(0, lastDot).replace(/\./g, '') + s.slice(lastDot);
+    // Try to extract the first valid amount
+    const firstAmount = s.match(/^(-?\d+\.\d{2})/);
+    if (firstAmount) {
+      s = firstAmount[1];
+    } else {
+      // Fallback: keep only last dot as decimal
+      const lastDot = s.lastIndexOf('.');
+      s = s.slice(0, lastDot).replace(/\./g, '') + s.slice(lastDot);
+    }
   }
 
   // Validate: should be a number now
   const num = parseFloat(s);
-  if (isNaN(num)) return raw; // can't parse — return original
+  if (isNaN(num)) return raw;
 
   // Format: always show 2 decimal places for money
   return num.toFixed(2);

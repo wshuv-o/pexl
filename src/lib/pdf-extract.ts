@@ -446,9 +446,29 @@ export async function extractFromRegions(
         return a.x - b.x;
       });
 
+      // For single-value fields (amounts, account numbers, dates), keep only
+      // the first line. A highlight that's slightly too tall captures the row
+      // below, producing glued values like "32965.1416883.36".
+      let finalItems = deduped;
+      if (deduped.length > 1) {
+        const firstY = deduped[0].y;
+        const firstLine = deduped.filter(i => Math.abs(i.y - firstY) <= 6);
+        const restLine  = deduped.filter(i => Math.abs(i.y - firstY) > 6);
+        // If there are items on a second line, check if the first line alone
+        // looks like a complete value. For amount/date/account fields this is
+        // almost always the case. Only keep multi-line if the first line is
+        // very short (< 3 chars) — that likely means it's a label prefix.
+        if (restLine.length > 0) {
+          const firstLineText = firstLine.map(i => i.str).join('').trim();
+          if (firstLineText.length >= 3) {
+            finalItems = firstLine;
+          }
+        }
+      }
+
       // Join tokens in reading order, then strip parenthetical reference numbers
       // e.g. "(0023051011425) 8303 32 009" → "8303 32 009"
-      const rawJoined = deduped.map(i => i.str).join(' ');
+      const rawJoined = finalItems.map(i => i.str).join(' ');
       const value = rawJoined
         .replace(/\(\d+\)/g, '')   // strip (numeric) groups
         .replace(/[()]/g, '')       // strip any lone brackets
