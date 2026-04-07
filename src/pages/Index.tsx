@@ -3,8 +3,9 @@ import { useState, useCallback, useMemo } from 'react';
 import { toast } from 'sonner';
 import {
   Upload, ChevronLeft, ChevronRight,
-  AlertTriangle, FileSearch, X,
+  AlertTriangle, FileSearch, X, ShieldCheck, LogOut,
 } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import UploadZone from '@/components/UploadZone';
 import PDFCardList from '@/components/PDFCardList';
 import ProcessingModal from '@/components/ProcessingModal';
@@ -17,7 +18,8 @@ import { processFile, extractRegions } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
 
 export default function Index() {
-  const { trackUsage, trackDownload } = useAuth();
+  const { user, trackUsage, trackDownload, logout } = useAuth();
+  const navigate = useNavigate();
   const [sessions, setSessions]                 = useState<PDFSession[]>([]);
   const [openTabs, setOpenTabs]                 = useState<string[]>([]);
   const [activeTabId, setActiveTabId]           = useState<string | null>(null);
@@ -415,8 +417,25 @@ export default function Index() {
               <button className="underline ml-1" onClick={() => setBackendDown(false)}>Dismiss</button>
             </div>
           )}
-          <div className="ml-auto">
+          <div className="ml-auto flex items-center gap-2">
+            {user?.roles.includes('admin') && (
+              <button
+                onClick={() => navigate('/admin')}
+                className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-all duration-200 px-2 py-1.5 rounded-lg hover:bg-muted"
+                title="Usage Dashboard"
+              >
+                <ShieldCheck className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Usage</span>
+              </button>
+            )}
             <ThemeToggle />
+            <button
+              onClick={() => { logout(); navigate('/login'); }}
+              className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-all duration-200 px-2 py-1.5 rounded-lg hover:bg-muted"
+              title="Sign out"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+            </button>
           </div>
         </header>
 

@@ -49,7 +49,7 @@ const Admin = () => {
 
   useEffect(() => {
     const token = localStorage.getItem("auth_token");
-    fetch(`${ODIN_API}/bankstatement/admin/usage`, {
+    fetch(`${ODIN_API}/pexl/admin/usage`, {
       headers: { Authorization: `Bearer ${token}` },
     })
       .then(r => {
@@ -89,7 +89,7 @@ const Admin = () => {
             </Button>
             <div>
               <h1 className="text-xl font-bold tracking-tight">Usage Dashboard</h1>
-              <p className="text-xs opacity-80 mt-0.5">All users · Bank Statement Scraper</p>
+              <p className="text-xs opacity-80 mt-0.5">All users · Pexl</p>
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -114,7 +114,7 @@ const Admin = () => {
             <StatCard icon={Users}     label="Active users"         value={totals.users} />
             <StatCard icon={Layers}    label="Total batches"        value={totals.batches} />
             <StatCard icon={FileText}  label="Files submitted"      value={totals.files} />
-            <StatCard icon={BarChart2} label="Statements extracted" value={totals.extracted} />
+            <StatCard icon={BarChart2} label="Values extracted"      value={totals.extracted} />
             <StatCard icon={Download}  label="Downloads"            value={totals.downloads} />
           </div>
         )}
