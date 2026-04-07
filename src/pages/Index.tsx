@@ -156,22 +156,22 @@ export default function Index() {
     let totalNull = 0;
 
     for (const sess of targets) {
-      const allHl = Object.values(sess.highlights).flat();
-      const needsExtraction = allHl.filter(
-        h => !h.isAutoExtracted && (h.extractedValue === undefined || h.extractedValue === null)
-      );
+      // Clear all previous extracted values — fresh extraction every time
+      const clearedHighlights: Record<number, Highlight[]> = {};
+      for (const [pageNum, pageHls] of Object.entries(sess.highlights)) {
+        clearedHighlights[Number(pageNum)] = pageHls.map(h => ({
+          ...h, extractedValue: undefined, confidence: undefined, wasOcr: undefined,
+        }));
+      }
+      const allHl = Object.values(clearedHighlights).flat();
 
       try {
-        let results: ExtractedRow[] = [];
-        if (needsExtraction.length > 0)
-          results = await extractRegions(sess.id, needsExtraction, sess.file!);
+        const results = await extractRegions(sess.id, allHl, sess.file!);
 
-        const newHighlights = { ...sess.highlights };
+        const newHighlights = { ...clearedHighlights };
         let idx = 0;
         for (const [pageNum, pageHls] of Object.entries(newHighlights)) {
           newHighlights[Number(pageNum)] = pageHls.map(h => {
-            if (h.isAutoExtracted && h.extractedValue != null) return h;
-            if (h.extractedValue !== undefined && h.extractedValue !== null) return h;
             const r = results[idx++];
             return r ? { ...h, extractedValue: r.value, confidence: r.confidence, wasOcr: r.wasOcr } : h;
           });
