@@ -107,11 +107,52 @@ const DATE_FIELDS = new Set([
   'lease_date', 'lease_begin_date', 'lease_end_date',
 ]);
 
+const AMOUNT_FIELDS = new Set([
+  'total_gas_bill', 'total_electricity_bill', 'total_internet_bill',
+  'total_phone_bill', 'total_water_bill', 'total_sewer_bill',
+  'total_water_sewer_bill', 'total_trash_bill',
+  'beginning_balance', 'ending_balance', 'total_credits', 'total_debits',
+  'appraised_as_is_value',
+  'security_deposit', 'rent_and_charges',
+  'onetime_concession_amount', 'monthly_discount', 'other_discount',
+]);
+
+// ---------------------------------------------------------------------------
+// Amount normalisation — ensures values like "$1,234.56" are clean.
+// Fixes OCR artifacts like "12.12.1531" (multiple decimals) by keeping
+// only the last dot as the decimal separator.
+// ---------------------------------------------------------------------------
+function normalizeAmountValue(raw: string): string {
+  // Strip everything except digits, dots, commas, minus, and $
+  let s = raw.replace(/[^0-9.,$-]/g, '').trim();
+
+  // Remove $ and commas
+  s = s.replace(/[$,]/g, '');
+
+  // Handle multiple dots: "12.12.1531" → keep only last dot as decimal
+  const dotCount = (s.match(/\./g) || []).length;
+  if (dotCount > 1) {
+    const lastDot = s.lastIndexOf('.');
+    // Remove all dots except the last one
+    s = s.slice(0, lastDot).replace(/\./g, '') + s.slice(lastDot);
+  }
+
+  // Validate: should be a number now
+  const num = parseFloat(s);
+  if (isNaN(num)) return raw; // can't parse — return original
+
+  // Format: always show 2 decimal places for money
+  return num.toFixed(2);
+}
+
 function sanitizeResults(results: ExtractedRow[]): ExtractedRow[] {
   return results.map(r => {
     let value = sanitizeValue(r.value);
     if (value && DATE_FIELDS.has(r.field)) {
       value = normalizeDateValue(value);
+    }
+    if (value && AMOUNT_FIELDS.has(r.field)) {
+      value = normalizeAmountValue(value);
     }
     return { ...r, value };
   });
