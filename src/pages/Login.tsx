@@ -4,10 +4,10 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardFooter, CardHeader } from "@/components/ui/card";
 import { useAuth } from "@/contexts/AuthContext";
-import { Loader2, Eye, EyeOff } from "lucide-react";
+import { Loader2, Eye, EyeOff, LogOut } from "lucide-react";
 
 const Login = () => {
-  const { login } = useAuth();
+  const { user, login, logout } = useAuth();
   const navigate = useNavigate();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -27,7 +27,20 @@ const Login = () => {
   };
 
   return (
-    <div className="min-h-screen bg-background flex items-center justify-center px-4">
+    <div className="min-h-screen bg-background flex items-center justify-center px-4 relative">
+
+      {/* Logout button — top right, only if already logged in */}
+      {user && (
+        <button
+          onClick={() => { logout(); }}
+          className="absolute top-4 right-4 flex items-center gap-1.5 text-xs text-muted-foreground
+                     hover:text-foreground transition-all duration-200 px-3 py-2 rounded-lg hover:bg-muted"
+        >
+          <LogOut className="w-3.5 h-3.5" />
+          Sign out
+        </button>
+      )}
+
       <div className="w-full max-w-sm">
 
         {/* Logo + title */}
@@ -60,7 +73,7 @@ const Login = () => {
                   onChange={e => setUsername(e.target.value)}
                   autoComplete="username"
                   autoFocus
-                  className="h-10"
+                  className="h-10 bg-muted text-foreground placeholder:text-muted-foreground"
                 />
               </div>
 
@@ -76,7 +89,7 @@ const Login = () => {
                     value={password}
                     onChange={e => setPassword(e.target.value)}
                     autoComplete="current-password"
-                    className="h-10 pr-10"
+                    className="h-10 pr-10 bg-muted text-foreground placeholder:text-muted-foreground"
                   />
                   <button
                     type="button"
