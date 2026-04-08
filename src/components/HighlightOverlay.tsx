@@ -1,4 +1,5 @@
-import { X, RotateCcw } from 'lucide-react';
+import { useState, useRef, useEffect } from 'react';
+import { X } from 'lucide-react';
 import type { Highlight, ViewerTool } from '@/types/utilscraper';
 import { getFieldConfig } from '@/types/utilscraper';
 
@@ -7,19 +8,88 @@ interface Props {
   drawing: { x: number; y: number; w: number; h: number } | null;
   onDelete: (id: string) => void;
   onReExtract: (id: string) => void;
+  onMove?: (id: string, newX: number, newY: number) => void;
   tool: ViewerTool;
 }
 
-// Confidence level → percentage shown in tooltip
 const CONFIDENCE_PCT: Record<string, number> = {
   high:   95,
   medium: 65,
   low:    25,
 };
 
-export default function HighlightOverlay({ highlights, drawing, onDelete, onReExtract, tool }: Props) {
+export default function HighlightOverlay({ highlights, drawing, onDelete, onMove, tool }: Props) {
+  // Track which highlight is being dragged, plus preview position and pointer offset
+  const [dragging, setDragging] = useState<{
+    id: string;
+    startX: number;   // highlight starting x (fraction)
+    startY: number;   // highlight starting y (fraction)
+    pointerX: number; // pointer start in px (client)
+    pointerY: number; // pointer start in px (client)
+    previewX: number; // live x during drag
+    previewY: number; // live y during drag
+  } | null>(null);
+
+  const overlayRef = useRef<HTMLDivElement>(null);
+
+  // Window-level listeners so dragging works even if cursor leaves the highlight
+  useEffect(() => {
+    if (!dragging) return;
+
+    const onMouseMove = (e: MouseEvent) => {
+      const overlay = overlayRef.current;
+      if (!overlay) return;
+      const rect = overlay.getBoundingClientRect();
+      const dxPx = e.clientX - dragging.pointerX;
+      const dyPx = e.clientY - dragging.pointerY;
+      const dxFrac = dxPx / rect.width;
+      const dyFrac = dyPx / rect.height;
+      setDragging(d => d ? {
+        ...d,
+        previewX: Math.max(0, Math.min(1, d.startX + dxFrac)),
+        previewY: Math.max(0, Math.min(1, d.startY + dyFrac)),
+      } : null);
+    };
+
+    const onMouseUp = () => {
+      setDragging(current => {
+        if (current && onMove) {
+          // Commit only if position actually changed
+          if (current.previewX !== current.startX || current.previewY !== current.startY) {
+            onMove(current.id, current.previewX, current.previewY);
+          }
+        }
+        return null;
+      });
+    };
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    };
+  }, [dragging, onMove]);
+
+  const handleBoxMouseDown = (e: React.MouseEvent, h: Highlight) => {
+    if (tool !== 'cursor' || !onMove) return;
+    // Don't start drag when clicking a button inside
+    if ((e.target as HTMLElement).closest('button')) return;
+    e.stopPropagation();
+    e.preventDefault();
+    setDragging({
+      id: h.id,
+      startX: h.x,
+      startY: h.y,
+      pointerX: e.clientX,
+      pointerY: e.clientY,
+      previewX: h.x,
+      previewY: h.y,
+    });
+  };
+
   return (
-    <div className="absolute inset-0 pointer-events-none overflow-hidden">
+    <div ref={overlayRef} className="absolute inset-0 pointer-events-none overflow-hidden">
       {highlights.filter(h => h.width > 0 && h.height > 0).map(h => {
         const cfg = getFieldConfig(h.field);
 
@@ -35,21 +105,30 @@ export default function HighlightOverlay({ highlights, drawing, onDelete, onReEx
         const pctColor = pct >= 90 ? '#22c55e' : pct >= 60 ? '#f59e0b' : '#ef4444';
         const pctText  = pct >= 90 ? '#86efac' : pct >= 60 ? '#fcd34d' : '#fca5a5';
 
+        // Use live drag position when this highlight is being dragged
+        const isDragging = dragging?.id === h.id;
+        const posX = isDragging ? dragging.previewX : h.x;
+        const posY = isDragging ? dragging.previewY : h.y;
+
         return (
           <div
             key={h.id}
             className={`absolute group ${tool === 'cursor' ? 'pointer-events-auto' : 'pointer-events-none'}`}
             style={{
-              left:            `${h.x * 100}%`,
-              top:             `${h.y * 100}%`,
+              left:            `${posX * 100}%`,
+              top:             `${posY * 100}%`,
               width:           `${h.width * 100}%`,
               height:          `${h.height * 100}%`,
               backgroundColor: cfg.bgColor,
               border:          `2px ${h.isAutoExtracted && h.wasOcr ? 'dashed' : 'solid'} ${cfg.color}`,
               borderRadius:    3,
-              zIndex:          10,
+              zIndex:          isDragging ? 40 : 10,
               opacity:         h.isAutoExtracted && h.wasOcr ? 0.75 : 1,
+              cursor:          tool === 'cursor' && onMove ? (isDragging ? 'grabbing' : 'move') : 'default',
+              transition:      isDragging ? 'none' : 'box-shadow 0.15s ease',
+              boxShadow:       isDragging ? `0 0 0 2px ${cfg.color}, 0 4px 12px rgba(0,0,0,0.2)` : undefined,
             }}
+            onMouseDown={e => handleBoxMouseDown(e, h)}
           >
             {/* Field label */}
             <span
@@ -79,25 +158,17 @@ export default function HighlightOverlay({ highlights, drawing, onDelete, onReEx
               </span>
             )}
 
-            {/* Hover action buttons — Re-extract + Delete */}
+            {/* Hover action button — Delete only */}
             {tool === 'cursor' && (
               <div
                 className="absolute right-0 flex gap-0.5
-                           opacity-0 group-hover:opacity-100 transition-opacity z-30"
+                           opacity-0 group-hover:opacity-100 transition-all duration-200 z-30"
                 style={{
                   ...(labelBelow
                     ? { top: 'calc(100% + 2px)' }
                     : { bottom: 'calc(100% + 2px)' }),
                 }}
               >
-                <button
-                  className="w-5 h-5 rounded flex items-center justify-center
-                             bg-blue-600 hover:bg-blue-700 transition-all duration-200"
-                  onClick={e => { e.stopPropagation(); onReExtract(h.id); }}
-                  title={`Re-extract ${cfg.label}`}
-                >
-                  <RotateCcw className="w-2.5 h-2.5 text-white" />
-                </button>
                 <button
                   className="w-5 h-5 rounded flex items-center justify-center
                              bg-red-500 hover:bg-red-600 transition-all duration-200"
@@ -110,7 +181,7 @@ export default function HighlightOverlay({ highlights, drawing, onDelete, onReEx
             )}
 
             {/* Value + accuracy tooltip */}
-            {hasValue && (
+            {hasValue && !isDragging && (
               <div
                 className="absolute left-0 z-50 hidden group-hover:flex flex-col gap-1
                            bg-gray-900 text-white text-[11px] rounded-md shadow-xl
@@ -123,7 +194,6 @@ export default function HighlightOverlay({ highlights, drawing, onDelete, onReEx
               >
                 <span className="font-semibold truncate">{h.extractedValue}</span>
 
-                {/* Accuracy bar + % */}
                 <div className="flex items-center gap-1.5 mt-0.5">
                   <div className="flex-1 h-1.5 bg-white/20 rounded-full overflow-hidden">
                     <div

@@ -257,6 +257,21 @@ export default function PDFViewer({
   // -----------------------------------------------------------------------
   // Toolbar actions
   // -----------------------------------------------------------------------
+  const handleMoveHighlight = useCallback(
+    (id: string, pageNum: number, newX: number, newY: number) => {
+      const hls = session.highlights[pageNum] ?? [];
+      const updated = hls.map(h =>
+        h.id === id
+          ? { ...h, x: newX, y: newY, extractedValue: undefined, confidence: undefined, wasOcr: undefined }
+          : h,
+      );
+      updateHighlights(pageNum, updated);
+      // Re-extract this specific highlight after a short delay so state settles
+      setTimeout(() => onReExtract(id), 50);
+    },
+    [session.highlights, updateHighlights, onReExtract],
+  );
+
   const handleDeleteHighlight = useCallback(
     (id: string, pageNum: number) => {
       const hls = session.highlights[pageNum] ?? [];
@@ -539,6 +554,7 @@ export default function PDFViewer({
                       : null}
                     onDelete={id => handleDeleteHighlight(id, pageNum)}
                     onReExtract={onReExtract}
+                    onMove={(id, x, y) => handleMoveHighlight(id, pageNum, x, y)}
                     tool={tool}
                   />
 
