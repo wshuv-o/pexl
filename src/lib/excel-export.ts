@@ -260,94 +260,109 @@ function flattenFileRows(rows: ExtractedRow[]): Record<string, string> {
 //
 // No formulas — just placed values from the extraction.
 // ---------------------------------------------------------------------------
-function buildBankStatementSheet(
-  fileMap: Map<string, ExtractedRow[]>,
-): XLSX.WorkSheet {
-  const headerColor   = HEADER_COLORS.bank_statement;
-  const propBlueBg    = 'D6E4F0';   // light blue for property header
-  const totalRowBg    = 'EEF2F7';   // light gray for total/average
+// Bank statement column headers (shared by all groups)
+const BANK_STMT_COLS = [
+  'Date',
+  'Deposits',
+  'Withdrawals',
+  'Unadjusted Balance',
+  'Adjusted Balance',
+  'Adjustments',
+  'Actual Deposits',
+  'T-12',
+  'Deposits vs. Op Stmt. Diff.',
+  'Comments',
+];
 
-  // Per-file flattened maps
-  const fileEntries: { name: string; map: Record<string, string> }[] = [];
-  for (const [name, rows] of fileMap.entries()) {
-    fileEntries.push({ name, map: flattenFileRows(rows) });
-  }
+// Group key — files with the same property + account go in the same table
+function groupKey(map: Record<string, string>): string {
+  const prop = (map.property_name || '').trim().toLowerCase();
+  const acct = (map.account_number || '').trim().toLowerCase();
+  return `${prop}|||${acct}`;
+}
 
-  // Pull property/account info from the first file that has them
-  const firstWithMeta = fileEntries.find(f => f.map.property_name || f.map.account_number);
+interface BankFileEntry {
+  name: string;
+  map: Record<string, string>;
+}
+
+// Append one property/account block (header + data + total + average) into wsData.
+// Returns the next available row index after the block.
+function appendBankStatementGroup(
+  wsData: any[][],
+  styles: { row: number; col: number; style: any }[],
+  startRow: number,
+  files: BankFileEntry[],
+): number {
+  const headerColor = HEADER_COLORS.bank_statement;
+  const propBlueBg  = 'D6E4F0';
+  const totalRowBg  = 'EEF2F7';
+  const NUM_COLS    = BANK_STMT_COLS.length;
+
+  let ri = startRow;
+  const push = (cells: any[]) => {
+    while (wsData.length <= ri) wsData.push([]);
+    wsData[ri] = cells;
+    return ri++;
+  };
+  const sc = (r: number, c: number, s: any) => styles.push({ row: r, col: c, style: s });
+
+  // Property/account meta from the first file in this group
+  const firstWithMeta = files.find(f => f.map.property_name || f.map.account_number) ?? files[0];
   const propertyName  = firstWithMeta?.map.property_name  || '';
   const accountNumber = firstWithMeta?.map.account_number || '';
 
-  // Numeric helpers for total/average rows
   const parseNum = (s: string) => {
     const n = parseFloat(s.replace(/[$,\s]/g, ''));
     return isNaN(n) ? null : n;
   };
-  const fmtMoney = (n: number) => `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const fmtMoney = (n: number) =>
+    `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
-  // Sort files by statement_date if present
-  fileEntries.sort((a, b) => {
+  // Sort by statement_date
+  const sorted = [...files].sort((a, b) => {
     const ad = new Date(a.map.statement_date || '').getTime();
     const bd = new Date(b.map.statement_date || '').getTime();
     if (isNaN(ad) || isNaN(bd)) return 0;
     return ad - bd;
   });
 
-  // Column layout
-  const COL_HEADERS = [
-    'Date',
-    'Deposits',
-    'Withdrawals',
-    'Unadjusted Balance',
-    'Adjusted Balance',
-    'Adjustments',
-    'Actual Deposits',
-    'T-12',
-    'Deposits vs. Op Stmt. Diff.',
-    'Comments',
+  // ── Row 0: Property header ──────────────────────────────────────────────
+  const propRow: any[] = [
+    'Property Name',
+    propertyName,
+    accountNumber ? `Account: ${accountNumber}` : '',
+    '', '', '', '', '', '', '',
   ];
-  const NUM_COLS = COL_HEADERS.length;
-
-  const wsData: any[][] = [];
-  const styles: { row: number; col: number; style: any }[] = [];
-  let ri = 0;
-  const push = (cells: any[]) => { wsData.push(cells); return ri++; };
-  const sc = (r: number, c: number, s: any) => styles.push({ row: r, col: c, style: s });
-
-  // ── Row 0: Property header (light blue) ─────────────────────────────────
-  const propRow: any[] = ['Property Name', propertyName, accountNumber ? `Account: ${accountNumber}` : '', '', '', '', '', '', '', ''];
   const r0 = push(propRow);
   for (let c = 0; c < NUM_COLS; c++) {
     sc(r0, c, cell(propBlueBg, true, 'left', 10));
   }
 
   // ── Row 1: Dark blue column headers ─────────────────────────────────────
-  const r1 = push(COL_HEADERS);
+  const r1 = push(BANK_STMT_COLS);
   for (let c = 0; c < NUM_COLS; c++) {
     sc(r1, c, hdr(headerColor.bg, headerColor.font));
   }
 
-  // ── Data rows (one per PDF) ─────────────────────────────────────────────
+  // ── Data rows ───────────────────────────────────────────────────────────
   let totalDeposits = 0;
   let totalWithdrawals = 0;
   let totalActualDeposits = 0;
   let depositCount = 0;
   let actualDepositCount = 0;
 
-  for (const { map } of fileEntries) {
-    const date         = map.statement_date    || '';
-    const depositsStr  = map.total_credits     || '';
-    const withdrawStr  = map.total_debits      || '';
-    const endingBal    = map.ending_balance    || '';
+  for (const { map } of sorted) {
+    const date        = map.statement_date  || '';
+    const depositsStr = map.total_credits   || '';
+    const withdrawStr = map.total_debits    || '';
+    const endingBal   = map.ending_balance  || '';
 
-    // Parse for totals
     const dn = parseNum(depositsStr);
     const wn = parseNum(withdrawStr);
-    if (dn !== null) { totalDeposits += dn; depositCount++; }
+    if (dn !== null) { totalDeposits += dn; depositCount++; totalActualDeposits += dn; actualDepositCount++; }
     if (wn !== null) { totalWithdrawals += wn; }
-    if (dn !== null) { totalActualDeposits += dn; actualDepositCount++; }
 
-    // Format money values for display
     const fmtVal = (s: string) => {
       const n = parseNum(s);
       return n !== null ? fmtMoney(n) : s;
@@ -357,13 +372,11 @@ function buildBankStatementSheet(
       date,
       depositsStr ? fmtVal(depositsStr) : '',
       withdrawStr ? fmtVal(withdrawStr) : '',
-      endingBal   ? fmtVal(endingBal)   : '',  // Unadjusted Balance
-      endingBal   ? fmtVal(endingBal)   : '',  // Adjusted Balance (mirror)
-      '',                                       // Adjustments
-      depositsStr ? fmtVal(depositsStr) : '',  // Actual Deposits
-      '',                                       // T-12
-      '',                                       // Deposits vs. Op Stmt. Diff.
-      '',                                       // Comments
+      endingBal   ? fmtVal(endingBal)   : '',
+      endingBal   ? fmtVal(endingBal)   : '',
+      '',
+      depositsStr ? fmtVal(depositsStr) : '',
+      '', '', '',
     ];
     const r = push(row);
     for (let c = 0; c < NUM_COLS; c++) {
@@ -401,6 +414,39 @@ function buildBankStatementSheet(
     sc(ar, c, cell(totalRowBg, true, c === 0 ? 'left' : 'right', 9));
   }
 
+  return ri;
+}
+
+function buildBankStatementSheet(
+  fileMap: Map<string, ExtractedRow[]>,
+): XLSX.WorkSheet {
+  const NUM_COLS = BANK_STMT_COLS.length;
+
+  // Flatten + group by property/account
+  const groups = new Map<string, BankFileEntry[]>();
+  for (const [name, rows] of fileMap.entries()) {
+    const entry: BankFileEntry = { name, map: flattenFileRows(rows) };
+    const key = groupKey(entry.map);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key)!.push(entry);
+  }
+
+  const wsData: any[][] = [];
+  const styles: { row: number; col: number; style: any }[] = [];
+  let nextRow = 0;
+
+  let first = true;
+  for (const files of groups.values()) {
+    if (!first) {
+      // Two blank separator rows between tables
+      wsData.push([]);
+      wsData.push([]);
+      nextRow += 2;
+    }
+    nextRow = appendBankStatementGroup(wsData, styles, nextRow, files);
+    first = false;
+  }
+
   const ws = XLSX.utils.aoa_to_sheet(wsData);
   applyStyles(ws, wsData, styles);
   ws['!cols'] = [
@@ -415,7 +461,8 @@ function buildBankStatementSheet(
     { wch: 26 },  // Deposits vs. Op Stmt. Diff
     { wch: 16 },  // Comments
   ];
-  ws['!freeze'] = { xSplit: 0, ySplit: 2 };
+  // Suppress unused-var warning for NUM_COLS in case future edits use it
+  void NUM_COLS;
   return ws;
 }
 
