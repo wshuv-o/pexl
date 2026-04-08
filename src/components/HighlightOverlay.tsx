@@ -6,9 +6,12 @@ import { getFieldConfig } from '@/types/utilscraper';
 interface Props {
   highlights: Highlight[];
   drawing: { x: number; y: number; w: number; h: number } | null;
+  selectionBox?: { x: number; y: number; w: number; h: number } | null;
+  selectedIds?: Set<string>;
   onDelete: (id: string) => void;
   onReExtract: (id: string) => void;
   onMove?: (id: string, newX: number, newY: number) => void;
+  onSelectToggle?: (id: string, additive: boolean) => void;
   tool: ViewerTool;
 }
 
@@ -18,7 +21,9 @@ const CONFIDENCE_PCT: Record<string, number> = {
   low:    25,
 };
 
-export default function HighlightOverlay({ highlights, drawing, onDelete, onMove, tool }: Props) {
+export default function HighlightOverlay({
+  highlights, drawing, selectionBox, selectedIds, onDelete, onMove, onSelectToggle, tool,
+}: Props) {
   // Track which highlight is being dragged, plus preview position and pointer offset
   const [dragging, setDragging] = useState<{
     id: string;
@@ -77,6 +82,21 @@ export default function HighlightOverlay({ highlights, drawing, onDelete, onMove
     if ((e.target as HTMLElement).closest('button')) return;
     e.stopPropagation();
     e.preventDefault();
+
+    // Handle selection: if not already selected, make this the only selection
+    // (unless shift/ctrl held). If already selected, keep selection as-is so
+    // the user can drag the group.
+    if (onSelectToggle) {
+      const alreadySelected = selectedIds?.has(h.id) ?? false;
+      if (!alreadySelected) {
+        onSelectToggle(h.id, e.shiftKey || e.ctrlKey || e.metaKey);
+      } else if (e.shiftKey || e.ctrlKey || e.metaKey) {
+        // Toggle off when modifier held on already-selected item
+        onSelectToggle(h.id, true);
+        return; // Don't start dragging
+      }
+    }
+
     setDragging({
       id: h.id,
       startX: h.x,
@@ -107,8 +127,23 @@ export default function HighlightOverlay({ highlights, drawing, onDelete, onMove
 
         // Use live drag position when this highlight is being dragged
         const isDragging = dragging?.id === h.id;
-        const posX = isDragging ? dragging.previewX : h.x;
-        const posY = isDragging ? dragging.previewY : h.y;
+        const isSelected = selectedIds?.has(h.id) ?? false;
+
+        // If the group is being dragged together, apply the live delta to
+        // every selected highlight for visual feedback.
+        let posX = h.x;
+        let posY = h.y;
+        if (isDragging) {
+          posX = dragging.previewX;
+          posY = dragging.previewY;
+        } else if (dragging && isSelected && selectedIds && selectedIds.has(dragging.id)) {
+          const deltaX = dragging.previewX - dragging.startX;
+          const deltaY = dragging.previewY - dragging.startY;
+          posX = Math.max(0, Math.min(1 - h.width,  h.x + deltaX));
+          posY = Math.max(0, Math.min(1 - h.height, h.y + deltaY));
+        }
+
+        const showSelectedRing = isSelected && !isDragging;
 
         return (
           <div
@@ -122,11 +157,15 @@ export default function HighlightOverlay({ highlights, drawing, onDelete, onMove
               backgroundColor: cfg.bgColor,
               border:          `2px ${h.isAutoExtracted && h.wasOcr ? 'dashed' : 'solid'} ${cfg.color}`,
               borderRadius:    3,
-              zIndex:          isDragging ? 40 : 10,
+              zIndex:          isDragging ? 40 : isSelected ? 15 : 10,
               opacity:         h.isAutoExtracted && h.wasOcr ? 0.75 : 1,
               cursor:          tool === 'cursor' && onMove ? (isDragging ? 'grabbing' : 'move') : 'default',
               transition:      isDragging ? 'none' : 'box-shadow 0.15s ease',
-              boxShadow:       isDragging ? `0 0 0 2px ${cfg.color}, 0 4px 12px rgba(0,0,0,0.2)` : undefined,
+              boxShadow:       isDragging
+                ? `0 0 0 2px ${cfg.color}, 0 4px 12px rgba(0,0,0,0.2)`
+                : showSelectedRing
+                  ? `0 0 0 2px #2563eb, 0 0 0 4px rgba(37,99,235,0.25)`
+                  : undefined,
             }}
             onMouseDown={e => handleBoxMouseDown(e, h)}
           >
@@ -230,6 +269,21 @@ export default function HighlightOverlay({ highlights, drawing, onDelete, onMove
             border:          '2px dashed #2563eb',
             borderRadius:    3,
             backgroundColor: 'rgba(37,99,235,0.08)',
+          }}
+        />
+      )}
+
+      {/* Rubber-band selection box */}
+      {selectionBox && (
+        <div
+          className="absolute pointer-events-none z-20"
+          style={{
+            left:            `${selectionBox.x * 100}%`,
+            top:             `${selectionBox.y * 100}%`,
+            width:           `${selectionBox.w * 100}%`,
+            height:          `${selectionBox.h * 100}%`,
+            border:          '1px dashed #2563eb',
+            backgroundColor: 'rgba(37,99,235,0.1)',
           }}
         />
       )}

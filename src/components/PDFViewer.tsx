@@ -43,6 +43,15 @@ export default function PDFViewer({
     rect: { x: number; y: number; w: number; h: number };
     page: number;
   } | null>(null);
+
+  // Rubber-band selection + multi-select
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [selectionBox, setSelectionBox] = useState<{
+    page: number;
+    startX: number; startY: number;
+    x: number; y: number; w: number; h: number;
+  } | null>(null);
+
   const [showFirstHint, setShowFirstHint] = useState(true);
   const [numPages, setNumPages]         = useState<number | null>(null);
   const [fileUrl, setFileUrl]           = useState<string | null>(null);
@@ -183,52 +192,115 @@ export default function PDFViewer({
   }, [fineRotation]);
 
   const handlePageMouseDown = useCallback((e: React.MouseEvent, pageNum: number) => {
-    if (tool !== 'highlight') return;
     const el = pageRefs.current[pageNum];
     if (!el) return;
     const pos = getRelativePos(e.clientX, e.clientY, el);
     if (!pos) return;
-    e.preventDefault();
-    setDrawingPage(pageNum);
-    setDrawing({ startX: pos.x, startY: pos.y, x: pos.x, y: pos.y, w: 0, h: 0 });
-    setPickerPos(null);
+
+    if (tool === 'highlight') {
+      e.preventDefault();
+      setDrawingPage(pageNum);
+      setDrawing({ startX: pos.x, startY: pos.y, x: pos.x, y: pos.y, w: 0, h: 0 });
+      setPickerPos(null);
+      return;
+    }
+
+    // Cursor mode — start rubber-band selection on empty space.
+    // Clicks on highlight boxes are stopped by HighlightOverlay, so this only
+    // fires when clicking empty PDF area.
+    if (tool === 'cursor') {
+      e.preventDefault();
+      // Clear prior selection unless user holds shift/ctrl
+      if (!e.shiftKey && !e.ctrlKey && !e.metaKey) setSelectedIds(new Set());
+      setSelectionBox({
+        page: pageNum,
+        startX: pos.x, startY: pos.y,
+        x: pos.x, y: pos.y, w: 0, h: 0,
+      });
+    }
   }, [tool, getRelativePos]);
 
   const handleMouseMove = useCallback((e: React.MouseEvent) => {
-    if (!drawing || drawingPage === null) return;
-    const el = pageRefs.current[drawingPage];
-    if (!el) return;
-    const pos = getRelativePos(e.clientX, e.clientY, el);
-    if (!pos) return;
-    setDrawing({
-      ...drawing,
-      x: Math.min(drawing.startX, pos.x),
-      y: Math.min(drawing.startY, pos.y),
-      w: Math.abs(pos.x - drawing.startX),
-      h: Math.abs(pos.y - drawing.startY),
-    });
-  }, [drawing, drawingPage, getRelativePos]);
-
-  const handleMouseUp = useCallback((e: React.MouseEvent) => {
-    if (!drawing || drawingPage === null) return;
-    if (drawing.w < 0.01 || drawing.h < 0.005) {
-      setDrawing(null); setDrawingPage(null);
+    // Highlight drawing
+    if (drawing && drawingPage !== null) {
+      const el = pageRefs.current[drawingPage];
+      if (!el) return;
+      const pos = getRelativePos(e.clientX, e.clientY, el);
+      if (!pos) return;
+      setDrawing({
+        ...drawing,
+        x: Math.min(drawing.startX, pos.x),
+        y: Math.min(drawing.startY, pos.y),
+        w: Math.abs(pos.x - drawing.startX),
+        h: Math.abs(pos.y - drawing.startY),
+      });
       return;
     }
-    const el = pageRefs.current[drawingPage];
-    if (!el) { setDrawing(null); setDrawingPage(null); return; }
-    const pos = getRelativePos(e.clientX, e.clientY, el);
-    const px  = pos?.px ?? e.clientX;
-    const py  = pos?.py ?? e.clientY;
-    setPickerPos({
-      x:    Math.min(px, (el.offsetWidth  ?? 600) - 160),
-      y:    Math.min(py, (el.offsetHeight ?? 800) - 200),
-      rect: { x: drawing.x, y: drawing.y, w: drawing.w, h: drawing.h },
-      page: drawingPage,
-    });
-    setDrawing(null);
-    setDrawingPage(null);
-  }, [drawing, drawingPage, getRelativePos]);
+
+    // Rubber-band selection
+    if (selectionBox) {
+      const el = pageRefs.current[selectionBox.page];
+      if (!el) return;
+      const pos = getRelativePos(e.clientX, e.clientY, el);
+      if (!pos) return;
+      setSelectionBox({
+        ...selectionBox,
+        x: Math.min(selectionBox.startX, pos.x),
+        y: Math.min(selectionBox.startY, pos.y),
+        w: Math.abs(pos.x - selectionBox.startX),
+        h: Math.abs(pos.y - selectionBox.startY),
+      });
+    }
+  }, [drawing, drawingPage, selectionBox, getRelativePos]);
+
+  const handleMouseUp = useCallback((e: React.MouseEvent) => {
+    // Finish highlight drawing
+    if (drawing && drawingPage !== null) {
+      if (drawing.w < 0.01 || drawing.h < 0.005) {
+        setDrawing(null); setDrawingPage(null);
+        return;
+      }
+      const el = pageRefs.current[drawingPage];
+      if (!el) { setDrawing(null); setDrawingPage(null); return; }
+      const pos = getRelativePos(e.clientX, e.clientY, el);
+      const px  = pos?.px ?? e.clientX;
+      const py  = pos?.py ?? e.clientY;
+      setPickerPos({
+        x:    Math.min(px, (el.offsetWidth  ?? 600) - 160),
+        y:    Math.min(py, (el.offsetHeight ?? 800) - 200),
+        rect: { x: drawing.x, y: drawing.y, w: drawing.w, h: drawing.h },
+        page: drawingPage,
+      });
+      setDrawing(null);
+      setDrawingPage(null);
+      return;
+    }
+
+    // Finish rubber-band selection — find intersecting highlights
+    if (selectionBox) {
+      const tooSmall = selectionBox.w < 0.005 && selectionBox.h < 0.005;
+      if (!tooSmall) {
+        const pageHls = session.highlights[selectionBox.page] ?? [];
+        const sx1 = selectionBox.x;
+        const sy1 = selectionBox.y;
+        const sx2 = selectionBox.x + selectionBox.w;
+        const sy2 = selectionBox.y + selectionBox.h;
+        const hit = pageHls.filter(h => {
+          const hx1 = h.x, hy1 = h.y;
+          const hx2 = h.x + h.width, hy2 = h.y + h.height;
+          // Intersection test
+          return hx1 < sx2 && hx2 > sx1 && hy1 < sy2 && hy2 > sy1;
+        }).map(h => h.id);
+
+        setSelectedIds(prev => {
+          const next = new Set(prev);
+          for (const id of hit) next.add(id);
+          return next;
+        });
+      }
+      setSelectionBox(null);
+    }
+  }, [drawing, drawingPage, selectionBox, session.highlights, getRelativePos]);
 
   // -----------------------------------------------------------------------
   // Label selection — uses pickerPos.page
@@ -260,15 +332,35 @@ export default function PDFViewer({
   const handleMoveHighlight = useCallback(
     (id: string, pageNum: number, newX: number, newY: number) => {
       const hls = session.highlights[pageNum] ?? [];
-      const updated = hls.map(h =>
-        h.id === id
-          ? { ...h, x: newX, y: newY, extractedValue: undefined, confidence: undefined, wasOcr: undefined }
-          : h,
-      );
+      const dragged = hls.find(h => h.id === id);
+      if (!dragged) return;
+      const deltaX = newX - dragged.x;
+      const deltaY = newY - dragged.y;
+
+      // If multiple highlights are selected and the dragged one is among them,
+      // move the whole group by the same delta.
+      const movingGroup = selectedIds.size > 1 && selectedIds.has(id);
+
+      const updated = hls.map(h => {
+        if (movingGroup && selectedIds.has(h.id)) {
+          return {
+            ...h,
+            x: Math.max(0, Math.min(1 - h.width,  h.x + deltaX)),
+            y: Math.max(0, Math.min(1 - h.height, h.y + deltaY)),
+            extractedValue: undefined, confidence: undefined, wasOcr: undefined,
+          };
+        }
+        if (h.id === id) {
+          return {
+            ...h, x: newX, y: newY,
+            extractedValue: undefined, confidence: undefined, wasOcr: undefined,
+          };
+        }
+        return h;
+      });
       updateHighlights(pageNum, updated);
-      // Position is updated and value cleared. User clicks Extract to re-run extraction.
     },
-    [session.highlights, updateHighlights],
+    [session.highlights, updateHighlights, selectedIds],
   );
 
   const handleDeleteHighlight = useCallback(
@@ -293,6 +385,8 @@ export default function PDFViewer({
         setTool(t);
       }
       setPickerPos(null);
+      setSelectedIds(new Set());
+      setSelectionBox(null);
     },
     [handleEraseAll],
   );
@@ -383,21 +477,43 @@ export default function PDFViewer({
     else setSearchResults([]);
   }, [currentPage]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Close picker / search on Escape, toggle search with Ctrl+F
+  // Close picker / search on Escape, toggle search with Ctrl+F, delete selected highlights
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      // Ignore if user is typing in an input
+      const target = e.target as HTMLElement | null;
+      const isEditing = target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable);
+
       if (e.key === 'Escape') {
         if (searchOpen) { setSearchOpen(false); setSearchQuery(''); setSearchResults([]); }
+        else if (selectedIds.size > 0) setSelectedIds(new Set());
         else setPickerPos(null);
+      }
+      if ((e.key === 'Delete' || e.key === 'Backspace') && !isEditing && selectedIds.size > 0) {
+        e.preventDefault();
+        // Delete all selected highlights across all pages
+        const nextHighlights: Record<number, Highlight[]> = {};
+        for (const [pageStr, hls] of Object.entries(session.highlights)) {
+          const kept = hls.filter(h => !selectedIds.has(h.id));
+          if (kept.length > 0) nextHighlights[Number(pageStr)] = kept;
+        }
+        onHighlightsChange(session.id, nextHighlights);
+        setSelectedIds(new Set());
       }
       if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
         e.preventDefault();
         setSearchOpen(o => !o);
       }
+      // Ctrl+A → select all highlights on current page
+      if ((e.ctrlKey || e.metaKey) && e.key === 'a' && !isEditing) {
+        e.preventDefault();
+        const ids = (session.highlights[currentPage] ?? []).map(h => h.id);
+        setSelectedIds(new Set(ids));
+      }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [searchOpen]);
+  }, [searchOpen, selectedIds, session.highlights, session.id, onHighlightsChange, currentPage]);
 
   // -----------------------------------------------------------------------
   // Render
@@ -551,9 +667,25 @@ export default function PDFViewer({
                     drawing={drawingPage === pageNum && drawing
                       ? { x: drawing.x, y: drawing.y, w: drawing.w, h: drawing.h }
                       : null}
+                    selectionBox={selectionBox && selectionBox.page === pageNum
+                      ? { x: selectionBox.x, y: selectionBox.y, w: selectionBox.w, h: selectionBox.h }
+                      : null}
+                    selectedIds={selectedIds}
                     onDelete={id => handleDeleteHighlight(id, pageNum)}
                     onReExtract={onReExtract}
                     onMove={(id, x, y) => handleMoveHighlight(id, pageNum, x, y)}
+                    onSelectToggle={(id, additive) => {
+                      setSelectedIds(prev => {
+                        const next = new Set(prev);
+                        if (additive) {
+                          if (next.has(id)) next.delete(id); else next.add(id);
+                        } else {
+                          next.clear();
+                          next.add(id);
+                        }
+                        return next;
+                      });
+                    }}
                     tool={tool}
                   />
 
