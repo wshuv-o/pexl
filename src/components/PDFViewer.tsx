@@ -266,10 +266,9 @@ export default function PDFViewer({
           : h,
       );
       updateHighlights(pageNum, updated);
-      // Re-extract this specific highlight after a short delay so state settles
-      setTimeout(() => onReExtract(id), 50);
+      // Position is updated and value cleared. User clicks Extract to re-run extraction.
     },
-    [session.highlights, updateHighlights, onReExtract],
+    [session.highlights, updateHighlights],
   );
 
   const handleDeleteHighlight = useCallback(
