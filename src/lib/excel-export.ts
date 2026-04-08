@@ -207,33 +207,106 @@ function buildSheetForFile(
 }
 
 // ---------------------------------------------------------------------------
-// Build a combined sheet — all PDFs as rows, file_name as the first column.
-// Used for bank_statement type so all statements live in one sheet.
+// Build a flat per-file value map from extracted rows.
+// Returns a single { fieldName: stringValue } map per file.
 // ---------------------------------------------------------------------------
-function buildCombinedSheet(
-  fileMap: Map<string, ExtractedRow[]>,
-  docType: DocumentType,
-): XLSX.WorkSheet {
-  const headerColor = HEADER_COLORS[docType];
+function flattenFileRows(rows: ExtractedRow[]): Record<string, string> {
+  const valMap: Record<string, string> = {};
+  const numAccum: Record<string, number> = {};
+  const numCount: Record<string, number> = {};
+  const strAccum: Record<string, string[]> = {};
 
-  // Field columns for this doc type
-  const fieldDefs = getFieldLabelsForType(docType).filter(f => f.value !== 'custom');
-
-  // Collect any custom fields used across all files
-  const knownFields = new Set(fieldDefs.map(f => f.value as string));
-  const customFields: string[] = [];
-  for (const rows of fileMap.values()) {
-    for (const row of rows) {
-      if (!knownFields.has(row.field) && !customFields.includes(row.field)) {
-        customFields.push(row.field);
+  for (const row of rows) {
+    if (!row.value) continue;
+    const num = parseNumericValue(row.value);
+    if (!isNaN(num)) {
+      numAccum[row.field] = (numAccum[row.field] || 0) + num;
+      numCount[row.field] = (numCount[row.field] || 0) + 1;
+    } else {
+      if (!strAccum[row.field]) strAccum[row.field] = [];
+      if (!strAccum[row.field].includes(row.value)) {
+        strAccum[row.field].push(row.value);
       }
     }
   }
 
-  const allColumns = [
-    ...fieldDefs.map(f => ({ key: f.value, label: f.label })),
-    ...customFields.map(f => ({ key: f, label: f })),
+  const allKeys = new Set([...Object.keys(numCount), ...Object.keys(strAccum)]);
+  for (const key of allKeys) {
+    const hasNum = numCount[key] > 0;
+    const hasStr = strAccum[key]?.length > 0;
+    if (hasNum && !hasStr) {
+      const sum = numAccum[key];
+      valMap[key] = sum % 1 === 0 ? String(sum) : sum.toFixed(2);
+    } else if (hasStr && !hasNum) {
+      valMap[key] = strAccum[key].join(' | ');
+    } else if (hasNum && hasStr) {
+      const sum = numAccum[key];
+      const sumStr = sum % 1 === 0 ? String(sum) : sum.toFixed(2);
+      valMap[key] = [sumStr, ...strAccum[key]].join(' | ');
+    }
+  }
+  return valMap;
+}
+
+// ---------------------------------------------------------------------------
+// Build the bank statement sheet — matches the screenshot layout:
+//
+//   Row 0: Property Name | <propName> | Account: <num>          (light blue)
+//   Row 1: Date | Deposits | Withdrawals | Unadj Bal | Adj Bal |
+//          Adjustments | Actual Deposits | T-12 |
+//          Deposits vs. Op Stmt. Diff. | Comments               (dark blue header)
+//   Row 2+: One row per PDF
+//   Total row | Average row
+//
+// No formulas — just placed values from the extraction.
+// ---------------------------------------------------------------------------
+function buildBankStatementSheet(
+  fileMap: Map<string, ExtractedRow[]>,
+): XLSX.WorkSheet {
+  const headerColor   = HEADER_COLORS.bank_statement;
+  const propBlueBg    = 'D6E4F0';   // light blue for property header
+  const totalRowBg    = 'EEF2F7';   // light gray for total/average
+
+  // Per-file flattened maps
+  const fileEntries: { name: string; map: Record<string, string> }[] = [];
+  for (const [name, rows] of fileMap.entries()) {
+    fileEntries.push({ name, map: flattenFileRows(rows) });
+  }
+
+  // Pull property/account info from the first file that has them
+  const firstWithMeta = fileEntries.find(f => f.map.property_name || f.map.account_number);
+  const propertyName  = firstWithMeta?.map.property_name  || '';
+  const accountNumber = firstWithMeta?.map.account_number || '';
+
+  // Numeric helpers for total/average rows
+  const parseNum = (s: string) => {
+    const n = parseFloat(s.replace(/[$,\s]/g, ''));
+    return isNaN(n) ? null : n;
+  };
+  const fmtMoney = (n: number) => `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+  // Sort files by statement_date if present
+  fileEntries.sort((a, b) => {
+    const ad = new Date(a.map.statement_date || '').getTime();
+    const bd = new Date(b.map.statement_date || '').getTime();
+    if (isNaN(ad) || isNaN(bd)) return 0;
+    return ad - bd;
+  });
+
+  // Column layout
+  const COL_HEADERS = [
+    'Date',
+    'Deposits',
+    'Withdrawals',
+    'Unadjusted Balance',
+    'Adjusted Balance',
+    'Adjustments',
+    'Actual Deposits',
+    'T-12',
+    'Deposits vs. Op Stmt. Diff.',
+    'Comments',
   ];
+  const NUM_COLS = COL_HEADERS.length;
 
   const wsData: any[][] = [];
   const styles: { row: number; col: number; style: any }[] = [];
@@ -241,65 +314,108 @@ function buildCombinedSheet(
   const push = (cells: any[]) => { wsData.push(cells); return ri++; };
   const sc = (r: number, c: number, s: any) => styles.push({ row: r, col: c, style: s });
 
-  // Header: file_name first, then all field columns
-  const headerCells = ['file_name', ...allColumns.map(c => c.key)];
-  const r0 = push(headerCells);
-  for (let c = 0; c < headerCells.length; c++) {
-    sc(r0, c, hdr(headerColor.bg, headerColor.font));
+  // ── Row 0: Property header (light blue) ─────────────────────────────────
+  const propRow: any[] = ['Property Name', propertyName, accountNumber ? `Account: ${accountNumber}` : '', '', '', '', '', '', '', ''];
+  const r0 = push(propRow);
+  for (let c = 0; c < NUM_COLS; c++) {
+    sc(r0, c, cell(propBlueBg, true, 'left', 10));
   }
 
-  // One row per file
-  for (const [filename, rows] of fileMap.entries()) {
-    // Build per-field value map for this file
-    const valMap: Record<string, string> = {};
-    const numAccum: Record<string, number> = {};
-    const numCount: Record<string, number> = {};
-    const strAccum: Record<string, string[]> = {};
+  // ── Row 1: Dark blue column headers ─────────────────────────────────────
+  const r1 = push(COL_HEADERS);
+  for (let c = 0; c < NUM_COLS; c++) {
+    sc(r1, c, hdr(headerColor.bg, headerColor.font));
+  }
 
-    for (const row of rows) {
-      if (!row.value) continue;
-      const num = parseNumericValue(row.value);
-      if (!isNaN(num)) {
-        numAccum[row.field] = (numAccum[row.field] || 0) + num;
-        numCount[row.field] = (numCount[row.field] || 0) + 1;
-      } else {
-        if (!strAccum[row.field]) strAccum[row.field] = [];
-        if (!strAccum[row.field].includes(row.value)) {
-          strAccum[row.field].push(row.value);
-        }
-      }
-    }
+  // ── Data rows (one per PDF) ─────────────────────────────────────────────
+  let totalDeposits = 0;
+  let totalWithdrawals = 0;
+  let totalActualDeposits = 0;
+  let depositCount = 0;
+  let actualDepositCount = 0;
 
-    for (const col of allColumns) {
-      const hasNum = numCount[col.key] > 0;
-      const hasStr = strAccum[col.key]?.length > 0;
-      if (hasNum && !hasStr) {
-        const sum = numAccum[col.key];
-        valMap[col.key] = sum % 1 === 0 ? String(sum) : sum.toFixed(2);
-      } else if (hasStr && !hasNum) {
-        valMap[col.key] = strAccum[col.key].join(' | ');
-      } else if (hasNum && hasStr) {
-        const sum = numAccum[col.key];
-        const sumStr = sum % 1 === 0 ? String(sum) : sum.toFixed(2);
-        valMap[col.key] = [sumStr, ...strAccum[col.key]].join(' | ');
-      }
-    }
+  for (const { map } of fileEntries) {
+    const date         = map.statement_date    || '';
+    const depositsStr  = map.total_credits     || '';
+    const withdrawStr  = map.total_debits      || '';
+    const endingBal    = map.ending_balance    || '';
 
-    const rowCells = [
-      filename.replace(/\.pdf$/i, ''),
-      ...allColumns.map(col => valMap[col.key] || ''),
+    // Parse for totals
+    const dn = parseNum(depositsStr);
+    const wn = parseNum(withdrawStr);
+    if (dn !== null) { totalDeposits += dn; depositCount++; }
+    if (wn !== null) { totalWithdrawals += wn; }
+    if (dn !== null) { totalActualDeposits += dn; actualDepositCount++; }
+
+    // Format money values for display
+    const fmtVal = (s: string) => {
+      const n = parseNum(s);
+      return n !== null ? fmtMoney(n) : s;
+    };
+
+    const row: any[] = [
+      date,
+      depositsStr ? fmtVal(depositsStr) : '',
+      withdrawStr ? fmtVal(withdrawStr) : '',
+      endingBal   ? fmtVal(endingBal)   : '',  // Unadjusted Balance
+      endingBal   ? fmtVal(endingBal)   : '',  // Adjusted Balance (mirror)
+      '',                                       // Adjustments
+      depositsStr ? fmtVal(depositsStr) : '',  // Actual Deposits
+      '',                                       // T-12
+      '',                                       // Deposits vs. Op Stmt. Diff.
+      '',                                       // Comments
     ];
-    const r = push(rowCells);
-    sc(r, 0, cell(C.whiteBg, true, 'left', 9));
-    for (let c = 1; c < rowCells.length; c++) {
-      sc(r, c, cell(C.whiteBg, false, 'left', 9));
+    const r = push(row);
+    for (let c = 0; c < NUM_COLS; c++) {
+      sc(r, c, cell(C.whiteBg, false, c === 0 ? 'left' : 'right', 9));
     }
+  }
+
+  // ── Total row ───────────────────────────────────────────────────────────
+  const totalRow: any[] = [
+    'Total',
+    fmtMoney(totalDeposits),
+    fmtMoney(totalWithdrawals),
+    '', '', '',
+    fmtMoney(totalActualDeposits),
+    '', '', '',
+  ];
+  const tr = push(totalRow);
+  for (let c = 0; c < NUM_COLS; c++) {
+    sc(tr, c, cell(totalRowBg, true, c === 0 ? 'left' : 'right', 9));
+  }
+
+  // ── Average row ─────────────────────────────────────────────────────────
+  const avgDeposits       = depositCount > 0       ? totalDeposits / depositCount             : 0;
+  const avgActualDeposits = actualDepositCount > 0 ? totalActualDeposits / actualDepositCount : 0;
+  const avgRow: any[] = [
+    'Average',
+    depositCount > 0       ? fmtMoney(avgDeposits)       : '',
+    '',
+    '', '', '',
+    actualDepositCount > 0 ? fmtMoney(avgActualDeposits) : '',
+    '', '', '',
+  ];
+  const ar = push(avgRow);
+  for (let c = 0; c < NUM_COLS; c++) {
+    sc(ar, c, cell(totalRowBg, true, c === 0 ? 'left' : 'right', 9));
   }
 
   const ws = XLSX.utils.aoa_to_sheet(wsData);
   applyStyles(ws, wsData, styles);
-  ws['!cols'] = [{ wch: 30 }, ...allColumns.map(() => ({ wch: 22 }))];
-  ws['!freeze'] = { xSplit: 1, ySplit: 1 };
+  ws['!cols'] = [
+    { wch: 14 },  // Date
+    { wch: 18 },  // Deposits
+    { wch: 18 },  // Withdrawals
+    { wch: 20 },  // Unadj Bal
+    { wch: 20 },  // Adj Bal
+    { wch: 14 },  // Adjustments
+    { wch: 18 },  // Actual Deposits
+    { wch: 12 },  // T-12
+    { wch: 26 },  // Deposits vs. Op Stmt. Diff
+    { wch: 16 },  // Comments
+  ];
+  ws['!freeze'] = { xSplit: 0, ySplit: 2 };
   return ws;
 }
 
@@ -331,7 +447,7 @@ export function exportToExcel(
 
   if (overallType === 'bank_statement') {
     // Combined single-sheet layout
-    const ws = buildCombinedSheet(fileMap, 'bank_statement');
+    const ws = buildBankStatementSheet(fileMap);
     XLSX.utils.book_append_sheet(wb, ws, 'Bank Statements');
   } else {
     // Per-file sheets (utility, appraisal, lease)
