@@ -92,7 +92,7 @@ export const FIELD_LABELS: FieldLabelOption[] = [
   { value: 'provider_name',         label: 'Provider Name',       color: '#1d4ed8', bgColor: 'rgba(29,78,216,0.18)',   docTypes: ['utility_bill'] },
   { value: 'property_name',         label: 'Property Name',       color: '#2563eb', bgColor: 'rgba(37,99,235,0.18)',   docTypes: ['utility_bill', 'bank_statement', 'appraisal'] },
   { value: 'account_number',        label: 'Account Number',      color: '#0891b2', bgColor: 'rgba(8,145,178,0.18)',   docTypes: ['utility_bill', 'bank_statement'] },
-  { value: 'address',               label: 'Address',             color: '#0284c7', bgColor: 'rgba(2,132,199,0.18)',   docTypes: ['utility_bill'] },
+  { value: 'address',               label: 'Address',             color: '#0284c7', bgColor: 'rgba(2,132,199,0.18)',   docTypes: ['utility_bill', 'bank_statement'] },
   { value: 'billing_date',          label: 'Billing Date',        color: '#7c3aed', bgColor: 'rgba(124,58,237,0.18)',  docTypes: ['utility_bill'] },
   { value: 'total_gas_bill',        label: 'Total Gas',           color: '#dc2626', bgColor: 'rgba(220,38,38,0.18)',   docTypes: ['utility_bill'] },
   { value: 'total_electricity_bill',label: 'Total Electricity',   color: '#d97706', bgColor: 'rgba(217,119,6,0.18)',   docTypes: ['utility_bill'] },

@@ -135,21 +135,14 @@ function buildSheetForFile(
     ...customFields.map(f => ({ key: f, label: f })),
   ];
 
-  // Group rows by page
-  const byPage = new Map<number, Record<string, string>>();
+  // Group rows by page, keeping ALL values per field (no merging)
+  const byPage = new Map<number, Record<string, string[]>>();
   for (const row of rows) {
     if (!row.value) continue;
     if (!byPage.has(row.page)) byPage.set(row.page, {});
     const pageMap = byPage.get(row.page)!;
-    // If the same field appears multiple times on the same page, join them
-    if (pageMap[row.field]) {
-      const existing = pageMap[row.field];
-      if (!existing.split(' | ').includes(row.value)) {
-        pageMap[row.field] = `${existing} | ${row.value}`;
-      }
-    } else {
-      pageMap[row.field] = row.value;
-    }
+    if (!pageMap[row.field]) pageMap[row.field] = [];
+    pageMap[row.field].push(row.value);
   }
 
   // Sort pages numerically
@@ -168,14 +161,30 @@ function buildSheetForFile(
     sc(r0, c, hdr(headerColor.bg, headerColor.font));
   }
 
-  // One row per page
+  // Explode each page into N rows where N = max value count across fields.
+  // Single-value fields repeat on every exploded row; multi-value fields show
+  // their Nth value on the Nth row (blank if exhausted).
   for (const page of sortedPages) {
     const pageMap = byPage.get(page)!;
-    const rowCells: any[] = [page, ...allColumns.map(col => pageMap[col.key] || '')];
-    const r = push(rowCells);
-    sc(r, 0, cell(C.whiteBg, true, 'center', 9));
-    for (let c = 1; c < rowCells.length; c++) {
-      sc(r, c, cell(C.whiteBg, false, 'left', 9));
+    const maxCount = Math.max(
+      1,
+      ...allColumns.map(col => pageMap[col.key]?.length ?? 0),
+    );
+    for (let i = 0; i < maxCount; i++) {
+      const rowCells: any[] = [
+        page,
+        ...allColumns.map(col => {
+          const arr = pageMap[col.key] ?? [];
+          if (arr.length === 0) return '';
+          if (arr.length === 1) return arr[0];           // repeat single-value
+          return i < arr.length ? arr[i] : '';            // multi-value: index in
+        }),
+      ];
+      const r = push(rowCells);
+      sc(r, 0, cell(C.whiteBg, true, 'center', 9));
+      for (let c = 1; c < rowCells.length; c++) {
+        sc(r, c, cell(C.whiteBg, false, 'left', 9));
+      }
     }
   }
 
@@ -263,37 +272,23 @@ function groupKey(map: Record<string, string>): string {
 
 interface BankFileEntry {
   name: string;
-  map: Record<string, string>;               // merged across pages (for property/account + grouping)
-  pages: Array<{ page: number; map: Record<string, string> }>;  // per-page maps for row output
+  map: Record<string, string>;                                          // merged across pages (for property/account + grouping)
+  pages: Array<{ page: number; multi: Record<string, string[]> }>;       // per-page multi-value maps
 }
 
-// Flatten rows belonging to a single page into a value map
-function flattenPageRows(rows: ExtractedRow[]): Record<string, string> {
-  const valMap: Record<string, string> = {};
+// Build pages for a file: group rows by page number, keeping all values per field
+function buildFilePages(rows: ExtractedRow[]): Array<{ page: number; multi: Record<string, string[]> }> {
+  const byPage = new Map<number, Record<string, string[]>>();
   for (const row of rows) {
     if (!row.value) continue;
-    if (valMap[row.field]) {
-      const existing = valMap[row.field];
-      if (!existing.split(' | ').includes(row.value)) {
-        valMap[row.field] = `${existing} | ${row.value}`;
-      }
-    } else {
-      valMap[row.field] = row.value;
-    }
-  }
-  return valMap;
-}
-
-// Build pages for a file: group rows by page number
-function buildFilePages(rows: ExtractedRow[]): Array<{ page: number; map: Record<string, string> }> {
-  const byPage = new Map<number, ExtractedRow[]>();
-  for (const row of rows) {
-    if (!byPage.has(row.page)) byPage.set(row.page, []);
-    byPage.get(row.page)!.push(row);
+    if (!byPage.has(row.page)) byPage.set(row.page, {});
+    const pageMap = byPage.get(row.page)!;
+    if (!pageMap[row.field]) pageMap[row.field] = [];
+    pageMap[row.field].push(row.value);
   }
   return Array.from(byPage.entries())
     .sort((a, b) => a[0] - b[0])
-    .map(([page, pageRows]) => ({ page, map: flattenPageRows(pageRows) }));
+    .map(([page, multi]) => ({ page, multi }));
 }
 
 // Append one property/account block (header + data + total + average) into wsData.
@@ -367,35 +362,58 @@ function appendBankStatementGroup(
     return n !== null ? fmtMoney(n) : s;
   };
 
+  // Used field keys for explosion across pages
+  const RELEVANT_KEYS = ['statement_date', 'total_credits', 'total_debits', 'ending_balance'];
+
   for (const file of sorted) {
-    // Each file contributes one row per extracted page.
-    // Fields missing on a particular page fall back to the file-level merged map.
-    const pages = file.pages.length > 0 ? file.pages : [{ page: 1, map: file.map }];
-    for (const { map } of pages) {
-      const getField = (key: string) => map[key] || file.map[key] || '';
-      const date        = getField('statement_date');
-      const depositsStr = getField('total_credits');
-      const withdrawStr = getField('total_debits');
-      const endingBal   = getField('ending_balance');
+    const pages = file.pages.length > 0
+      ? file.pages
+      : [{ page: 1, multi: {} as Record<string, string[]> }];
 
-      const dn = parseNum(depositsStr);
-      const wn = parseNum(withdrawStr);
-      if (dn !== null) { totalDeposits += dn; depositCount++; totalActualDeposits += dn; actualDepositCount++; }
-      if (wn !== null) { totalWithdrawals += wn; }
+    for (const { multi } of pages) {
+      // Determine how many display rows this page needs.
+      // If any relevant field has N>1 values, explode into N rows.
+      const maxCount = Math.max(
+        1,
+        ...RELEVANT_KEYS.map(k => multi[k]?.length ?? 0),
+      );
 
-      const row: any[] = [
-        date,
-        depositsStr ? fmtVal(depositsStr) : '',
-        withdrawStr ? fmtVal(withdrawStr) : '',
-        endingBal   ? fmtVal(endingBal)   : '',
-        endingBal   ? fmtVal(endingBal)   : '',
-        '',
-        depositsStr ? fmtVal(depositsStr) : '',
-        '', '', '',
-      ];
-      const r = push(row);
-      for (let c = 0; c < NUM_COLS; c++) {
-        sc(r, c, cell(C.whiteBg, false, c === 0 ? 'left' : 'right', 9));
+      // Helper: pick value for field at sub-row index i, falling back to
+      // single-value (repeats on every row) or file-level merged map.
+      const getField = (key: string, i: number): string => {
+        const arr = multi[key];
+        if (arr && arr.length > 0) {
+          if (arr.length === 1) return arr[0];
+          return i < arr.length ? arr[i] : '';
+        }
+        return file.map[key] || '';
+      };
+
+      for (let i = 0; i < maxCount; i++) {
+        const date        = getField('statement_date', i);
+        const depositsStr = getField('total_credits',  i);
+        const withdrawStr = getField('total_debits',   i);
+        const endingBal   = getField('ending_balance', i);
+
+        const dn = parseNum(depositsStr);
+        const wn = parseNum(withdrawStr);
+        if (dn !== null) { totalDeposits += dn; depositCount++; totalActualDeposits += dn; actualDepositCount++; }
+        if (wn !== null) { totalWithdrawals += wn; }
+
+        const row: any[] = [
+          date,
+          depositsStr ? fmtVal(depositsStr) : '',
+          withdrawStr ? fmtVal(withdrawStr) : '',
+          endingBal   ? fmtVal(endingBal)   : '',
+          endingBal   ? fmtVal(endingBal)   : '',
+          '',
+          depositsStr ? fmtVal(depositsStr) : '',
+          '', '', '',
+        ];
+        const r = push(row);
+        for (let c = 0; c < NUM_COLS; c++) {
+          sc(r, c, cell(C.whiteBg, false, c === 0 ? 'left' : 'right', 9));
+        }
       }
     }
   }
