@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
 import {
   ChevronLeft, ChevronRight, ZoomIn, ZoomOut,
   MousePointer2, Square, Eraser, Loader2,
@@ -29,7 +29,7 @@ interface ViewerToolbarProps {
   onApplyToAllPages: () => void;
   onApplyToAllPdfs: () => void;
   onEraseAllPages: () => void;
-  onApplyToPageRange: (from: number, to: number) => void;
+  onApplyToPageRange: (pages: number[]) => void;
   searchOpen: boolean;
   onSearchToggle: () => void;
   // Rotation
@@ -431,6 +431,28 @@ export default function ViewerToolbar({
 // ---------------------------------------------------------------------------
 // PageRangeButton — uses fixed positioning so it escapes overflow:auto
 // ---------------------------------------------------------------------------
+// Parse a page list string like "1,2,5,9-12" → [1, 2, 5, 9, 10, 11, 12]
+function parsePageList(input: string, totalPages: number): number[] {
+  const pages = new Set<number>();
+  const parts = input.split(',').map(s => s.trim()).filter(Boolean);
+  for (const part of parts) {
+    const rangeMatch = part.match(/^(\d+)\s*-\s*(\d+)$/);
+    if (rangeMatch) {
+      const a = parseInt(rangeMatch[1], 10);
+      const b = parseInt(rangeMatch[2], 10);
+      const lo = Math.min(a, b);
+      const hi = Math.max(a, b);
+      for (let p = lo; p <= hi; p++) {
+        if (p >= 1 && p <= totalPages) pages.add(p);
+      }
+    } else {
+      const n = parseInt(part, 10);
+      if (!isNaN(n) && n >= 1 && n <= totalPages) pages.add(n);
+    }
+  }
+  return Array.from(pages).sort((a, b) => a - b);
+}
+
 function PageRangeButton({
   disabled,
   totalPages,
@@ -438,16 +460,20 @@ function PageRangeButton({
 }: {
   disabled: boolean;
   totalPages: number;
-  onApply: (from: number, to: number) => void;
+  onApply: (pages: number[]) => void;
 }) {
   const [open, setOpen]           = useState(false);
-  const [rangeFrom, setRangeFrom] = useState('');
-  const [rangeTo, setRangeTo]     = useState('');
+  const [pageList, setPageList]   = useState('');
   const btnRef  = useRef<HTMLButtonElement>(null);
   const popRef  = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
 
-  // Position the popover below the button using fixed coords
+  // Live preview of parsed pages
+  const parsedPreview = useMemo(
+    () => pageList.trim() ? parsePageList(pageList, totalPages) : [],
+    [pageList, totalPages],
+  );
+
   useEffect(() => {
     if (open && btnRef.current) {
       const r = btnRef.current.getBoundingClientRect();
@@ -455,7 +481,6 @@ function PageRangeButton({
     }
   }, [open]);
 
-  // Close on outside click
   useEffect(() => {
     if (!open) return;
     const handler = (e: MouseEvent) => {
@@ -469,12 +494,11 @@ function PageRangeButton({
   }, [open]);
 
   const handleSubmit = () => {
-    const from = parseInt(rangeFrom) || 1;
-    const to   = parseInt(rangeTo)   || totalPages;
-    onApply(Math.max(1, Math.min(from, totalPages)), Math.max(1, Math.min(to, totalPages)));
+    const pages = parsePageList(pageList, totalPages);
+    if (pages.length === 0) return;
+    onApply(pages);
     setOpen(false);
-    setRangeFrom('');
-    setRangeTo('');
+    setPageList('');
   };
 
   return (
@@ -487,55 +511,45 @@ function PageRangeButton({
                        disabled:opacity-30 disabled:cursor-not-allowed transition-all duration-200 flex items-center gap-0.5"
             onClick={() => setOpen(o => !o)}
             disabled={disabled}
-            aria-label="Copy highlights to page range"
+            aria-label="Copy highlights to specific pages"
           >
             <ListChecks className="w-4 h-4" />
             <ChevronDown className="w-2.5 h-2.5" />
           </button>
         </TooltipTrigger>
-        <TooltipContent side="bottom" className="text-xs">Copy highlights to page range</TooltipContent>
+        <TooltipContent side="bottom" className="text-xs">Copy highlights to specific pages</TooltipContent>
       </Tooltip>
 
       {open && pos && (
         <div
           ref={popRef}
-          className="fixed bg-card border border-border rounded-lg shadow-xl p-3 z-[100] w-56"
+          className="fixed bg-card border border-border rounded-lg shadow-xl p-3 z-[100] w-64"
           style={{ top: pos.top, left: pos.left }}
         >
-          <p className="text-xs font-semibold text-foreground mb-2">Apply to page range</p>
-          <div className="flex items-center gap-2 mb-2">
-            <Input
-              type="number"
-              min={1}
-              max={totalPages}
-              placeholder="From"
-              className="h-7 text-xs flex-1"
-              value={rangeFrom}
-              autoFocus
-              onChange={e => setRangeFrom(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter') handleSubmit(); }}
-            />
-            <span className="text-xs text-muted-foreground">–</span>
-            <Input
-              type="number"
-              min={1}
-              max={totalPages}
-              placeholder="To"
-              className="h-7 text-xs flex-1"
-              value={rangeTo}
-              onChange={e => setRangeTo(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter') handleSubmit(); }}
-            />
-          </div>
+          <p className="text-xs font-semibold text-foreground mb-1">Apply to pages</p>
+          <p className="text-[10px] text-muted-foreground mb-2">
+            e.g. <span className="font-mono">1,3,5</span> or <span className="font-mono">2-6,8,10-12</span>
+          </p>
+          <Input
+            type="text"
+            placeholder="1, 2, 5, 9-12"
+            className="h-7 text-xs mb-2 font-mono"
+            value={pageList}
+            autoFocus
+            onChange={e => setPageList(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') handleSubmit(); }}
+          />
+          {parsedPreview.length > 0 && (
+            <p className="text-[10px] text-muted-foreground mb-2">
+              {parsedPreview.length} page{parsedPreview.length !== 1 ? 's' : ''}: {parsedPreview.slice(0, 8).join(', ')}{parsedPreview.length > 8 ? '…' : ''}
+            </p>
+          )}
           <div className="flex gap-1.5">
             <Button
               size="sm"
               variant="outline"
               className="flex-1 h-7 text-xs"
-              onClick={() => {
-                setRangeFrom('1');
-                setRangeTo(String(totalPages));
-              }}
+              onClick={() => setPageList(`1-${totalPages}`)}
             >
               All pages
             </Button>
@@ -543,6 +557,7 @@ function PageRangeButton({
               size="sm"
               className="flex-1 h-7 text-xs bg-green-600 hover:bg-green-700 text-white"
               onClick={handleSubmit}
+              disabled={parsedPreview.length === 0}
             >
               Apply
             </Button>

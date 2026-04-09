@@ -412,14 +412,15 @@ export default function PDFViewer({
     onHighlightsChange(session.id, next);
   }, [pageHighlights, session, totalPages, currentPage, onHighlightsChange]);
 
-  const handleApplyToPageRange = useCallback((from: number, to: number) => {
-    if (pageHighlights.length === 0) return;
+  const handleApplyToPageRange = useCallback((pages: number[]) => {
+    if (pageHighlights.length === 0 || pages.length === 0) return;
     const next = { ...session.highlights };
-    for (let p = from; p <= to; p++) {
+    const stamp = Date.now();
+    for (const p of pages) {
       if (p === currentPage) continue;
       next[p] = pageHighlights.map(h => ({
         ...h,
-        id: `hl-${Date.now()}-${p}-${Math.random().toString(36).slice(2, 6)}`,
+        id: `hl-${stamp}-${p}-${Math.random().toString(36).slice(2, 6)}`,
         page: p,
         extractedValue: undefined,
         confidence: undefined,
@@ -511,6 +512,36 @@ export default function PDFViewer({
         e.preventDefault();
         const ids = (session.highlights[currentPage] ?? []).map(h => h.id);
         setSelectedIds(new Set(ids));
+      }
+      // Ctrl+C → copy selected highlights to in-memory clipboard
+      if ((e.ctrlKey || e.metaKey) && e.key === 'c' && !isEditing && selectedIds.size > 0) {
+        e.preventDefault();
+        const allHls = Object.values(session.highlights).flat();
+        const copied = allHls
+          .filter(h => selectedIds.has(h.id))
+          .map(h => ({ ...h }));
+        clipboardRef.current = copied;
+      }
+      // Ctrl+V → paste highlights onto the current page (offset slightly)
+      if ((e.ctrlKey || e.metaKey) && e.key === 'v' && !isEditing && clipboardRef.current && clipboardRef.current.length > 0) {
+        e.preventDefault();
+        const offset = 0.02;
+        const stamp = Date.now();
+        const newHls: Highlight[] = clipboardRef.current.map((h, i) => ({
+          ...h,
+          id: `hl-${stamp}-${i}-${Math.random().toString(36).slice(2, 6)}`,
+          page: currentPage,
+          x: Math.min(1 - h.width,  Math.max(0, h.x + offset)),
+          y: Math.min(1 - h.height, Math.max(0, h.y + offset)),
+          extractedValue: undefined,
+          confidence: undefined,
+          wasOcr: undefined,
+        }));
+
+        const existing = session.highlights[currentPage] ?? [];
+        const next = { ...session.highlights, [currentPage]: [...existing, ...newHls] };
+        onHighlightsChange(session.id, next);
+        setSelectedIds(new Set(newHls.map(h => h.id)));
       }
     };
     window.addEventListener('keydown', handler);
