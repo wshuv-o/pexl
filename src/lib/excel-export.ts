@@ -481,8 +481,109 @@ function buildBankStatementSheet(
 }
 
 // ---------------------------------------------------------------------------
+// Build a stacked-tables sheet — one table per PDF on a single sheet.
+// Used for appraisal and lease contract exports.
+// ---------------------------------------------------------------------------
+function buildStackedTablesSheet(
+  fileMap: Map<string, ExtractedRow[]>,
+  docType: DocumentType,
+  fileLabelBg: string,
+): XLSX.WorkSheet {
+  const headerColor = HEADER_COLORS[docType];
+
+  // Field columns for this doc type (excluding 'custom')
+  const fieldDefs = getFieldLabelsForType(docType).filter(f => f.value !== 'custom');
+
+  // Collect any custom fields used across all files
+  const knownFields = new Set(fieldDefs.map(f => f.value as string));
+  const customFields: string[] = [];
+  for (const rows of fileMap.values()) {
+    for (const row of rows) {
+      if (!knownFields.has(row.field) && !customFields.includes(row.field)) {
+        customFields.push(row.field);
+      }
+    }
+  }
+
+  const allColumns = [
+    ...fieldDefs.map(f => ({ key: f.value, label: f.label })),
+    ...customFields.map(f => ({ key: f, label: f })),
+  ];
+
+  const wsData: any[][] = [];
+  const styles: { row: number; col: number; style: any }[] = [];
+  let ri = 0;
+  const push = (cells: any[]) => { wsData.push(cells); return ri++; };
+  const sc = (r: number, c: number, s: any) => styles.push({ row: r, col: c, style: s });
+
+  const totalCols = 1 + allColumns.length; // page + fields
+
+  let first = true;
+  for (const [filename, rows] of fileMap.entries()) {
+    if (!first) {
+      // Blank separator row between tables
+      wsData.push([]);
+      ri++;
+    }
+    first = false;
+
+    // ── File header row (light purple) ────────────────────────────────────
+    const cleanName = filename.replace(/\.pdf$/i, '');
+    const fileRow = [`File: ${cleanName}`, ...Array(totalCols - 1).fill('')];
+    const fr = push(fileRow);
+    for (let c = 0; c < totalCols; c++) {
+      sc(fr, c, cell(fileLabelBg, true, 'left', 10));
+    }
+
+    // ── Column header row (dark purple) ───────────────────────────────────
+    const headerCells = ['page', ...allColumns.map(c => c.key)];
+    const hr = push(headerCells);
+    for (let c = 0; c < totalCols; c++) {
+      sc(hr, c, hdr(headerColor.bg, headerColor.font));
+    }
+
+    // ── Group rows by page (preserving first-appearance order) ────────────
+    const byPage = new Map<number, Record<string, string[]>>();
+    const pageOrder: number[] = [];
+    for (const row of rows) {
+      if (!row.value) continue;
+      if (!byPage.has(row.page)) {
+        byPage.set(row.page, {});
+        pageOrder.push(row.page);
+      }
+      const pageMap = byPage.get(row.page)!;
+      if (!pageMap[row.field]) pageMap[row.field] = [];
+      pageMap[row.field].push(row.value);
+    }
+
+    // ── Data rows: one per page ───────────────────────────────────────────
+    for (const page of pageOrder) {
+      const pageMap = byPage.get(page)!;
+      const rowCells: any[] = [
+        page,
+        ...allColumns.map(col => {
+          const arr = pageMap[col.key] ?? [];
+          return arr.length > 0 ? arr[0] : '';
+        }),
+      ];
+      const r = push(rowCells);
+      sc(r, 0, cell(C.whiteBg, true, 'center', 9));
+      for (let c = 1; c < totalCols; c++) {
+        sc(r, c, cell(C.whiteBg, false, 'left', 9));
+      }
+    }
+  }
+
+  const ws = XLSX.utils.aoa_to_sheet(wsData);
+  applyStyles(ws, wsData, styles);
+  ws['!cols'] = [{ wch: 8 }, ...allColumns.map(() => ({ wch: 22 }))];
+  return ws;
+}
+
+// ---------------------------------------------------------------------------
 // Main export
 //   - bank_statement → single combined sheet, file_name as first column
+//   - appraisal      → single sheet, one table per PDF stacked vertically
 //   - other types    → one sheet per PDF
 // ---------------------------------------------------------------------------
 export function exportToExcel(
@@ -510,8 +611,16 @@ export function exportToExcel(
     // Combined single-sheet layout
     const ws = buildBankStatementSheet(fileMap);
     XLSX.utils.book_append_sheet(wb, ws, 'Bank Statements');
+  } else if (overallType === 'appraisal') {
+    // One sheet, one table per PDF stacked vertically
+    const ws = buildStackedTablesSheet(fileMap, 'appraisal', 'E5D6F0'); // light purple
+    XLSX.utils.book_append_sheet(wb, ws, 'Appraisals');
+  } else if (overallType === 'lease_contract') {
+    // One sheet, one table per PDF stacked vertically
+    const ws = buildStackedTablesSheet(fileMap, 'lease_contract', 'F5E0C5'); // light orange
+    XLSX.utils.book_append_sheet(wb, ws, 'Lease Contracts');
   } else {
-    // Per-file sheets (utility, appraisal, lease)
+    // Per-file sheets (utility)
     const usedNames = new Set<string>();
     for (const [filename, rows] of fileMap.entries()) {
       const docType   = detectDocType(rows);
