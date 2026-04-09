@@ -20,16 +20,48 @@ interface Props {
 
 const CONF_PCT: Record<string, number> = { high: 95, medium: 65, low: 25 };
 
-// Each displayed row: one (pdf, page) combination
+// PageRow holds ALL extracted values per field (arrays, so multi-value fields
+// like multiple statement_dates can explode into multiple display rows).
 interface PageRow {
   sessionId: string;
   filename: string;
   page: number;
-  cells: Record<string, ExtractedRow>; // keyed by field name
+  cellsMulti: Record<string, ExtractedRow[]>; // multiple values allowed per field
+}
+
+// DisplayRow is the actual rendered row after exploding multi-value PageRows.
+interface DisplayRow {
+  sessionId: string;
+  filename: string;
+  page: number;
+  subIndex: number;                          // which sub-row of the page this is
+  isFirstOfPage: boolean;
+  cells: Record<string, ExtractedRow | null>;
 }
 
 // Parse a value for numeric sorting (strips $, commas, whitespace)
 const parseForSort = (val: string): number => parseFloat(val.replace(/[$,\s]/g, ''));
+
+// Try parsing a value as a date — returns epoch ms or NaN
+const parseDateValue = (val: string): number => {
+  if (!val) return NaN;
+  // Try native Date first (handles MM/DD/YYYY, Month D YYYY, ISO)
+  const d = new Date(val);
+  if (!isNaN(d.getTime())) return d.getTime();
+  // Fallback: MM/DD/YYYY manual parse
+  const m = val.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$/);
+  if (m) {
+    const mo = parseInt(m[1], 10);
+    const dd = parseInt(m[2], 10);
+    let yy = parseInt(m[3], 10);
+    if (yy < 100) yy += 2000;
+    const d2 = new Date(yy, mo - 1, dd);
+    if (!isNaN(d2.getTime())) return d2.getTime();
+  }
+  return NaN;
+};
+
+const isDateField = (field: string): boolean => /date$/i.test(field);
 
 export default function ExcelPanel({
   data, filename, provider, onClose, onReExtract, onDataChange, multiFile, onDownload,
@@ -38,9 +70,8 @@ export default function ExcelPanel({
   const [sortCol, setSortCol]       = useState<string | null>(null);
   const [sortAsc, setSortAsc]       = useState(true);
 
-  // ── Build page rows grouped by PDF ─────────────────────────────────────
+  // ── Build page rows grouped by PDF (multi-value cells) ─────────────────
   const { groups, fieldColumns } = useMemo(() => {
-    // Preserve PDF order based on first appearance
     const pdfOrder: string[] = [];
     const pdfMap = new Map<string, { filename: string; pages: Map<number, PageRow> }>();
     const seenFields = new Set<string>();
@@ -58,10 +89,12 @@ export default function ExcelPanel({
           sessionId: row.sessionId || key,
           filename: row.filename || '',
           page: row.page,
-          cells: {},
+          cellsMulti: {},
         });
       }
-      pdf.pages.get(row.page)!.cells[row.field] = row;
+      const pageRow = pdf.pages.get(row.page)!;
+      if (!pageRow.cellsMulti[row.field]) pageRow.cellsMulti[row.field] = [];
+      pageRow.cellsMulti[row.field].push(row);
 
       if (!seenFields.has(row.field)) {
         seenFields.add(row.field);
@@ -74,22 +107,63 @@ export default function ExcelPanel({
       return {
         sessionId: key,
         filename: pdf.filename,
-        rows: Array.from(pdf.pages.values()).sort((a, b) => a.page - b.page),
+        pageRows: Array.from(pdf.pages.values()).sort((a, b) => a.page - b.page),
       };
     });
 
     return { groups: groupList, fieldColumns: fieldOrder };
   }, [data]);
 
-  // ── Sort within each PDF group ─────────────────────────────────────────
-  const sortedGroups = useMemo(() => {
-    if (!sortCol) return groups;
+  // ── Explode multi-value page rows into display rows ───────────────────
+  // If any field on a page has N>1 values, create N display rows.
+  // Fields with a single value repeat across all rows (so balances/account
+  // stay visible on every exploded row).
+  const displayGroups = useMemo(() => {
     return groups.map(g => {
+      const displayRows: DisplayRow[] = [];
+      for (const pr of g.pageRows) {
+        const maxCount = Math.max(
+          1,
+          ...fieldColumns.map(f => pr.cellsMulti[f]?.length ?? 0),
+        );
+        for (let i = 0; i < maxCount; i++) {
+          const cells: Record<string, ExtractedRow | null> = {};
+          for (const f of fieldColumns) {
+            const arr = pr.cellsMulti[f] ?? [];
+            if (arr.length === 0) {
+              cells[f] = null;
+            } else if (arr.length === 1) {
+              cells[f] = arr[0]; // single value repeats on every exploded row
+            } else if (i < arr.length) {
+              cells[f] = arr[i];
+            } else {
+              cells[f] = null;
+            }
+          }
+          displayRows.push({
+            sessionId: pr.sessionId,
+            filename: pr.filename,
+            page: pr.page,
+            subIndex: i,
+            isFirstOfPage: i === 0,
+            cells,
+          });
+        }
+      }
+      return { sessionId: g.sessionId, filename: g.filename, rows: displayRows };
+    });
+  }, [groups, fieldColumns]);
+
+  // ── Sort display rows within each PDF group ────────────────────────────
+  const sortedGroups = useMemo(() => {
+    if (!sortCol) return displayGroups;
+    return displayGroups.map(g => {
       const rows = [...g.rows].sort((a, b) => {
         if (sortCol === 'page') {
-          return sortAsc ? a.page - b.page : b.page - a.page;
+          return sortAsc
+            ? a.page - b.page || a.subIndex - b.subIndex
+            : b.page - a.page || a.subIndex - b.subIndex;
         }
-        // Sort by a field column
         const av = a.cells[sortCol]?.value ?? '';
         const bv = b.cells[sortCol]?.value ?? '';
         const aEmpty = !av;
@@ -98,6 +172,16 @@ export default function ExcelPanel({
         if (aEmpty) return 1;
         if (bEmpty) return -1;
 
+        // Date columns → parse as dates
+        if (isDateField(sortCol)) {
+          const ad = parseDateValue(av);
+          const bd = parseDateValue(bv);
+          if (!isNaN(ad) && !isNaN(bd)) {
+            return sortAsc ? ad - bd : bd - ad;
+          }
+        }
+
+        // Numeric → parse numbers
         const an = parseForSort(av);
         const bn = parseForSort(bv);
         if (!isNaN(an) && !isNaN(bn)) {
@@ -107,16 +191,20 @@ export default function ExcelPanel({
       });
       return { ...g, rows };
     });
-  }, [groups, sortCol, sortAsc]);
+  }, [displayGroups, sortCol, sortAsc]);
 
   // Flatten sorted groups back to ExtractedRow[] for export
   const sortedFlat = useMemo(() => {
     const out: ExtractedRow[] = [];
+    const seen = new Set<ExtractedRow>();
     for (const g of sortedGroups) {
       for (const r of g.rows) {
         for (const f of fieldColumns) {
           const cell = r.cells[f];
-          if (cell) out.push(cell);
+          if (cell && !seen.has(cell)) {
+            out.push(cell);
+            seen.add(cell);
+          }
         }
       }
     }
@@ -237,7 +325,7 @@ export default function ExcelPanel({
                     const isLastInGroup = ri === g.rows.length - 1;
                     return (
                       <tr
-                        key={`${g.sessionId}-${row.page}`}
+                        key={`${g.sessionId}-${row.page}-${row.subIndex}`}
                         className={`group/row transition-all duration-200 hover:bg-primary/5
                           ${ri % 2 === 0 ? 'bg-card' : 'bg-muted/20'}
                           ${isLastInGroup && gi < sortedGroups.length - 1 ? 'border-b-2 border-b-primary/40' : 'border-b border-border/40'}`}
@@ -252,7 +340,7 @@ export default function ExcelPanel({
                         </td>
                         {fieldColumns.map(f => {
                           const cell = row.cells[f];
-                          const cellKey = `${g.sessionId}-${row.page}-${f}`;
+                          const cellKey = `${g.sessionId}-${row.page}-${row.subIndex}-${f}`;
                           if (!cell) {
                             return <td key={f} className="px-3 py-2 text-muted-foreground/30 italic border-l border-border/40">—</td>;
                           }
