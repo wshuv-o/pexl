@@ -30,6 +30,7 @@ export default function Index() {
   const [modalDetail, setModalDetail]           = useState('');
   const [extracting, setExtracting]             = useState(false);
   const [showExcel, setShowExcel]               = useState(false);
+  const [excelWidth, setExcelWidth]             = useState(480); // px, draggable
   const [backendDown, setBackendDown]           = useState(false);
   const [navCollapsed, setNavCollapsed]         = useState(false);
   const [pendingDocType, setPendingDocType]     = useState<DocumentType>('utility_bill');
@@ -507,7 +508,7 @@ export default function Index() {
           {/* ── Viewer + Excel panel ─────────────────────────────────── */}
           {hasActiveViewer ? (
             <div className="flex-1 flex overflow-hidden">
-              <div className={`${showExcel ? 'w-3/5' : 'w-full'} transition-all flex flex-col overflow-hidden`}>
+              <div className="flex-1 flex flex-col overflow-hidden min-w-0">
                 <PDFViewer
                   key={activeSession.id}
                   session={activeSession}
@@ -521,24 +522,51 @@ export default function Index() {
               </div>
 
               {showExcel && combinedExtractedData.length > 0 && (
-                <div className="w-2/5 border-l border-border">
-                  <ExcelPanel
-                    data={combinedExtractedData}
-                    filename={sessions.filter(s => s.extractedData.length > 0).map(s => s.filename).join(', ')}
-                    provider={DOCUMENT_TYPES.find(d => d.value === activeSession.docType)?.label ?? 'Document'}
-                    onClose={() => setShowExcel(false)}
-                    onReExtract={handleExtract}
-                    onDataChange={(d: ExtractedRow[]) => {
-                      // Distribute edited rows back to their sessions
-                      setSessions(prev => prev.map(s => ({
-                        ...s,
-                        extractedData: d.filter(r => r.sessionId === s.id),
-                      })));
+                <>
+                  {/* Drag handle */}
+                  <div
+                    className="w-1 bg-border hover:bg-primary cursor-col-resize shrink-0 relative group transition-all duration-200"
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      const startX = e.clientX;
+                      const startWidth = excelWidth;
+                      const onMove = (ev: MouseEvent) => {
+                        const delta = startX - ev.clientX;
+                        const newW = Math.max(320, Math.min(1200, startWidth + delta));
+                        setExcelWidth(newW);
+                      };
+                      const onUp = () => {
+                        window.removeEventListener('mousemove', onMove);
+                        window.removeEventListener('mouseup', onUp);
+                      };
+                      window.addEventListener('mousemove', onMove);
+                      window.addEventListener('mouseup', onUp);
                     }}
-                    multiFile={sessions.filter(s => s.extractedData.length > 0).length > 1}
-                    onDownload={() => trackDownload().catch(() => {})}
-                  />
-                </div>
+                  >
+                    {/* Wider hit area */}
+                    <div className="absolute inset-y-0 -left-1 -right-1" />
+                  </div>
+                  <div
+                    className="border-l border-border shrink-0 overflow-hidden"
+                    style={{ width: `${excelWidth}px` }}
+                  >
+                    <ExcelPanel
+                      data={combinedExtractedData}
+                      filename={sessions.filter(s => s.extractedData.length > 0).map(s => s.filename).join(', ')}
+                      provider={DOCUMENT_TYPES.find(d => d.value === activeSession.docType)?.label ?? 'Document'}
+                      onClose={() => setShowExcel(false)}
+                      onReExtract={handleExtract}
+                      onDataChange={(d: ExtractedRow[]) => {
+                        setSessions(prev => prev.map(s => ({
+                          ...s,
+                          extractedData: d.filter(r => r.sessionId === s.id),
+                        })));
+                      }}
+                      multiFile={sessions.filter(s => s.extractedData.length > 0).length > 1}
+                      onDownload={() => trackDownload().catch(() => {})}
+                    />
+                  </div>
+                </>
               )}
             </div>
           ) : (

@@ -197,7 +197,7 @@ export default function ExcelPanel({
         ) : (
           <table className="min-w-full text-xs border-collapse">
             <thead className="sticky top-0 z-10">
-              <tr className="text-white text-[11px] font-semibold" style={{ backgroundColor: '#1F497D' }}>
+              <tr className="bg-primary text-primary-foreground text-[11px] font-semibold">
                 {multiFile && (
                   <th
                     className="text-left px-3 py-2.5 cursor-pointer hover:bg-white/10 select-none transition-all duration-200 whitespace-nowrap"
@@ -238,10 +238,9 @@ export default function ExcelPanel({
                     return (
                       <tr
                         key={`${g.sessionId}-${row.page}`}
-                        className={`group/row transition-all duration-200 hover:bg-[#1F497D]/5
+                        className={`group/row transition-all duration-200 hover:bg-primary/5
                           ${ri % 2 === 0 ? 'bg-card' : 'bg-muted/20'}
-                          ${isLastInGroup && gi < sortedGroups.length - 1 ? 'border-b-2' : 'border-b border-border/40'}`}
-                        style={isLastInGroup && gi < sortedGroups.length - 1 ? { borderBottomColor: '#1F497D' } : undefined}
+                          ${isLastInGroup && gi < sortedGroups.length - 1 ? 'border-b-2 border-b-primary/40' : 'border-b border-border/40'}`}
                       >
                         {multiFile && (
                           <td className="px-3 py-2 text-muted-foreground text-[10px] truncate max-w-[140px]" title={g.filename}>

@@ -109,11 +109,8 @@ function sanitizeSheetName(name: string, usedNames: Set<string>): string {
 // Build a sheet for a single PDF file
 //
 // Layout:
-//   Row 0 (header): field1 label | field2 label | ...
-//   Row 1:          value        | value        | ...
-//
-// Same-label fields with numeric values are SUMMED.
-// Same-label fields with non-numeric values are joined with " | ".
+//   Row 0 (header): page | field1 | field2 | ...
+//   Row 1+:         1    | value  | value  | ...   (one row per extracted page)
 // ---------------------------------------------------------------------------
 function buildSheetForFile(
   rows: ExtractedRow[],
@@ -133,51 +130,30 @@ function buildSheetForFile(
     }
   }
 
-  // All column keys: known fields + custom fields
   const allColumns = [
     ...fieldDefs.map(f => ({ key: f.value, label: f.label })),
     ...customFields.map(f => ({ key: f, label: f })),
   ];
 
-  // Build field → values map, summing numeric values
-  const valMap: Record<string, string> = {};
-  const numAccum: Record<string, number> = {};
-  const numCount: Record<string, number> = {};
-  const strAccum: Record<string, string[]> = {};
-
+  // Group rows by page
+  const byPage = new Map<number, Record<string, string>>();
   for (const row of rows) {
     if (!row.value) continue;
-    const num = parseNumericValue(row.value);
-    if (!isNaN(num)) {
-      numAccum[row.field] = (numAccum[row.field] || 0) + num;
-      numCount[row.field] = (numCount[row.field] || 0) + 1;
-    } else {
-      if (!strAccum[row.field]) strAccum[row.field] = [];
-      if (!strAccum[row.field].includes(row.value)) {
-        strAccum[row.field].push(row.value);
+    if (!byPage.has(row.page)) byPage.set(row.page, {});
+    const pageMap = byPage.get(row.page)!;
+    // If the same field appears multiple times on the same page, join them
+    if (pageMap[row.field]) {
+      const existing = pageMap[row.field];
+      if (!existing.split(' | ').includes(row.value)) {
+        pageMap[row.field] = `${existing} | ${row.value}`;
       }
+    } else {
+      pageMap[row.field] = row.value;
     }
   }
 
-  // Merge: numeric fields get formatted sum, string fields get joined
-  for (const col of allColumns) {
-    const hasNum = numCount[col.key] > 0;
-    const hasStr = strAccum[col.key]?.length > 0;
-
-    if (hasNum && !hasStr) {
-      // Pure numeric — show sum. Format with 2 decimal places if has decimals
-      const sum = numAccum[col.key];
-      valMap[col.key] = sum % 1 === 0 ? String(sum) : sum.toFixed(2);
-    } else if (hasStr && !hasNum) {
-      // Pure string — join unique values
-      valMap[col.key] = strAccum[col.key].join(' | ');
-    } else if (hasNum && hasStr) {
-      // Mixed — show sum + strings
-      const sum = numAccum[col.key];
-      const sumStr = sum % 1 === 0 ? String(sum) : sum.toFixed(2);
-      valMap[col.key] = [sumStr, ...strAccum[col.key]].join(' | ');
-    }
-  }
+  // Sort pages numerically
+  const sortedPages = Array.from(byPage.keys()).sort((a, b) => a - b);
 
   const wsData: any[][] = [];
   const styles: { row: number; col: number; style: any }[] = [];
@@ -185,24 +161,28 @@ function buildSheetForFile(
   const push = (cells: any[]) => { wsData.push(cells); return ri++; };
   const sc = (r: number, c: number, s: any) => styles.push({ row: r, col: c, style: s });
 
-  // Header row — use field names (keys) as headers
-  const headerCells = allColumns.map(c => c.key);
+  // Header row: page | field keys
+  const headerCells = ['page', ...allColumns.map(c => c.key)];
   const r0 = push(headerCells);
   for (let c = 0; c < headerCells.length; c++) {
     sc(r0, c, hdr(headerColor.bg, headerColor.font));
   }
 
-  // Single data row with values
-  const rowCells = allColumns.map(col => valMap[col.key] || '');
-  const r1 = push(rowCells);
-  for (let c = 0; c < rowCells.length; c++) {
-    sc(r1, c, cell(C.whiteBg, false, 'left', 9));
+  // One row per page
+  for (const page of sortedPages) {
+    const pageMap = byPage.get(page)!;
+    const rowCells: any[] = [page, ...allColumns.map(col => pageMap[col.key] || '')];
+    const r = push(rowCells);
+    sc(r, 0, cell(C.whiteBg, true, 'center', 9));
+    for (let c = 1; c < rowCells.length; c++) {
+      sc(r, c, cell(C.whiteBg, false, 'left', 9));
+    }
   }
 
   const ws = XLSX.utils.aoa_to_sheet(wsData);
   applyStyles(ws, wsData, styles);
-  ws['!cols'] = allColumns.map(() => ({ wch: 22 }));
-  ws['!freeze'] = { xSplit: 0, ySplit: 1 };
+  ws['!cols'] = [{ wch: 8 }, ...allColumns.map(() => ({ wch: 22 }))];
+  ws['!freeze'] = { xSplit: 1, ySplit: 1 };
   return ws;
 }
 
@@ -283,7 +263,37 @@ function groupKey(map: Record<string, string>): string {
 
 interface BankFileEntry {
   name: string;
-  map: Record<string, string>;
+  map: Record<string, string>;               // merged across pages (for property/account + grouping)
+  pages: Array<{ page: number; map: Record<string, string> }>;  // per-page maps for row output
+}
+
+// Flatten rows belonging to a single page into a value map
+function flattenPageRows(rows: ExtractedRow[]): Record<string, string> {
+  const valMap: Record<string, string> = {};
+  for (const row of rows) {
+    if (!row.value) continue;
+    if (valMap[row.field]) {
+      const existing = valMap[row.field];
+      if (!existing.split(' | ').includes(row.value)) {
+        valMap[row.field] = `${existing} | ${row.value}`;
+      }
+    } else {
+      valMap[row.field] = row.value;
+    }
+  }
+  return valMap;
+}
+
+// Build pages for a file: group rows by page number
+function buildFilePages(rows: ExtractedRow[]): Array<{ page: number; map: Record<string, string> }> {
+  const byPage = new Map<number, ExtractedRow[]>();
+  for (const row of rows) {
+    if (!byPage.has(row.page)) byPage.set(row.page, []);
+    byPage.get(row.page)!.push(row);
+  }
+  return Array.from(byPage.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([page, pageRows]) => ({ page, map: flattenPageRows(pageRows) }));
 }
 
 // Append one property/account block (header + data + total + average) into wsData.
@@ -319,7 +329,7 @@ function appendBankStatementGroup(
   const fmtMoney = (n: number) =>
     `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
-  // Sort by statement_date
+  // Sort by statement_date (file-level)
   const sorted = [...files].sort((a, b) => {
     const ad = new Date(a.map.statement_date || '').getTime();
     const bd = new Date(b.map.statement_date || '').getTime();
@@ -345,42 +355,48 @@ function appendBankStatementGroup(
     sc(r1, c, hdr(headerColor.bg, headerColor.font));
   }
 
-  // ── Data rows ───────────────────────────────────────────────────────────
+  // ── Data rows — one per (file, page) ────────────────────────────────────
   let totalDeposits = 0;
   let totalWithdrawals = 0;
   let totalActualDeposits = 0;
   let depositCount = 0;
   let actualDepositCount = 0;
 
-  for (const { map } of sorted) {
-    const date        = map.statement_date  || '';
-    const depositsStr = map.total_credits   || '';
-    const withdrawStr = map.total_debits    || '';
-    const endingBal   = map.ending_balance  || '';
+  const fmtVal = (s: string) => {
+    const n = parseNum(s);
+    return n !== null ? fmtMoney(n) : s;
+  };
 
-    const dn = parseNum(depositsStr);
-    const wn = parseNum(withdrawStr);
-    if (dn !== null) { totalDeposits += dn; depositCount++; totalActualDeposits += dn; actualDepositCount++; }
-    if (wn !== null) { totalWithdrawals += wn; }
+  for (const file of sorted) {
+    // Each file contributes one row per extracted page.
+    // Fields missing on a particular page fall back to the file-level merged map.
+    const pages = file.pages.length > 0 ? file.pages : [{ page: 1, map: file.map }];
+    for (const { map } of pages) {
+      const getField = (key: string) => map[key] || file.map[key] || '';
+      const date        = getField('statement_date');
+      const depositsStr = getField('total_credits');
+      const withdrawStr = getField('total_debits');
+      const endingBal   = getField('ending_balance');
 
-    const fmtVal = (s: string) => {
-      const n = parseNum(s);
-      return n !== null ? fmtMoney(n) : s;
-    };
+      const dn = parseNum(depositsStr);
+      const wn = parseNum(withdrawStr);
+      if (dn !== null) { totalDeposits += dn; depositCount++; totalActualDeposits += dn; actualDepositCount++; }
+      if (wn !== null) { totalWithdrawals += wn; }
 
-    const row: any[] = [
-      date,
-      depositsStr ? fmtVal(depositsStr) : '',
-      withdrawStr ? fmtVal(withdrawStr) : '',
-      endingBal   ? fmtVal(endingBal)   : '',
-      endingBal   ? fmtVal(endingBal)   : '',
-      '',
-      depositsStr ? fmtVal(depositsStr) : '',
-      '', '', '',
-    ];
-    const r = push(row);
-    for (let c = 0; c < NUM_COLS; c++) {
-      sc(r, c, cell(C.whiteBg, false, c === 0 ? 'left' : 'right', 9));
+      const row: any[] = [
+        date,
+        depositsStr ? fmtVal(depositsStr) : '',
+        withdrawStr ? fmtVal(withdrawStr) : '',
+        endingBal   ? fmtVal(endingBal)   : '',
+        endingBal   ? fmtVal(endingBal)   : '',
+        '',
+        depositsStr ? fmtVal(depositsStr) : '',
+        '', '', '',
+      ];
+      const r = push(row);
+      for (let c = 0; c < NUM_COLS; c++) {
+        sc(r, c, cell(C.whiteBg, false, c === 0 ? 'left' : 'right', 9));
+      }
     }
   }
 
@@ -425,7 +441,11 @@ function buildBankStatementSheet(
   // Flatten + group by property/account
   const groups = new Map<string, BankFileEntry[]>();
   for (const [name, rows] of fileMap.entries()) {
-    const entry: BankFileEntry = { name, map: flattenFileRows(rows) };
+    const entry: BankFileEntry = {
+      name,
+      map: flattenFileRows(rows),
+      pages: buildFilePages(rows),
+    };
     const key = groupKey(entry.map);
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key)!.push(entry);
