@@ -136,17 +136,21 @@ function buildSheetForFile(
   ];
 
   // Group rows by page, keeping ALL values per field (no merging)
+  // Preserve first-appearance order so caller-side sorting carries through.
   const byPage = new Map<number, Record<string, string[]>>();
+  const pageOrder: number[] = [];
   for (const row of rows) {
     if (!row.value) continue;
-    if (!byPage.has(row.page)) byPage.set(row.page, {});
+    if (!byPage.has(row.page)) {
+      byPage.set(row.page, {});
+      pageOrder.push(row.page);
+    }
     const pageMap = byPage.get(row.page)!;
     if (!pageMap[row.field]) pageMap[row.field] = [];
     pageMap[row.field].push(row.value);
   }
 
-  // Sort pages numerically
-  const sortedPages = Array.from(byPage.keys()).sort((a, b) => a - b);
+  const sortedPages = pageOrder;
 
   const wsData: any[][] = [];
   const styles: { row: number; col: number; style: any }[] = [];
@@ -276,19 +280,22 @@ interface BankFileEntry {
   pages: Array<{ page: number; multi: Record<string, string[]> }>;       // per-page multi-value maps
 }
 
-// Build pages for a file: group rows by page number, keeping all values per field
+// Build pages for a file: group rows by page number, keeping all values per field.
+// Preserves first-appearance order so caller-side sorting carries through.
 function buildFilePages(rows: ExtractedRow[]): Array<{ page: number; multi: Record<string, string[]> }> {
   const byPage = new Map<number, Record<string, string[]>>();
+  const order: number[] = [];
   for (const row of rows) {
     if (!row.value) continue;
-    if (!byPage.has(row.page)) byPage.set(row.page, {});
+    if (!byPage.has(row.page)) {
+      byPage.set(row.page, {});
+      order.push(row.page);
+    }
     const pageMap = byPage.get(row.page)!;
     if (!pageMap[row.field]) pageMap[row.field] = [];
     pageMap[row.field].push(row.value);
   }
-  return Array.from(byPage.entries())
-    .sort((a, b) => a[0] - b[0])
-    .map(([page, multi]) => ({ page, multi }));
+  return order.map(page => ({ page, multi: byPage.get(page)! }));
 }
 
 // Append one property/account block (header + data + total + average) into wsData.
@@ -324,13 +331,8 @@ function appendBankStatementGroup(
   const fmtMoney = (n: number) =>
     `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
-  // Sort by statement_date (file-level)
-  const sorted = [...files].sort((a, b) => {
-    const ad = new Date(a.map.statement_date || '').getTime();
-    const bd = new Date(b.map.statement_date || '').getTime();
-    if (isNaN(ad) || isNaN(bd)) return 0;
-    return ad - bd;
-  });
+  // Preserve caller order (so ExcelPanel sorting carries through to export)
+  const sorted = files;
 
   // ── Row 0: Property header ──────────────────────────────────────────────
   const propRow: any[] = [

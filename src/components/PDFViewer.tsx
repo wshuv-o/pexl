@@ -63,6 +63,8 @@ export default function PDFViewer({
 
   const pageRefs  = useRef<Record<number, HTMLDivElement | null>>({});
   const scrollRef = useRef<HTMLDivElement>(null);
+  // Highlight clipboard — stores the templates of copied highlights
+  const clipboardRef = useRef<Highlight[] | null>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const pdfDocRef = useRef<any>(null);
 
