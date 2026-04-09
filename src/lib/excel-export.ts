@@ -13,10 +13,10 @@ const C = {
 
 // Header colors per document type
 const HEADER_COLORS: Record<DocumentType, { bg: string; font: string }> = {
-  utility_bill:   { bg: '16a34a', font: 'FFFFFF' },  // green
-  bank_statement: { bg: '2563eb', font: 'FFFFFF' },  // blue
-  appraisal:      { bg: '9333ea', font: 'FFFFFF' },  // purple
-  lease_contract: { bg: 'd97706', font: 'FFFFFF' },  // orange
+  utility_bill:   { bg: '1F7D3A', font: 'FFFFFF' },  // dark green
+  bank_statement: { bg: '1F497D', font: 'FFFFFF' },  // dark navy blue
+  appraisal:      { bg: '4B1F7D', font: 'FFFFFF' },  // dark purple
+  lease_contract: { bg: '7D4B1F', font: 'FFFFFF' },  // dark orange/brown
 };
 
 function hdr(bg: string, font: string, bold = true, sz = 10): any {

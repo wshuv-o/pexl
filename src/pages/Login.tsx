@@ -73,7 +73,7 @@ const Login = () => {
                   onChange={e => setUsername(e.target.value)}
                   autoComplete="username"
                   autoFocus
-                  className="h-10 bg-muted text-foreground placeholder:text-muted-foreground"
+                  className="h-10 bg-[#0a0a0a] dark:bg-[#0a0a0a] text-white placeholder:text-white/40 border-white/10"
                 />
               </div>
 
@@ -89,7 +89,7 @@ const Login = () => {
                     value={password}
                     onChange={e => setPassword(e.target.value)}
                     autoComplete="current-password"
-                    className="h-10 pr-10 bg-muted text-foreground placeholder:text-muted-foreground"
+                    className="h-10 pr-10 bg-[#0a0a0a] dark:bg-[#0a0a0a] text-white placeholder:text-white/40 border-white/10"
                   />
                   <button
                     type="button"
