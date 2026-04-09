@@ -452,10 +452,11 @@ function buildBankStatementSheet(
   let first = true;
   for (const files of groups.values()) {
     if (!first) {
-      // Two blank separator rows between tables
+      // Three blank separator rows between tables
       wsData.push([]);
       wsData.push([]);
-      nextRow += 2;
+      wsData.push([]);
+      nextRow += 3;
     }
     nextRow = appendBankStatementGroup(wsData, styles, nextRow, files);
     first = false;
@@ -516,27 +517,30 @@ function buildStackedTablesSheet(
   const push = (cells: any[]) => { wsData.push(cells); return ri++; };
   const sc = (r: number, c: number, s: any) => styles.push({ row: r, col: c, style: s });
 
-  const totalCols = 1 + allColumns.length; // page + fields
+  const totalCols = 2 + allColumns.length; // file_name + page + fields
 
   let first = true;
   for (const [filename, rows] of fileMap.entries()) {
     if (!first) {
-      // Blank separator row between tables
+      // Three blank separator rows between tables
       wsData.push([]);
-      ri++;
+      wsData.push([]);
+      wsData.push([]);
+      ri += 3;
     }
     first = false;
 
-    // ── File header row (light purple) ────────────────────────────────────
     const cleanName = filename.replace(/\.pdf$/i, '');
+
+    // ── File header row (light tinted color) ──────────────────────────────
     const fileRow = [`File: ${cleanName}`, ...Array(totalCols - 1).fill('')];
     const fr = push(fileRow);
     for (let c = 0; c < totalCols; c++) {
       sc(fr, c, cell(fileLabelBg, true, 'left', 10));
     }
 
-    // ── Column header row (dark purple) ───────────────────────────────────
-    const headerCells = ['page', ...allColumns.map(c => c.key)];
+    // ── Column header row (dark colored) ──────────────────────────────────
+    const headerCells = ['file_name', 'page', ...allColumns.map(c => c.key)];
     const hr = push(headerCells);
     for (let c = 0; c < totalCols; c++) {
       sc(hr, c, hdr(headerColor.bg, headerColor.font));
@@ -560,6 +564,7 @@ function buildStackedTablesSheet(
     for (const page of pageOrder) {
       const pageMap = byPage.get(page)!;
       const rowCells: any[] = [
+        cleanName,
         page,
         ...allColumns.map(col => {
           const arr = pageMap[col.key] ?? [];
@@ -567,8 +572,9 @@ function buildStackedTablesSheet(
         }),
       ];
       const r = push(rowCells);
-      sc(r, 0, cell(C.whiteBg, true, 'center', 9));
-      for (let c = 1; c < totalCols; c++) {
+      sc(r, 0, cell(C.whiteBg, true, 'left',   9));
+      sc(r, 1, cell(C.whiteBg, true, 'center', 9));
+      for (let c = 2; c < totalCols; c++) {
         sc(r, c, cell(C.whiteBg, false, 'left', 9));
       }
     }
@@ -576,7 +582,7 @@ function buildStackedTablesSheet(
 
   const ws = XLSX.utils.aoa_to_sheet(wsData);
   applyStyles(ws, wsData, styles);
-  ws['!cols'] = [{ wch: 8 }, ...allColumns.map(() => ({ wch: 22 }))];
+  ws['!cols'] = [{ wch: 30 }, { wch: 8 }, ...allColumns.map(() => ({ wch: 22 }))];
   return ws;
 }
 
