@@ -27,9 +27,34 @@ export default function ExcelPanel({ data, filename, provider, onClose, onReExtr
 
   const sorted = [...data].sort((a, b) => {
     if (!sortCol) return 0;
-    const av = String((a as any)[sortCol] ?? '');
-    const bv = String((b as any)[sortCol] ?? '');
-    return sortAsc ? av.localeCompare(bv) : bv.localeCompare(av);
+    const av = (a as any)[sortCol];
+    const bv = (b as any)[sortCol];
+
+    // Nulls/empties go to the end
+    const aEmpty = av === null || av === undefined || av === '';
+    const bEmpty = bv === null || bv === undefined || bv === '';
+    if (aEmpty && bEmpty) return 0;
+    if (aEmpty) return 1;
+    if (bEmpty) return -1;
+
+    // Numeric sort for Page column and money/number strings
+    if (sortCol === 'page') {
+      return sortAsc ? Number(av) - Number(bv) : Number(bv) - Number(av);
+    }
+
+    const as = String(av);
+    const bs = String(bv);
+
+    // Try numeric sort for value column (strips $, commas)
+    if (sortCol === 'value') {
+      const an = parseFloat(as.replace(/[$,\s]/g, ''));
+      const bn = parseFloat(bs.replace(/[$,\s]/g, ''));
+      if (!isNaN(an) && !isNaN(bn)) {
+        return sortAsc ? an - bn : bn - an;
+      }
+    }
+
+    return sortAsc ? as.localeCompare(bs) : bs.localeCompare(as);
   });
 
   const handleSort = (col: string) => {
@@ -83,7 +108,7 @@ export default function ExcelPanel({ data, filename, provider, onClose, onReExtr
           <Button
             size="sm"
             className="flex-1 h-8 text-xs bg-primary hover:bg-primary/90 text-primary-foreground font-semibold"
-            onClick={() => { exportToExcel(data, filename, provider); onDownload?.(); }}
+            onClick={() => { exportToExcel(sorted, filename, provider); onDownload?.(); }}
           >
             <Download className="w-3.5 h-3.5 mr-1.5" /> Export .xlsx
           </Button>
