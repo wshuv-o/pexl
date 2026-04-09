@@ -3,7 +3,8 @@ import { useState, useCallback, useMemo } from 'react';
 import { toast } from 'sonner';
 import {
   Upload, ChevronLeft, ChevronRight,
-  AlertTriangle, FileSearch, X, ShieldCheck, LogOut,
+  AlertTriangle, FileSearch, X, ShieldCheck, LogOut, Landmark,
+  RotateCw, Eraser,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import UploadZone from '@/components/UploadZone';
@@ -28,6 +29,8 @@ export default function Index() {
   const [modalOpen, setModalOpen]               = useState(false);
   const [modalStep, setModalStep]               = useState(0);
   const [modalDetail, setModalDetail]           = useState('');
+  const [modalFileIdx, setModalFileIdx]         = useState(0);
+  const [modalTotalFiles, setModalTotalFiles]   = useState(0);
   const [extracting, setExtracting]             = useState(false);
   const [showExcel, setShowExcel]               = useState(false);
   const [excelWidth, setExcelWidth]             = useState(480); // px, draggable
@@ -77,8 +80,11 @@ export default function Index() {
   const handleProcess = useCallback(async () => {
     if (!pendingFiles.length) return;
     setProcessing(true);
+    setModalTotalFiles(pendingFiles.length);
+    setModalFileIdx(0);
     const newSessionIds: string[] = [];
-    for (const file of pendingFiles) {
+    for (let i = 0; i < pendingFiles.length; i++) {
+      const file = pendingFiles[i];
       const tempId = `temp-${Date.now()}-${Math.random().toString(36).slice(2)}`;
       setSessions(prev => [...prev, {
         id: tempId, filename: file.name, file,
@@ -88,6 +94,7 @@ export default function Index() {
         startPage: 1,
       }]);
       setModalOpen(true); setModalStep(0); setModalDetail('');
+      setModalFileIdx(i + 1);
       try {
         const result = await processFile(file, '', (step, detail) => {
           setModalStep(step); setModalDetail(detail || '');
@@ -419,6 +426,43 @@ export default function Index() {
             </div>
           )}
           <div className="ml-auto flex items-center gap-2">
+            <button
+              onClick={() => {
+                if (sessions.length === 0) return;
+                if (!confirm('Reset workspace? Highlights and extracted data will be cleared, but uploaded PDFs will stay.')) return;
+                setSessions(prev => prev.map(s => ({
+                  ...s,
+                  highlights: {},
+                  extractedData: [],
+                  status: s.status === 'extracted' ? 'ready' : s.status,
+                })));
+                setShowExcel(false);
+              }}
+              className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-all duration-200 px-2 py-1.5 rounded-lg hover:bg-muted"
+              title="Refresh workspace (keeps uploaded PDFs, clears highlights & data)"
+            >
+              <RotateCw className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Refresh</span>
+            </button>
+            <button
+              onClick={() => {
+                const totalHls = sessions.reduce((s, sess) => s + Object.values(sess.highlights).flat().length, 0);
+                if (totalHls === 0) return;
+                if (!confirm(`Remove all ${totalHls} highlights from all PDFs?`)) return;
+                setSessions(prev => prev.map(s => ({
+                  ...s,
+                  highlights: {},
+                  extractedData: [],
+                  status: s.status === 'extracted' ? 'ready' : s.status,
+                })));
+                setShowExcel(false);
+              }}
+              className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-destructive transition-all duration-200 px-2 py-1.5 rounded-lg hover:bg-destructive/10"
+              title="Remove all highlights from all PDFs"
+            >
+              <Eraser className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Clear</span>
+            </button>
             {user?.roles.includes('admin') && (
               <button
                 onClick={() => navigate('/admin')}
@@ -588,7 +632,7 @@ export default function Index() {
         </div>
       </div>
 
-      <ProcessingModal open={modalOpen} step={modalStep} detail={modalDetail} />
+      <ProcessingModal open={modalOpen} step={modalStep} detail={modalDetail} fileIndex={modalFileIdx} totalFiles={modalTotalFiles} />
     </div>
   );
 }

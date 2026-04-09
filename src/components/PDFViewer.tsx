@@ -44,6 +44,9 @@ export default function PDFViewer({
     page: number;
   } | null>(null);
 
+  // Custom field names added by the user during this session
+  const [customFields, setCustomFields] = useState<string[]>([]);
+
   // Rubber-band selection + multi-select
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [selectionBox, setSelectionBox] = useState<{
@@ -65,6 +68,8 @@ export default function PDFViewer({
   const scrollRef = useRef<HTMLDivElement>(null);
   // Highlight clipboard — stores the templates of copied highlights
   const clipboardRef = useRef<Highlight[] | null>(null);
+  // Always-fresh ref for the current page (for paste-anywhere)
+  const currentPageRef = useRef<number>(session.startPage || 1);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const pdfDocRef = useRef<any>(null);
 
@@ -138,12 +143,18 @@ export default function PDFViewer({
           closest = Number(pStr);
         }
       }
-      if (closest !== currentPage) setCurrentPage(closest);
+      if (closest !== currentPage) {
+        setCurrentPage(closest);
+        currentPageRef.current = closest;
+      }
     };
 
     container.addEventListener('scroll', handleScroll, { passive: true });
     return () => container.removeEventListener('scroll', handleScroll);
   }, [pdfLoaded, currentPage]);
+
+  // Keep ref in sync if currentPage changes via other means
+  useEffect(() => { currentPageRef.current = currentPage; }, [currentPage]);
 
   // Global mouseUp fallback
   useEffect(() => {
@@ -322,6 +333,10 @@ export default function PDFViewer({
       };
       const existing = session.highlights[pg] ?? [];
       updateHighlights(pg, [...existing, hl]);
+      // Remember user-added custom field name so it appears in subsequent pickers
+      if (customLabel && customLabel.trim()) {
+        setCustomFields(prev => prev.includes(customLabel) ? prev : [...prev, customLabel]);
+      }
       setPickerPos(null);
       setShowFirstHint(false);
     },
@@ -522,15 +537,16 @@ export default function PDFViewer({
           .map(h => ({ ...h }));
         clipboardRef.current = copied;
       }
-      // Ctrl+V → paste highlights onto the current page (offset slightly)
+      // Ctrl+V → paste highlights onto the currently visible page
       if ((e.ctrlKey || e.metaKey) && e.key === 'v' && !isEditing && clipboardRef.current && clipboardRef.current.length > 0) {
         e.preventDefault();
+        const targetPage = currentPageRef.current;
         const offset = 0.02;
         const stamp = Date.now();
         const newHls: Highlight[] = clipboardRef.current.map((h, i) => ({
           ...h,
           id: `hl-${stamp}-${i}-${Math.random().toString(36).slice(2, 6)}`,
-          page: currentPage,
+          page: targetPage,
           x: Math.min(1 - h.width,  Math.max(0, h.x + offset)),
           y: Math.min(1 - h.height, Math.max(0, h.y + offset)),
           extractedValue: undefined,
@@ -538,8 +554,8 @@ export default function PDFViewer({
           wasOcr: undefined,
         }));
 
-        const existing = session.highlights[currentPage] ?? [];
-        const next = { ...session.highlights, [currentPage]: [...existing, ...newHls] };
+        const existing = session.highlights[targetPage] ?? [];
+        const next = { ...session.highlights, [targetPage]: [...existing, ...newHls] };
         onHighlightsChange(session.id, next);
         setSelectedIds(new Set(newHls.map(h => h.id)));
       }
@@ -749,6 +765,7 @@ export default function PDFViewer({
                       x={pickerPos.x}
                       y={pickerPos.y}
                       docType={session.docType}
+                      customFields={customFields}
                       onSelect={handleLabelSelect}
                       onCancel={() => setPickerPos(null)}
                     />
