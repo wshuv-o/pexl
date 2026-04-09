@@ -165,30 +165,20 @@ function buildSheetForFile(
     sc(r0, c, hdr(headerColor.bg, headerColor.font));
   }
 
-  // Explode each page into N rows where N = max value count across fields.
-  // Single-value fields repeat on every exploded row; multi-value fields show
-  // their Nth value on the Nth row (blank if exhausted).
+  // One row per page (first value used if a field has multiple values)
   for (const page of sortedPages) {
     const pageMap = byPage.get(page)!;
-    const maxCount = Math.max(
-      1,
-      ...allColumns.map(col => pageMap[col.key]?.length ?? 0),
-    );
-    for (let i = 0; i < maxCount; i++) {
-      const rowCells: any[] = [
-        page,
-        ...allColumns.map(col => {
-          const arr = pageMap[col.key] ?? [];
-          if (arr.length === 0) return '';
-          if (arr.length === 1) return arr[0];           // repeat single-value
-          return i < arr.length ? arr[i] : '';            // multi-value: index in
-        }),
-      ];
-      const r = push(rowCells);
-      sc(r, 0, cell(C.whiteBg, true, 'center', 9));
-      for (let c = 1; c < rowCells.length; c++) {
-        sc(r, c, cell(C.whiteBg, false, 'left', 9));
-      }
+    const rowCells: any[] = [
+      page,
+      ...allColumns.map(col => {
+        const arr = pageMap[col.key] ?? [];
+        return arr.length > 0 ? arr[0] : '';
+      }),
+    ];
+    const r = push(rowCells);
+    sc(r, 0, cell(C.whiteBg, true, 'center', 9));
+    for (let c = 1; c < rowCells.length; c++) {
+      sc(r, c, cell(C.whiteBg, false, 'left', 9));
     }
   }
 
@@ -364,58 +354,42 @@ function appendBankStatementGroup(
     return n !== null ? fmtMoney(n) : s;
   };
 
-  // Used field keys for explosion across pages
-  const RELEVANT_KEYS = ['statement_date', 'total_credits', 'total_debits', 'ending_balance'];
-
   for (const file of sorted) {
     const pages = file.pages.length > 0
       ? file.pages
       : [{ page: 1, multi: {} as Record<string, string[]> }];
 
     for (const { multi } of pages) {
-      // Determine how many display rows this page needs.
-      // If any relevant field has N>1 values, explode into N rows.
-      const maxCount = Math.max(
-        1,
-        ...RELEVANT_KEYS.map(k => multi[k]?.length ?? 0),
-      );
-
-      // Helper: pick value for field at sub-row index i, falling back to
-      // single-value (repeats on every row) or file-level merged map.
-      const getField = (key: string, i: number): string => {
+      // One row per page — first value if multi, fall back to file-level map.
+      const getField = (key: string): string => {
         const arr = multi[key];
-        if (arr && arr.length > 0) {
-          if (arr.length === 1) return arr[0];
-          return i < arr.length ? arr[i] : '';
-        }
+        if (arr && arr.length > 0) return arr[0];
         return file.map[key] || '';
       };
 
-      for (let i = 0; i < maxCount; i++) {
-        const date        = getField('statement_date', i);
-        const depositsStr = getField('total_credits',  i);
-        const withdrawStr = getField('total_debits',   i);
-        const endingBal   = getField('ending_balance', i);
+      const date        = getField('statement_date');
+      const depositsStr = getField('total_credits');
+      const withdrawStr = getField('total_debits');
+      const endingBal   = getField('ending_balance');
 
-        const dn = parseNum(depositsStr);
-        const wn = parseNum(withdrawStr);
-        if (dn !== null) { totalDeposits += dn; depositCount++; totalActualDeposits += dn; actualDepositCount++; }
-        if (wn !== null) { totalWithdrawals += wn; }
+      const dn = parseNum(depositsStr);
+      const wn = parseNum(withdrawStr);
+      if (dn !== null) { totalDeposits += dn; depositCount++; totalActualDeposits += dn; actualDepositCount++; }
+      if (wn !== null) { totalWithdrawals += wn; }
 
-        const row: any[] = [
-          date,
-          depositsStr ? fmtVal(depositsStr) : '',
-          withdrawStr ? fmtVal(withdrawStr) : '',
-          endingBal   ? fmtVal(endingBal)   : '',
-          endingBal   ? fmtVal(endingBal)   : '',
-          '',
-          depositsStr ? fmtVal(depositsStr) : '',
-          '', '', '',
-        ];
-        const r = push(row);
-        for (let c = 0; c < NUM_COLS; c++) {
-          sc(r, c, cell(C.whiteBg, false, c === 0 ? 'left' : 'right', 9));
-        }
+      const row: any[] = [
+        date,
+        depositsStr ? fmtVal(depositsStr) : '',
+        withdrawStr ? fmtVal(withdrawStr) : '',
+        endingBal   ? fmtVal(endingBal)   : '',
+        endingBal   ? fmtVal(endingBal)   : '',
+        '',
+        depositsStr ? fmtVal(depositsStr) : '',
+        '', '', '',
+      ];
+      const r = push(row);
+      for (let c = 0; c < NUM_COLS; c++) {
+        sc(r, c, cell(C.whiteBg, false, c === 0 ? 'left' : 'right', 9));
       }
     }
   }

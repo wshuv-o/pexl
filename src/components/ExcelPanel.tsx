@@ -114,42 +114,26 @@ export default function ExcelPanel({
     return { groups: groupList, fieldColumns: fieldOrder };
   }, [data]);
 
-  // ── Explode multi-value page rows into display rows ───────────────────
-  // If any field on a page has N>1 values, create N display rows.
-  // Fields with a single value repeat across all rows (so balances/account
-  // stay visible on every exploded row).
+  // ── Build display rows: one row per page (first value if multi) ───────
+  // Each page produces exactly one display row. If a field has multiple
+  // values on the same page, the first is used (rare, but handled).
   const displayGroups = useMemo(() => {
     return groups.map(g => {
-      const displayRows: DisplayRow[] = [];
-      for (const pr of g.pageRows) {
-        const maxCount = Math.max(
-          1,
-          ...fieldColumns.map(f => pr.cellsMulti[f]?.length ?? 0),
-        );
-        for (let i = 0; i < maxCount; i++) {
-          const cells: Record<string, ExtractedRow | null> = {};
-          for (const f of fieldColumns) {
-            const arr = pr.cellsMulti[f] ?? [];
-            if (arr.length === 0) {
-              cells[f] = null;
-            } else if (arr.length === 1) {
-              cells[f] = arr[0]; // single value repeats on every exploded row
-            } else if (i < arr.length) {
-              cells[f] = arr[i];
-            } else {
-              cells[f] = null;
-            }
-          }
-          displayRows.push({
-            sessionId: pr.sessionId,
-            filename: pr.filename,
-            page: pr.page,
-            subIndex: i,
-            isFirstOfPage: i === 0,
-            cells,
-          });
+      const displayRows: DisplayRow[] = g.pageRows.map(pr => {
+        const cells: Record<string, ExtractedRow | null> = {};
+        for (const f of fieldColumns) {
+          const arr = pr.cellsMulti[f] ?? [];
+          cells[f] = arr.length > 0 ? arr[0] : null;
         }
-      }
+        return {
+          sessionId: pr.sessionId,
+          filename: pr.filename,
+          page: pr.page,
+          subIndex: 0,
+          isFirstOfPage: true,
+          cells,
+        };
+      });
       return { sessionId: g.sessionId, filename: g.filename, rows: displayRows };
     });
   }, [groups, fieldColumns]);
