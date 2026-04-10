@@ -42,22 +42,74 @@ interface DisplayRow {
 // Parse a value for numeric sorting (strips $, commas, whitespace)
 const parseForSort = (val: string): number => parseFloat(val.replace(/[$,\s]/g, ''));
 
-// Try parsing a value as a date — returns epoch ms or NaN
+// Month name → 0-indexed month (handles abbreviations and full names)
+const MONTH_NAMES: Record<string, number> = {
+  jan: 0, january: 0, feb: 1, february: 1, mar: 2, march: 2,
+  apr: 3, april: 3, may: 4, jun: 5, june: 5, jul: 6, july: 6,
+  aug: 7, august: 7, sep: 8, sept: 8, september: 8,
+  oct: 9, october: 9, nov: 10, november: 10, dec: 11, december: 11,
+};
+
+// Robust date parser → returns epoch ms or NaN.
+// Always extracts a 4-digit year so year-aware sorting works.
 const parseDateValue = (val: string): number => {
   if (!val) return NaN;
-  // Try native Date first (handles MM/DD/YYYY, Month D YYYY, ISO)
-  const d = new Date(val);
-  if (!isNaN(d.getTime())) return d.getTime();
-  // Fallback: MM/DD/YYYY manual parse
-  const m = val.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$/);
-  if (m) {
-    const mo = parseInt(m[1], 10);
-    const dd = parseInt(m[2], 10);
-    let yy = parseInt(m[3], 10);
-    if (yy < 100) yy += 2000;
-    const d2 = new Date(yy, mo - 1, dd);
-    if (!isNaN(d2.getTime())) return d2.getTime();
+  const trimmed = String(val).trim();
+  if (!trimmed) return NaN;
+
+  // 1. ISO YYYY-MM-DD
+  const iso = trimmed.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
+  if (iso) {
+    const y = parseInt(iso[1], 10);
+    const m = parseInt(iso[2], 10);
+    const d = parseInt(iso[3], 10);
+    if (m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+      return new Date(y, m - 1, d).getTime();
+    }
   }
+
+  // 2. MM/DD/YYYY or DD/MM/YYYY (auto-detect when month > 12)
+  const slash = trimmed.match(/^(\d{1,2})[/.\-](\d{1,2})[/.\-](\d{2,4})/);
+  if (slash) {
+    let mo = parseInt(slash[1], 10);
+    let dd = parseInt(slash[2], 10);
+    let yy = parseInt(slash[3], 10);
+    if (yy < 100) yy += yy < 70 ? 2000 : 1900;
+    if (mo > 12 && dd <= 12) [mo, dd] = [dd, mo];
+    if (mo >= 1 && mo <= 12 && dd >= 1 && dd <= 31) {
+      return new Date(yy, mo - 1, dd).getTime();
+    }
+  }
+
+  // 3. Month-name formats: "January 15, 2024" / "15 January 2024" / "Jan 15 24"
+  const lower = trimmed.toLowerCase();
+  // "Month Day, Year" or "Month Day Year"
+  const monthFirst = lower.match(/^([a-z]+)\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{2,4})/);
+  if (monthFirst) {
+    const m = MONTH_NAMES[monthFirst[1]];
+    if (m !== undefined) {
+      const d = parseInt(monthFirst[2], 10);
+      let y = parseInt(monthFirst[3], 10);
+      if (y < 100) y += y < 70 ? 2000 : 1900;
+      return new Date(y, m, d).getTime();
+    }
+  }
+  // "Day Month Year"
+  const dayFirst = lower.match(/^(\d{1,2})(?:st|nd|rd|th)?\s+([a-z]+)\.?\s+(\d{2,4})/);
+  if (dayFirst) {
+    const m = MONTH_NAMES[dayFirst[2]];
+    if (m !== undefined) {
+      const d = parseInt(dayFirst[1], 10);
+      let y = parseInt(dayFirst[3], 10);
+      if (y < 100) y += y < 70 ? 2000 : 1900;
+      return new Date(y, m, d).getTime();
+    }
+  }
+
+  // 4. Native Date as a final fallback
+  const native = new Date(trimmed);
+  if (!isNaN(native.getTime())) return native.getTime();
+
   return NaN;
 };
 

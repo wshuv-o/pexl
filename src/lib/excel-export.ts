@@ -2,6 +2,7 @@
 import * as XLSX from 'xlsx-js-style';
 import type { ExtractedRow } from '@/types/utilscraper';
 import { getFieldLabelsForType, DOCUMENT_TYPES, type DocumentType } from '@/types/utilscraper';
+import { downloadBankStatementExcel } from './bank-excel-export';
 
 // ---------------------------------------------------------------------------
 // Style helpers
@@ -52,17 +53,6 @@ function applyStyles(
     if (!ws[ref]) ws[ref] = { t: 's', v: wsData[row]?.[col] ?? '' };
     ws[ref].s = style;
   }
-}
-
-// ---------------------------------------------------------------------------
-// Parse a numeric value from an extracted string (strips $, commas, etc.)
-// Returns NaN if the string isn't a number.
-// ---------------------------------------------------------------------------
-function parseNumericValue(val: string): number {
-  const cleaned = val.replace(/[$,\s]/g, '').trim();
-  if (!cleaned) return NaN;
-  const n = Number(cleaned);
-  return n;
 }
 
 // ---------------------------------------------------------------------------
@@ -189,297 +179,8 @@ function buildSheetForFile(
   return ws;
 }
 
-// ---------------------------------------------------------------------------
-// Build a flat per-file value map from extracted rows.
-// Returns a single { fieldName: stringValue } map per file.
-// ---------------------------------------------------------------------------
-function flattenFileRows(rows: ExtractedRow[]): Record<string, string> {
-  const valMap: Record<string, string> = {};
-  const numAccum: Record<string, number> = {};
-  const numCount: Record<string, number> = {};
-  const strAccum: Record<string, string[]> = {};
-
-  for (const row of rows) {
-    if (!row.value) continue;
-    const num = parseNumericValue(row.value);
-    if (!isNaN(num)) {
-      numAccum[row.field] = (numAccum[row.field] || 0) + num;
-      numCount[row.field] = (numCount[row.field] || 0) + 1;
-    } else {
-      if (!strAccum[row.field]) strAccum[row.field] = [];
-      if (!strAccum[row.field].includes(row.value)) {
-        strAccum[row.field].push(row.value);
-      }
-    }
-  }
-
-  const allKeys = new Set([...Object.keys(numCount), ...Object.keys(strAccum)]);
-  for (const key of allKeys) {
-    const hasNum = numCount[key] > 0;
-    const hasStr = strAccum[key]?.length > 0;
-    if (hasNum && !hasStr) {
-      const sum = numAccum[key];
-      valMap[key] = sum % 1 === 0 ? String(sum) : sum.toFixed(2);
-    } else if (hasStr && !hasNum) {
-      valMap[key] = strAccum[key].join(' | ');
-    } else if (hasNum && hasStr) {
-      const sum = numAccum[key];
-      const sumStr = sum % 1 === 0 ? String(sum) : sum.toFixed(2);
-      valMap[key] = [sumStr, ...strAccum[key]].join(' | ');
-    }
-  }
-  return valMap;
-}
-
-// ---------------------------------------------------------------------------
-// Build the bank statement sheet — matches the screenshot layout:
-//
-//   Row 0: Property Name | <propName> | Account: <num>          (light blue)
-//   Row 1: Date | Deposits | Withdrawals | Unadj Bal | Adj Bal |
-//          Adjustments | Actual Deposits | T-12 |
-//          Deposits vs. Op Stmt. Diff. | Comments               (dark blue header)
-//   Row 2+: One row per PDF
-//   Total row | Average row
-//
-// No formulas — just placed values from the extraction.
-// ---------------------------------------------------------------------------
-// Bank statement column headers (shared by all groups)
-const BANK_STMT_COLS = [
-  'Date',
-  'Deposits',
-  'Withdrawals',
-  'Unadjusted Balance',
-  'Adjusted Balance',
-  'Adjustments',
-  'Actual Deposits',
-  'T-12',
-  'Deposits vs. Op Stmt. Diff.',
-  'Comments',
-];
-
-// Group key — files with the same property + account go in the same table
-function groupKey(map: Record<string, string>): string {
-  const prop = (map.property_name || '').trim().toLowerCase();
-  const acct = (map.account_number || '').trim().toLowerCase();
-  return `${prop}|||${acct}`;
-}
-
-interface BankFileEntry {
-  name: string;
-  map: Record<string, string>;                                          // merged across pages (for property/account + grouping)
-  pages: Array<{ page: number; multi: Record<string, string[]> }>;       // per-page multi-value maps
-}
-
-// Build pages for a file: group rows by page number, keeping all values per field.
-// Preserves first-appearance order so caller-side sorting carries through.
-function buildFilePages(rows: ExtractedRow[]): Array<{ page: number; multi: Record<string, string[]> }> {
-  const byPage = new Map<number, Record<string, string[]>>();
-  const order: number[] = [];
-  for (const row of rows) {
-    if (!row.value) continue;
-    if (!byPage.has(row.page)) {
-      byPage.set(row.page, {});
-      order.push(row.page);
-    }
-    const pageMap = byPage.get(row.page)!;
-    if (!pageMap[row.field]) pageMap[row.field] = [];
-    pageMap[row.field].push(row.value);
-  }
-  return order.map(page => ({ page, multi: byPage.get(page)! }));
-}
-
-// Append one property/account block (header + data + total + average) into wsData.
-// Returns the next available row index after the block.
-function appendBankStatementGroup(
-  wsData: any[][],
-  styles: { row: number; col: number; style: any }[],
-  startRow: number,
-  files: BankFileEntry[],
-): number {
-  const headerColor = HEADER_COLORS.bank_statement;
-  const propBlueBg  = 'D6E4F0';
-  const totalRowBg  = 'EEF2F7';
-  const NUM_COLS    = BANK_STMT_COLS.length;
-
-  let ri = startRow;
-  const push = (cells: any[]) => {
-    while (wsData.length <= ri) wsData.push([]);
-    wsData[ri] = cells;
-    return ri++;
-  };
-  const sc = (r: number, c: number, s: any) => styles.push({ row: r, col: c, style: s });
-
-  // Property/account meta from the first file in this group
-  const firstWithMeta = files.find(f => f.map.property_name || f.map.account_number) ?? files[0];
-  const propertyName  = firstWithMeta?.map.property_name  || '';
-  const accountNumber = firstWithMeta?.map.account_number || '';
-
-  const parseNum = (s: string) => {
-    const n = parseFloat(s.replace(/[$,\s]/g, ''));
-    return isNaN(n) ? null : n;
-  };
-  const fmtMoney = (n: number) =>
-    `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-
-  // Preserve caller order (so ExcelPanel sorting carries through to export)
-  const sorted = files;
-
-  // ── Row 0: Property header ──────────────────────────────────────────────
-  const propRow: any[] = [
-    'Property Name',
-    propertyName,
-    accountNumber ? `Account: ${accountNumber}` : '',
-    '', '', '', '', '', '', '',
-  ];
-  const r0 = push(propRow);
-  for (let c = 0; c < NUM_COLS; c++) {
-    sc(r0, c, cell(propBlueBg, true, 'left', 10));
-  }
-
-  // ── Row 1: Dark blue column headers ─────────────────────────────────────
-  const r1 = push(BANK_STMT_COLS);
-  for (let c = 0; c < NUM_COLS; c++) {
-    sc(r1, c, hdr(headerColor.bg, headerColor.font));
-  }
-
-  // ── Data rows — one per (file, page) ────────────────────────────────────
-  let totalDeposits = 0;
-  let totalWithdrawals = 0;
-  let totalActualDeposits = 0;
-  let depositCount = 0;
-  let actualDepositCount = 0;
-
-  const fmtVal = (s: string) => {
-    const n = parseNum(s);
-    return n !== null ? fmtMoney(n) : s;
-  };
-
-  for (const file of sorted) {
-    const pages = file.pages.length > 0
-      ? file.pages
-      : [{ page: 1, multi: {} as Record<string, string[]> }];
-
-    for (const { multi } of pages) {
-      // One row per page — first value if multi, fall back to file-level map.
-      const getField = (key: string): string => {
-        const arr = multi[key];
-        if (arr && arr.length > 0) return arr[0];
-        return file.map[key] || '';
-      };
-
-      const date        = getField('statement_date');
-      const depositsStr = getField('total_credits');
-      const withdrawStr = getField('total_debits');
-      const endingBal   = getField('ending_balance');
-
-      const dn = parseNum(depositsStr);
-      const wn = parseNum(withdrawStr);
-      if (dn !== null) { totalDeposits += dn; depositCount++; totalActualDeposits += dn; actualDepositCount++; }
-      if (wn !== null) { totalWithdrawals += wn; }
-
-      const row: any[] = [
-        date,
-        depositsStr ? fmtVal(depositsStr) : '',
-        withdrawStr ? fmtVal(withdrawStr) : '',
-        endingBal   ? fmtVal(endingBal)   : '',
-        endingBal   ? fmtVal(endingBal)   : '',
-        '',
-        depositsStr ? fmtVal(depositsStr) : '',
-        '', '', '',
-      ];
-      const r = push(row);
-      for (let c = 0; c < NUM_COLS; c++) {
-        sc(r, c, cell(C.whiteBg, false, c === 0 ? 'left' : 'right', 9));
-      }
-    }
-  }
-
-  // ── Total row ───────────────────────────────────────────────────────────
-  const totalRow: any[] = [
-    'Total',
-    fmtMoney(totalDeposits),
-    fmtMoney(totalWithdrawals),
-    '', '', '',
-    fmtMoney(totalActualDeposits),
-    '', '', '',
-  ];
-  const tr = push(totalRow);
-  for (let c = 0; c < NUM_COLS; c++) {
-    sc(tr, c, cell(totalRowBg, true, c === 0 ? 'left' : 'right', 9));
-  }
-
-  // ── Average row ─────────────────────────────────────────────────────────
-  const avgDeposits       = depositCount > 0       ? totalDeposits / depositCount             : 0;
-  const avgActualDeposits = actualDepositCount > 0 ? totalActualDeposits / actualDepositCount : 0;
-  const avgRow: any[] = [
-    'Average',
-    depositCount > 0       ? fmtMoney(avgDeposits)       : '',
-    '',
-    '', '', '',
-    actualDepositCount > 0 ? fmtMoney(avgActualDeposits) : '',
-    '', '', '',
-  ];
-  const ar = push(avgRow);
-  for (let c = 0; c < NUM_COLS; c++) {
-    sc(ar, c, cell(totalRowBg, true, c === 0 ? 'left' : 'right', 9));
-  }
-
-  return ri;
-}
-
-function buildBankStatementSheet(
-  fileMap: Map<string, ExtractedRow[]>,
-): XLSX.WorkSheet {
-  const NUM_COLS = BANK_STMT_COLS.length;
-
-  // Flatten + group by property/account
-  const groups = new Map<string, BankFileEntry[]>();
-  for (const [name, rows] of fileMap.entries()) {
-    const entry: BankFileEntry = {
-      name,
-      map: flattenFileRows(rows),
-      pages: buildFilePages(rows),
-    };
-    const key = groupKey(entry.map);
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key)!.push(entry);
-  }
-
-  const wsData: any[][] = [];
-  const styles: { row: number; col: number; style: any }[] = [];
-  let nextRow = 0;
-
-  let first = true;
-  for (const files of groups.values()) {
-    if (!first) {
-      // Three blank separator rows between tables
-      wsData.push([]);
-      wsData.push([]);
-      wsData.push([]);
-      nextRow += 3;
-    }
-    nextRow = appendBankStatementGroup(wsData, styles, nextRow, files);
-    first = false;
-  }
-
-  const ws = XLSX.utils.aoa_to_sheet(wsData);
-  applyStyles(ws, wsData, styles);
-  ws['!cols'] = [
-    { wch: 14 },  // Date
-    { wch: 18 },  // Deposits
-    { wch: 18 },  // Withdrawals
-    { wch: 20 },  // Unadj Bal
-    { wch: 20 },  // Adj Bal
-    { wch: 14 },  // Adjustments
-    { wch: 18 },  // Actual Deposits
-    { wch: 12 },  // T-12
-    { wch: 26 },  // Deposits vs. Op Stmt. Diff
-    { wch: 16 },  // Comments
-  ];
-  // Suppress unused-var warning for NUM_COLS in case future edits use it
-  void NUM_COLS;
-  return ws;
-}
+// (Bank statement export now lives in bank-excel-export.ts using ExcelJS,
+//  with formulas, T-12 trailing metrics, gap-fill, and roll-up sheets.)
 
 // ---------------------------------------------------------------------------
 // Build a stacked-tables sheet — one table per PDF on a single sheet.
@@ -614,9 +315,13 @@ export function exportToExcel(
   const overallType = detectDocType(allRows);
 
   if (overallType === 'bank_statement') {
-    // Combined single-sheet layout
-    const ws = buildBankStatementSheet(fileMap);
-    XLSX.utils.book_append_sheet(wb, ws, 'Bank Statements');
+    // Bank statement uses the dedicated ExcelJS-based exporter with formulas,
+    // running balance chain, T-12 trailing metrics, and roll-up sheet.
+    // It downloads the workbook itself — early return.
+    downloadBankStatementExcel(data, provider).catch(err => {
+      console.error('Bank statement export failed:', err);
+    });
+    return;
   } else if (overallType === 'appraisal') {
     // One sheet, one table per PDF stacked vertically
     const ws = buildStackedTablesSheet(fileMap, 'appraisal', 'E5D6F0'); // light purple
