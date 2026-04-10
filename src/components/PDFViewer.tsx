@@ -61,7 +61,7 @@ export default function PDFViewer({
   const [pdfPageWidth, setPdfPageWidth] = useState<number | null>(null);
   const [searchOpen, setSearchOpen]     = useState(false);
   const [searchQuery, setSearchQuery]   = useState('');
-  const [searchResults, setSearchResults] = useState<{ x: number; y: number; width: number; height: number }[]>([]);
+  const [searchResults, setSearchResults] = useState<Record<number, { x: number; y: number; width: number; height: number }[]>>({});
   const [pdfLoaded, setPdfLoaded]       = useState(false);
 
   const pageRefs  = useRef<Record<number, HTMLDivElement | null>>({});
@@ -466,34 +466,33 @@ export default function PDFViewer({
   const handleSearch = useCallback(async (query: string) => {
     setSearchQuery(query);
     if (!query.trim() || !pdfDocRef.current) {
-      setSearchResults([]);
+      setSearchResults({});
       return;
     }
     try {
-      const page = await pdfDocRef.current.getPage(currentPage);
-      const content = await page.getTextContent();
-      const vp = page.getViewport({ scale: 1 });
-      const items = content.items as { str: string; transform: number[]; width?: number; height?: number }[];
       const queryLower = query.toLowerCase();
-      const hits: { x: number; y: number; width: number; height: number }[] = [];
-      for (const item of items) {
-        if (!item.str || !item.transform) continue;
-        if (!item.str.toLowerCase().includes(queryLower)) continue;
-        const x = item.transform[4];
-        const itemTop = vp.height - item.transform[5];
-        const itemH = item.height || Math.abs(item.transform[3]) || 12;
-        const itemW = item.width || item.str.length * 6;
-        hits.push({ x: x / vp.width, y: itemTop / vp.height, width: itemW / vp.width, height: itemH / vp.height });
+      const allHits: Record<number, { x: number; y: number; width: number; height: number }[]> = {};
+      for (let p = 1; p <= totalPages; p++) {
+        const page = await pdfDocRef.current.getPage(p);
+        const content = await page.getTextContent();
+        const vp = page.getViewport({ scale: 1 });
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const items = content.items as any[];
+        const hits: { x: number; y: number; width: number; height: number }[] = [];
+        for (const item of items) {
+          if (!item.str || !item.transform) continue;
+          if (!item.str.toLowerCase().includes(queryLower)) continue;
+          const x = item.transform[4];
+          const itemTop = vp.height - item.transform[5];
+          const itemH = item.height || Math.abs(item.transform[3]) || 12;
+          const itemW = item.width || item.str.length * 6;
+          hits.push({ x: x / vp.width, y: itemTop / vp.height, width: itemW / vp.width, height: itemH / vp.height });
+        }
+        if (hits.length > 0) allHits[p] = hits;
       }
-      setSearchResults(hits);
-    } catch { setSearchResults([]); }
-  }, [currentPage]);
-
-  // Re-run search when page changes
-  useEffect(() => {
-    if (searchOpen && searchQuery) handleSearch(searchQuery);
-    else setSearchResults([]);
-  }, [currentPage]); // eslint-disable-line react-hooks/exhaustive-deps
+      setSearchResults(allHits);
+    } catch { setSearchResults({}); }
+  }, [totalPages]);
 
   // Close picker / search on Escape, toggle search with Ctrl+F, delete selected highlights
   useEffect(() => {
@@ -503,7 +502,7 @@ export default function PDFViewer({
       const isEditing = target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable);
 
       if (e.key === 'Escape') {
-        if (searchOpen) { setSearchOpen(false); setSearchQuery(''); setSearchResults([]); }
+        if (searchOpen) { setSearchOpen(false); setSearchQuery(''); setSearchResults({}); }
         else if (selectedIds.size > 0) setSelectedIds(new Set());
         else setPickerPos(null);
       }
@@ -600,7 +599,7 @@ export default function PDFViewer({
         searchOpen={searchOpen}
         onSearchToggle={() => {
           setSearchOpen(o => !o);
-          if (searchOpen) { setSearchQuery(''); setSearchResults([]); }
+          if (searchOpen) { setSearchQuery(''); setSearchResults({}); }
         }}
         fineRotation={fineRotation}
         onFineRotationChange={setFineRotation}
@@ -617,17 +616,17 @@ export default function PDFViewer({
             value={searchQuery}
             onChange={e => handleSearch(e.target.value)}
             onKeyDown={e => {
-              if (e.key === 'Escape') { setSearchOpen(false); setSearchQuery(''); setSearchResults([]); }
+              if (e.key === 'Escape') { setSearchOpen(false); setSearchQuery(''); setSearchResults({}); }
             }}
           />
           {searchQuery && (
             <span className="text-[11px] text-muted-foreground shrink-0">
-              {searchResults.length} match{searchResults.length !== 1 ? 'es' : ''}
+              {(() => { const total = Object.values(searchResults).reduce((s, h) => s + h.length, 0); return `${total} match${total !== 1 ? 'es' : ''}`; })()}
             </span>
           )}
           <button
             className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-200"
-            onClick={() => { setSearchOpen(false); setSearchQuery(''); setSearchResults([]); }}
+            onClick={() => { setSearchOpen(false); setSearchQuery(''); setSearchResults({}); }}
           >
             <span className="text-xs">Esc</span>
           </button>
@@ -739,9 +738,9 @@ export default function PDFViewer({
                   />
 
                   {/* Search highlights (shown on current page) */}
-                  {pageNum === currentPage && searchResults.length > 0 && (
+                  {(searchResults[pageNum]?.length ?? 0) > 0 && (
                     <div className="absolute inset-0 pointer-events-none overflow-hidden">
-                      {searchResults.map((r, i) => (
+                      {(searchResults[pageNum] ?? []).map((r, i) => (
                         <div
                           key={i}
                           className="absolute rounded-sm"
