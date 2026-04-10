@@ -193,42 +193,53 @@ export default function ExcelPanel({
     });
   }, [groups, fieldColumns]);
 
-  // ── Sort display rows within each PDF group ────────────────────────────
+  // ── Sort: rows within each PDF group + groups themselves ────────────────
   const sortedGroups = useMemo(() => {
     if (!sortCol) return displayGroups;
-    return displayGroups.map(g => {
-      const rows = [...g.rows].sort((a, b) => {
-        if (sortCol === 'page') {
-          return sortAsc
-            ? a.page - b.page || a.subIndex - b.subIndex
-            : b.page - a.page || a.subIndex - b.subIndex;
-        }
-        const av = a.cells[sortCol]?.value ?? '';
-        const bv = b.cells[sortCol]?.value ?? '';
-        const aEmpty = !av;
-        const bEmpty = !bv;
-        if (aEmpty && bEmpty) return 0;
-        if (aEmpty) return 1;
-        if (bEmpty) return -1;
 
-        // Date columns → parse as dates
-        if (isDateField(sortCol)) {
-          const ad = parseDateValue(av);
-          const bd = parseDateValue(bv);
-          if (!isNaN(ad) && !isNaN(bd)) {
-            return sortAsc ? ad - bd : bd - ad;
-          }
-        }
+    // Comparator for two display rows
+    const compareRows = (a: DisplayRow, b: DisplayRow): number => {
+      if (sortCol === 'page') {
+        return sortAsc
+          ? a.page - b.page || a.subIndex - b.subIndex
+          : b.page - a.page || a.subIndex - b.subIndex;
+      }
+      const av = a.cells[sortCol]?.value ?? '';
+      const bv = b.cells[sortCol]?.value ?? '';
+      const aEmpty = !av;
+      const bEmpty = !bv;
+      if (aEmpty && bEmpty) return 0;
+      if (aEmpty) return 1;
+      if (bEmpty) return -1;
 
-        // Numeric → parse numbers
-        const an = parseForSort(av);
-        const bn = parseForSort(bv);
-        if (!isNaN(an) && !isNaN(bn)) {
-          return sortAsc ? an - bn : bn - an;
+      // Date columns → parse as dates (year-aware)
+      if (isDateField(sortCol)) {
+        const ad = parseDateValue(av);
+        const bd = parseDateValue(bv);
+        if (!isNaN(ad) && !isNaN(bd)) {
+          return sortAsc ? ad - bd : bd - ad;
         }
-        return sortAsc ? av.localeCompare(bv) : bv.localeCompare(av);
-      });
-      return { ...g, rows };
+      }
+
+      // Numeric → parse numbers
+      const an = parseForSort(av);
+      const bn = parseForSort(bv);
+      if (!isNaN(an) && !isNaN(bn)) {
+        return sortAsc ? an - bn : bn - an;
+      }
+      return sortAsc ? av.localeCompare(bv) : bv.localeCompare(av);
+    };
+
+    // Sort rows within each group
+    const sortedInner = displayGroups.map(g => ({
+      ...g,
+      rows: [...g.rows].sort(compareRows),
+    }));
+
+    // Also sort the groups themselves by their first row's sort value
+    return [...sortedInner].sort((ga, gb) => {
+      if (ga.rows.length === 0 || gb.rows.length === 0) return 0;
+      return compareRows(ga.rows[0], gb.rows[0]);
     });
   }, [displayGroups, sortCol, sortAsc]);
 
