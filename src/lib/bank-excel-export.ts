@@ -105,9 +105,34 @@ const buildT12Months = (anchorDate: Date): string[] => {
 
 // ─── Similarity detection for merge suggestions ──────────────────────────────
 const normalizeText = (s: string): string =>
-  s.toLowerCase().replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim();
+  s.toLowerCase().replace(/[^\w\s]/g, ' ').replace(/\s+/g, ' ').trim();
 
 const normalizeAccount = (s: string): string => s.replace(/[^0-9]/g, '');
+
+// Generic stop-words to ignore in property/address comparison
+const STOP_WORDS = new Set([
+  'the', 'a', 'an', 'and', 'of', 'at', 'in', 'on', 'llc', 'inc', 'corp', 'co',
+  'ltd', 'lp', 'llp', 'apartments', 'apt', 'apts', 'st', 'street', 'rd', 'road',
+  'ave', 'avenue', 'blvd', 'boulevard', 'dr', 'drive', 'ln', 'lane', 'pl', 'place',
+  'ct', 'court', 'unit', 'suite', 'ste', 'fl', 'floor',
+]);
+
+const tokenize = (s: string): string[] =>
+  normalizeText(s).split(' ').filter(w => w.length > 1);
+
+const significantTokens = (s: string): string[] =>
+  tokenize(s).filter(w => !STOP_WORDS.has(w));
+
+// Jaccard similarity over significant tokens
+const jaccard = (aTokens: string[], bTokens: string[]): number => {
+  if (aTokens.length === 0 || bTokens.length === 0) return 0;
+  const a = new Set(aTokens);
+  const b = new Set(bTokens);
+  let intersect = 0;
+  for (const t of a) if (b.has(t)) intersect++;
+  const union = a.size + b.size - intersect;
+  return union === 0 ? 0 : intersect / union;
+};
 
 // Levenshtein distance for fuzzy matching
 function levenshtein(a: string, b: string): number {
@@ -132,11 +157,26 @@ const propertySimilar = (a: string, b: string): boolean => {
   const na = normalizeText(a);
   const nb = normalizeText(b);
   if (na === nb) return true;
-  if (na.length < 3 || nb.length < 3) return false;
+  if (na.length < 2 || nb.length < 2) return false;
+
+  // 1. Substring match (one fully contained in the other)
   if (na.includes(nb) || nb.includes(na)) return true;
-  // Allow small typos: distance ≤ 2 or ≤20% of length
+
+  // 2. Jaccard on significant tokens — share at least 50% of meaningful words
+  const sa = significantTokens(a);
+  const sb = significantTokens(b);
+  if (sa.length > 0 && sb.length > 0) {
+    if (jaccard(sa, sb) >= 0.5) return true;
+    // OR: at least 2 significant tokens shared if either side has many words
+    const shared = sa.filter(t => sb.includes(t)).length;
+    if (shared >= 2) return true;
+    // OR: any shared significant token if either side is very short
+    if (shared >= 1 && (sa.length <= 2 || sb.length <= 2)) return true;
+  }
+
+  // 3. Fuzzy character distance — generous threshold
   const dist = levenshtein(na, nb);
-  const limit = Math.max(2, Math.floor(Math.min(na.length, nb.length) * 0.2));
+  const limit = Math.max(3, Math.floor(Math.min(na.length, nb.length) * 0.3));
   return dist <= limit;
 };
 
@@ -146,9 +186,15 @@ const accountSimilar = (a: string, b: string): boolean => {
   const db = normalizeAccount(b);
   if (!da || !db) return false;
   if (da === db) return true;
-  // Same last 4 digits is a strong indicator (masked accounts)
+  // Last 4 digits match — strong masked-account indicator
   if (da.length >= 4 && db.length >= 4 && da.slice(-4) === db.slice(-4)) return true;
-  // One contains the other
+  // Last 3 digits match if one side is very short (e.g. masked "XXX123")
+  if (da.length >= 3 && db.length >= 3 && da.slice(-3) === db.slice(-3) &&
+      (da.length <= 6 || db.length <= 6)) return true;
+  // One is a suffix/prefix of the other
+  if (da.endsWith(db) || db.endsWith(da)) return true;
+  if (da.startsWith(db) || db.startsWith(da)) return true;
+  // Substring (catches odd OCR insertions)
   if (da.includes(db) || db.includes(da)) return true;
   return false;
 };
@@ -158,12 +204,30 @@ const addressSimilar = (a: string, b: string): boolean => {
   const na = normalizeText(a);
   const nb = normalizeText(b);
   if (na === nb) return true;
-  if (na.length < 5 || nb.length < 5) return false;
-  // Substring match for partial addresses
+  if (na.length < 4 || nb.length < 4) return false;
+
+  // Substring match
   if (na.includes(nb) || nb.includes(na)) return true;
-  // Levenshtein for OCR-style differences
+
+  // Token-based: addresses share house number + street name
+  const sa = significantTokens(a);
+  const sb = significantTokens(b);
+  if (sa.length > 0 && sb.length > 0) {
+    if (jaccard(sa, sb) >= 0.4) return true;
+    // Compare numeric tokens (street numbers, zip)
+    const numsA = tokenize(a).filter(t => /^\d+$/.test(t));
+    const numsB = tokenize(b).filter(t => /^\d+$/.test(t));
+    const sharedNums = numsA.filter(n => numsB.includes(n)).length;
+    if (sharedNums >= 1 && (numsA.length > 0 && numsB.length > 0)) {
+      // At least one matching number AND at least one shared significant token
+      const sharedTokens = sa.filter(t => sb.includes(t)).length;
+      if (sharedTokens >= 1) return true;
+    }
+  }
+
+  // Fuzzy fallback
   const dist = levenshtein(na, nb);
-  return dist <= Math.max(3, Math.floor(Math.min(na.length, nb.length) * 0.15));
+  return dist <= Math.max(4, Math.floor(Math.min(na.length, nb.length) * 0.25));
 };
 
 // Generic group builder — clusters values that pass the similarity check
@@ -642,16 +706,22 @@ export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilen
         cell.font   = { name: 'Arial', size: 10, color: { argb: 'FFFFFFFF' } };
         cell.border = allBorders;
       });
+      const adjRn = adjRow.number;
 
-      // Row formula helper
+      // Row formula helper — fills E (Unadj Bal), F (Adj Bal), H (Actual Deposits), J (Diff)
       const applyRowFormulas = (row: ExcelJS.Row, rn: number) => {
         row.getCell(3).numFmt  = blankZeroCurrencyFmt;
         row.getCell(4).numFmt  = blankZeroCurrencyFmt;
-        // E (Unadjusted Balance), F (Adjusted Balance), J (Deposits vs. Op Stmt. Diff.) — left empty
+        row.getCell(5).value   = { formula: `IFERROR(E${rn - 1}+C${rn}-D${rn},0)` };
+        row.getCell(5).numFmt  = currencyFmt;
+        row.getCell(6).value   = { formula: `IFERROR(F${rn - 1}+H${rn}-IF(D${rn}="",0,D${rn}),0)` };
+        row.getCell(6).numFmt  = currencyFmt;
         row.getCell(7).numFmt  = blankZeroCurrencyFmt;
         row.getCell(8).value   = { formula: `IFERROR(C${rn}-G${rn},0)` };
         row.getCell(8).numFmt  = currencyFmt;
         row.getCell(9).numFmt  = blankZeroCurrencyFmt;
+        row.getCell(10).value  = { formula: `IFERROR(H${rn}-I${rn},0)` };
+        row.getCell(10).numFmt = currencyFmt;
         row.eachCell((cell, colNum) => {
           if (colNum === 1) { cell.border = {}; return; }
           cell.font = baseFont;
@@ -666,7 +736,11 @@ export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilen
       const lastStatementDate  = parsedStatementDates.length > 0 ? parsedStatementDates[parsedStatementDates.length - 1] : null;
       const firstStatementDate = parsedStatementDates.length > 0 ? parsedStatementDates[0] : null;
 
+      // Beginning balance from the first item (chronologically sorted)
+      const beginningBalance = acctItems[0]?.beginningBalance || 0;
+
       // Gap-fill placeholder rows for months before first statement (within T-12 window)
+      let lastRowBeforeData = adjRn;
       if (lastStatementDate && firstStatementDate) {
         const t12StartMonth = lastStatementDate.getMonth() - 11;
         const t12StartYear  = lastStatementDate.getFullYear();
@@ -679,9 +753,19 @@ export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilen
           if (!parsedStatementDates.some(d => d.getMonth() === curMonth && d.getFullYear() === curYear)) {
             const pRow = ws.addRow(['', fmtDate(getEndOfMonth(curYear, curMonth)), '', '', '', '', 0, '', 0, '', '']);
             applyRowFormulas(pRow, pRow.number);
+            lastRowBeforeData = pRow.number;
           }
           curMonth++; if (curMonth > 11) { curMonth = 0; curYear++; }
         }
+      }
+
+      // Seed beginning balance into the last row before actual data (E and F)
+      if (beginningBalance) {
+        const targetRow = ws.getRow(lastRowBeforeData);
+        targetRow.getCell(5).value  = beginningBalance;
+        targetRow.getCell(5).numFmt = currencyFmt;
+        targetRow.getCell(6).value  = { formula: `E${lastRowBeforeData}` };
+        targetRow.getCell(6).numFmt = currencyFmt;
       }
 
       // Main data rows — one per statement (PDF)
