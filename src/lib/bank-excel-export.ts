@@ -568,25 +568,33 @@ const addRollupTable = (
     totalWithdrawals += withdrawals;
   });
 
-  const totRow = ws.addRow(['', 'Total', totalDeposits || '', totalWithdrawals || '', '', '', '', '', '', '', '']);
-  totRow.getCell(3).numFmt = blankZeroCurrencyFmt;
-  totRow.getCell(4).numFmt = blankZeroCurrencyFmt;
+  const totRow = ws.addRow(['', 'Total', '', '', '', '', '', '', '', '', '']);
+  if (firstDataRn !== null && lastDataRn > 0) {
+    totRow.getCell(3).value  = { formula: `SUM(C${firstDataRn}:C${lastDataRn})` };
+    totRow.getCell(3).numFmt = blankZeroCurrencyFmt;
+    totRow.getCell(4).value  = { formula: `SUM(D${firstDataRn}:D${lastDataRn})` };
+    totRow.getCell(4).numFmt = blankZeroCurrencyFmt;
+    totRow.getCell(8).value  = { formula: `SUM(H${firstDataRn}:H${lastDataRn})` };
+    totRow.getCell(8).numFmt = currencyFmt;
+  }
   totRow.eachCell((cell, colNum) => {
     if (colNum === 1) { cell.border = {}; return; }
     cell.fill = totalFill; cell.font = boldFont; cell.border = allBorders;
   });
 
   const avgRow = ws.addRow(['', 'Average', '', '', '', '', '', '', '', '', '']);
+  if (firstDataRn !== null && lastDataRn > 0) {
+    avgRow.getCell(3).value  = { formula: `IFERROR(AVERAGEIF(C${firstDataRn}:C${lastDataRn},"<>",C${firstDataRn}:C${lastDataRn}),0)` };
+    avgRow.getCell(3).numFmt = blankZeroCurrencyFmt;
+    avgRow.getCell(4).value  = { formula: `IFERROR(AVERAGEIF(D${firstDataRn}:D${lastDataRn},"<>",D${firstDataRn}:D${lastDataRn}),0)` };
+    avgRow.getCell(4).numFmt = blankZeroCurrencyFmt;
+    avgRow.getCell(8).value  = { formula: `IFERROR(AVERAGEIF(H${firstDataRn}:H${lastDataRn},"<>0",H${firstDataRn}:H${lastDataRn}),0)` };
+    avgRow.getCell(8).numFmt = currencyFmt;
+  }
   avgRow.eachCell((cell, colNum) => {
     if (colNum === 1) { cell.border = {}; return; }
     cell.fill = totalFill; cell.font = boldFont; cell.border = allBorders;
   });
-  if (firstDataRn !== null && lastDataRn > 0) {
-    avgRow.getCell(3).value  = { formula: `IFERROR(AVERAGEIF(C${firstDataRn}:C${lastDataRn},"<>",C${firstDataRn}:C${lastDataRn}),0)` };
-    avgRow.getCell(3).numFmt = blankZeroCurrencyFmt;
-    avgRow.getCell(8).value  = { formula: `IFERROR(AVERAGEIF(H${firstDataRn}:H${lastDataRn},"<>0",H${firstDataRn}:H${lastDataRn}),0)` };
-    avgRow.getCell(8).numFmt = currencyFmt;
-  }
 
   return { lastDataRn, headerRn };
 };
@@ -773,11 +781,14 @@ export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilen
       let firstDataRn: number | null = null, lastDataRn = 0;
 
       for (const it of acctItems) {
-        const deposits    = it.totalCredits;
-        const withdrawals = it.totalDebits;
+        // Use the raw extracted string values, not parsed numbers.
+        // parseNum may misinterpret concatenated/garbled values.
+        // Write the raw value and let ExcelJS handle it.
+        const depositsRaw  = it.totalCredits;
+        const withdrawRaw  = it.totalDebits;
 
-        sumDeposits    += deposits;
-        sumWithdrawals += withdrawals;
+        sumDeposits    += depositsRaw;
+        sumWithdrawals += withdrawRaw;
 
         // Format date to end-of-month
         let formattedDate = it.statementDate;
@@ -786,7 +797,15 @@ export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilen
           formattedDate = fmtDate(getEndOfMonth(parsed.getFullYear(), parsed.getMonth()));
         }
 
-        const dataRow = ws.addRow(['', formattedDate, deposits || '', withdrawals || '', '', '', 0, '', 0, '', '']);
+        // Write deposits/withdrawals as numbers so Excel SUM works.
+        // Use empty string for zero to keep cells blank (like the original format).
+        const dataRow = ws.addRow([
+          '',
+          formattedDate,
+          depositsRaw  ? depositsRaw  : '',
+          withdrawRaw  ? withdrawRaw  : '',
+          '', '', 0, '', 0, '', '',
+        ]);
         const rn = dataRow.number;
         if (firstDataRn === null) firstDataRn = rn;
         lastDataRn = rn;
@@ -794,11 +813,11 @@ export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilen
 
         if (formattedDate) {
           const pe = propertyDateMap.get(formattedDate) ?? { deposits: 0, withdrawals: 0 };
-          pe.deposits += deposits; pe.withdrawals += withdrawals;
+          pe.deposits += depositsRaw; pe.withdrawals += withdrawRaw;
           propertyDateMap.set(formattedDate, pe);
 
           const ge = globalDateMap.get(formattedDate) ?? { deposits: 0, withdrawals: 0 };
-          ge.deposits += deposits; ge.withdrawals += withdrawals;
+          ge.deposits += depositsRaw; ge.withdrawals += withdrawRaw;
           globalDateMap.set(formattedDate, ge);
         }
       }
@@ -806,25 +825,28 @@ export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilen
       sheetLastDataRn = lastDataRn;
       firstAccount    = false;
 
-      // Total row
-      const totRow = ws.addRow(['', 'Total', sumDeposits || '', sumWithdrawals || '', '', '', '', '', '', '', '']);
-      totRow.getCell(3).numFmt = blankZeroCurrencyFmt;
-      totRow.getCell(4).numFmt = blankZeroCurrencyFmt;
-      totRow.getCell(8).numFmt = currencyFmt;
+      // Total row — use SUM formulas over the data range
+      const totRow = ws.addRow(['', 'Total', '', '', '', '', '', '', '', '', '']);
+      if (firstDataRn !== null && lastDataRn > 0) {
+        totRow.getCell(3).value  = { formula: `SUM(C${firstDataRn}:C${lastDataRn})` };
+        totRow.getCell(3).numFmt = blankZeroCurrencyFmt;
+        totRow.getCell(4).value  = { formula: `SUM(D${firstDataRn}:D${lastDataRn})` };
+        totRow.getCell(4).numFmt = blankZeroCurrencyFmt;
+        totRow.getCell(8).value  = { formula: `SUM(H${firstDataRn}:H${lastDataRn})` };
+        totRow.getCell(8).numFmt = currencyFmt;
+      }
       totRow.eachCell((cell, colNum) => {
         if (colNum === 1) { cell.border = {}; return; }
         cell.fill = totalFill; cell.font = boldFont; cell.border = allBorders;
       });
 
-      // Average row
+      // Average row — AVERAGEIF to skip blank/zero cells
       const avgRow = ws.addRow(['', 'Average', '', '', '', '', '', '', '', '', '']);
-      avgRow.eachCell((cell, colNum) => {
-        if (colNum === 1) { cell.border = {}; return; }
-        cell.fill = totalFill; cell.font = boldFont; cell.border = allBorders;
-      });
       if (firstDataRn !== null && lastDataRn > 0) {
         avgRow.getCell(3).value  = { formula: `IFERROR(AVERAGEIF(C${firstDataRn}:C${lastDataRn},"<>",C${firstDataRn}:C${lastDataRn}),0)` };
         avgRow.getCell(3).numFmt = blankZeroCurrencyFmt;
+        avgRow.getCell(4).value  = { formula: `IFERROR(AVERAGEIF(D${firstDataRn}:D${lastDataRn},"<>",D${firstDataRn}:D${lastDataRn}),0)` };
+        avgRow.getCell(4).numFmt = blankZeroCurrencyFmt;
         avgRow.getCell(8).value  = { formula: `IFERROR(AVERAGEIF(H${firstDataRn}:H${lastDataRn},"<>0",H${firstDataRn}:H${lastDataRn}),0)` };
         avgRow.getCell(8).numFmt = currencyFmt;
       }
