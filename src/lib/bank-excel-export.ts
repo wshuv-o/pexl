@@ -103,6 +103,158 @@ const buildT12Months = (anchorDate: Date): string[] => {
   return months;
 };
 
+// ─── Similarity detection for merge suggestions ──────────────────────────────
+const normalizeText = (s: string): string =>
+  s.toLowerCase().replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim();
+
+const normalizeAccount = (s: string): string => s.replace(/[^0-9]/g, '');
+
+// Levenshtein distance for fuzzy matching
+function levenshtein(a: string, b: string): number {
+  if (a === b) return 0;
+  if (!a.length) return b.length;
+  if (!b.length) return a.length;
+  const m: number[][] = [];
+  for (let i = 0; i <= b.length; i++) m[i] = [i];
+  for (let j = 0; j <= a.length; j++) m[0][j] = j;
+  for (let i = 1; i <= b.length; i++) {
+    for (let j = 1; j <= a.length; j++) {
+      m[i][j] = b[i - 1] === a[j - 1]
+        ? m[i - 1][j - 1]
+        : Math.min(m[i - 1][j - 1] + 1, m[i][j - 1] + 1, m[i - 1][j] + 1);
+    }
+  }
+  return m[b.length][a.length];
+}
+
+const propertySimilar = (a: string, b: string): boolean => {
+  if (!a || !b) return false;
+  const na = normalizeText(a);
+  const nb = normalizeText(b);
+  if (na === nb) return true;
+  if (na.length < 3 || nb.length < 3) return false;
+  if (na.includes(nb) || nb.includes(na)) return true;
+  // Allow small typos: distance ≤ 2 or ≤20% of length
+  const dist = levenshtein(na, nb);
+  const limit = Math.max(2, Math.floor(Math.min(na.length, nb.length) * 0.2));
+  return dist <= limit;
+};
+
+const accountSimilar = (a: string, b: string): boolean => {
+  if (!a || !b) return false;
+  const da = normalizeAccount(a);
+  const db = normalizeAccount(b);
+  if (!da || !db) return false;
+  if (da === db) return true;
+  // Same last 4 digits is a strong indicator (masked accounts)
+  if (da.length >= 4 && db.length >= 4 && da.slice(-4) === db.slice(-4)) return true;
+  // One contains the other
+  if (da.includes(db) || db.includes(da)) return true;
+  return false;
+};
+
+const addressSimilar = (a: string, b: string): boolean => {
+  if (!a || !b) return false;
+  const na = normalizeText(a);
+  const nb = normalizeText(b);
+  if (na === nb) return true;
+  if (na.length < 5 || nb.length < 5) return false;
+  // Substring match for partial addresses
+  if (na.includes(nb) || nb.includes(na)) return true;
+  // Levenshtein for OCR-style differences
+  const dist = levenshtein(na, nb);
+  return dist <= Math.max(3, Math.floor(Math.min(na.length, nb.length) * 0.15));
+};
+
+// Generic group builder — clusters values that pass the similarity check
+function findSimilarGroups(values: string[], similarFn: (a: string, b: string) => boolean): string[][] {
+  const groups: string[][] = [];
+  const used = new Set<number>();
+  for (let i = 0; i < values.length; i++) {
+    if (used.has(i)) continue;
+    const group = [values[i]];
+    used.add(i);
+    for (let j = i + 1; j < values.length; j++) {
+      if (used.has(j)) continue;
+      if (similarFn(values[i], values[j])) {
+        group.push(values[j]);
+        used.add(j);
+      }
+    }
+    if (group.length > 1) groups.push(group);
+  }
+  return groups;
+}
+
+export interface MergeGroup {
+  field: 'property_name' | 'account_number' | 'address';
+  fieldLabel: string;
+  values: string[];        // distinct similar values found
+}
+
+export interface MergeChoice {
+  field: 'property_name' | 'account_number' | 'address';
+  values: string[];        // values to merge
+  canonical: string;       // chosen canonical value
+}
+
+// Scan extracted bank statement data for merge opportunities
+export function findMergeOpportunities(data: ExtractedRow[]): MergeGroup[] {
+  // Group rows by file → flatten each file
+  const fileMap = new Map<string, ExtractedRow[]>();
+  for (const row of data) {
+    const key = row.filename || 'Unknown';
+    if (!fileMap.has(key)) fileMap.set(key, []);
+    fileMap.get(key)!.push(row);
+  }
+
+  const props = new Set<string>();
+  const accts = new Set<string>();
+  const addrs = new Set<string>();
+
+  for (const rows of fileMap.values()) {
+    const item = flattenToItem('', rows);
+    if (item.propertyName)  props.add(item.propertyName);
+    if (item.accountNumber) accts.add(item.accountNumber);
+    if (item.address)       addrs.add(item.address);
+  }
+
+  const groups: MergeGroup[] = [];
+  const propGroups = findSimilarGroups(Array.from(props), propertySimilar);
+  for (const g of propGroups) groups.push({ field: 'property_name', fieldLabel: 'Property Name', values: g });
+
+  const acctGroups = findSimilarGroups(Array.from(accts), accountSimilar);
+  for (const g of acctGroups) groups.push({ field: 'account_number', fieldLabel: 'Account Number', values: g });
+
+  const addrGroups = findSimilarGroups(Array.from(addrs), addressSimilar);
+  for (const g of addrGroups) groups.push({ field: 'address', fieldLabel: 'Address', values: g });
+
+  return groups;
+}
+
+// Apply user-confirmed merges by replacing values in the data
+export function applyMerges(data: ExtractedRow[], choices: MergeChoice[]): ExtractedRow[] {
+  if (choices.length === 0) return data;
+  // Build a per-field replacement map
+  const replaceMap: Record<string, Map<string, string>> = {
+    property_name:  new Map(),
+    account_number: new Map(),
+    address:        new Map(),
+  };
+  for (const c of choices) {
+    for (const v of c.values) {
+      if (v !== c.canonical) replaceMap[c.field].set(v, c.canonical);
+    }
+  }
+  return data.map(row => {
+    const m = replaceMap[row.field];
+    if (m && row.value && m.has(row.value)) {
+      return { ...row, value: m.get(row.value)! };
+    }
+    return row;
+  });
+}
+
 // ─── Pexl → bank statement item adapter ──────────────────────────────────────
 interface BankStatementItem {
   filename: string;
@@ -490,22 +642,16 @@ export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilen
         cell.font   = { name: 'Arial', size: 10, color: { argb: 'FFFFFFFF' } };
         cell.border = allBorders;
       });
-      const adjRn = adjRow.number;
 
       // Row formula helper
       const applyRowFormulas = (row: ExcelJS.Row, rn: number) => {
         row.getCell(3).numFmt  = blankZeroCurrencyFmt;
         row.getCell(4).numFmt  = blankZeroCurrencyFmt;
-        row.getCell(5).value   = { formula: `IFERROR(E${rn - 1}+C${rn}-D${rn},0)` };
-        row.getCell(5).numFmt  = currencyFmt;
-        row.getCell(6).value   = { formula: `IFERROR(F${rn - 1}+H${rn}-IF(D${rn}="",0,D${rn}),0)` };
-        row.getCell(6).numFmt  = currencyFmt;
+        // E (Unadjusted Balance), F (Adjusted Balance), J (Deposits vs. Op Stmt. Diff.) — left empty
         row.getCell(7).numFmt  = blankZeroCurrencyFmt;
         row.getCell(8).value   = { formula: `IFERROR(C${rn}-G${rn},0)` };
         row.getCell(8).numFmt  = currencyFmt;
         row.getCell(9).numFmt  = blankZeroCurrencyFmt;
-        row.getCell(10).value  = { formula: `IFERROR(H${rn}-I${rn},0)` };
-        row.getCell(10).numFmt = currencyFmt;
         row.eachCell((cell, colNum) => {
           if (colNum === 1) { cell.border = {}; return; }
           cell.font = baseFont;
@@ -520,11 +666,7 @@ export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilen
       const lastStatementDate  = parsedStatementDates.length > 0 ? parsedStatementDates[parsedStatementDates.length - 1] : null;
       const firstStatementDate = parsedStatementDates.length > 0 ? parsedStatementDates[0] : null;
 
-      // Beginning balance from the first item
-      const beginningBalance = acctItems[0]?.beginningBalance || 0;
-
       // Gap-fill placeholder rows for months before first statement (within T-12 window)
-      let lastRowBeforeData = adjRn;
       if (lastStatementDate && firstStatementDate) {
         const t12StartMonth = lastStatementDate.getMonth() - 11;
         const t12StartYear  = lastStatementDate.getFullYear();
@@ -537,19 +679,9 @@ export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilen
           if (!parsedStatementDates.some(d => d.getMonth() === curMonth && d.getFullYear() === curYear)) {
             const pRow = ws.addRow(['', fmtDate(getEndOfMonth(curYear, curMonth)), '', '', '', '', 0, '', 0, '', '']);
             applyRowFormulas(pRow, pRow.number);
-            lastRowBeforeData = pRow.number;
           }
           curMonth++; if (curMonth > 11) { curMonth = 0; curYear++; }
         }
-      }
-
-      // Set beginning balance on the last row before actual data
-      if (beginningBalance) {
-        const targetRow = ws.getRow(lastRowBeforeData);
-        targetRow.getCell(5).value  = beginningBalance;
-        targetRow.getCell(5).numFmt = currencyFmt;
-        targetRow.getCell(6).value  = { formula: `E${lastRowBeforeData}` };
-        targetRow.getCell(6).numFmt = currencyFmt;
       }
 
       // Main data rows — one per statement (PDF)

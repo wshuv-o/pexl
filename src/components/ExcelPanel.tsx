@@ -6,6 +6,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import type { ExtractedRow } from '@/types/utilscraper';
 import { getFieldConfig } from '@/types/utilscraper';
 import { exportToExcel } from '@/lib/excel-export';
+import { findMergeOpportunities, applyMerges, type MergeGroup, type MergeChoice } from '@/lib/bank-excel-export';
+import MergeDialog from '@/components/bank/MergeDialog';
 
 interface Props {
   data: ExtractedRow[];
@@ -119,6 +121,7 @@ export default function ExcelPanel({
   data, filename, provider, onClose, onReExtract, onDataChange, multiFile, onDownload,
 }: Props) {
   const [editingKey, setEditingKey] = useState<string | null>(null);
+  const [mergeGroups, setMergeGroups] = useState<MergeGroup[] | null>(null);
   const [sortCol, setSortCol]       = useState<string | null>(null);
   const [sortAsc, setSortAsc]       = useState(true);
 
@@ -301,12 +304,36 @@ export default function ExcelPanel({
           <Button
             size="sm"
             className="flex-1 h-8 text-xs bg-primary hover:bg-primary/90 text-primary-foreground font-semibold"
-            onClick={() => { exportToExcel(sortedFlat, filename, provider); onDownload?.(); }}
+            onClick={() => {
+              // Detect merge opportunities (only meaningful for bank statements,
+              // but the function is safe to call on any data — returns [] otherwise).
+              const groups = findMergeOpportunities(sortedFlat);
+              if (groups.length > 0) {
+                setMergeGroups(groups);
+              } else {
+                exportToExcel(sortedFlat, filename, provider);
+                onDownload?.();
+              }
+            }}
           >
             <Download className="w-3.5 h-3.5 mr-1.5" /> Export .xlsx
           </Button>
         </div>
       </div>
+
+      {/* Merge dialog — only shown when similar items are detected */}
+      {mergeGroups && (
+        <MergeDialog
+          groups={mergeGroups}
+          onCancel={() => setMergeGroups(null)}
+          onConfirm={(choices: MergeChoice[]) => {
+            const merged = choices.length > 0 ? applyMerges(sortedFlat, choices) : sortedFlat;
+            exportToExcel(merged, filename, provider);
+            onDownload?.();
+            setMergeGroups(null);
+          }}
+        />
+      )}
 
       {/* ── Scrollable table area ─────────────────────────────────────── */}
       <div className="flex-1 overflow-auto custom-scrollbar">
