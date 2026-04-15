@@ -331,7 +331,6 @@ export default function Index() {
                 <UploadZone
                   compact={hasUploaded}
                   onFilesSelected={handleFilesSelected}
-                  hasFiles={pendingFiles.length > 0}
                   pendingFiles={pendingFiles}
                   docType={pendingDocType}
                   onDocTypeChange={setPendingDocType}

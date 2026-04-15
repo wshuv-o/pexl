@@ -6,7 +6,6 @@ import { DOCUMENT_TYPES, type DocumentType } from '@/types/utilscraper';
 interface UploadZoneProps {
   compact: boolean;
   onFilesSelected: (files: File[]) => void;
-  hasFiles: boolean;
   pendingFiles: File[];
   docType: DocumentType;
   onDocTypeChange: (t: DocumentType) => void;
@@ -15,7 +14,7 @@ interface UploadZoneProps {
 }
 
 export default function UploadZone({
-  compact, onFilesSelected, hasFiles, pendingFiles, docType, onDocTypeChange, onProcess, processing,
+  compact, onFilesSelected, pendingFiles, docType, onDocTypeChange, onProcess, processing,
 }: UploadZoneProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
@@ -118,18 +117,18 @@ export default function UploadZone({
           onDrop={handleDrop}
         >
           <Upload className="w-4 h-4 text-primary shrink-0" />
-          <span className="text-muted-foreground text-xs flex-1">Drop more PDFs/folders or click</span>
-          <button
-            type="button"
-            onClick={e => { e.stopPropagation(); folderInputCompactRef.current?.click(); }}
-            className="flex items-center gap-1 text-[10px] font-medium text-primary hover:underline shrink-0"
-            title="Select a folder of PDFs"
-          >
-            <FolderOpen className="w-3 h-3" /> Folder
-          </button>
-          <input ref={inputRef} type="file" accept=".pdf" multiple className="hidden" onChange={handleChange} />
-          <input ref={folderInputCompactRef} type="file" multiple className="hidden" onChange={handleChange} />
+          <span className="text-muted-foreground text-xs">Drop more PDFs or click to browse</span>
         </div>
+        <button
+          type="button"
+          onClick={() => folderInputCompactRef.current?.click()}
+          className="w-full flex items-center justify-center gap-1.5 text-[11px] font-medium text-primary hover:bg-primary/5 border border-dashed border-primary/30 rounded-lg py-1.5 transition-colors"
+          title="Select a folder — all PDFs inside will be uploaded"
+        >
+          <FolderOpen className="w-3.5 h-3.5" /> Select folder
+        </button>
+        <input ref={inputRef} type="file" accept=".pdf" multiple className="hidden" onChange={handleChange} />
+        <input ref={folderInputCompactRef} type="file" multiple className="hidden" onChange={handleChange} />
 
         {hasPending && (
           <>
@@ -175,18 +174,18 @@ export default function UploadZone({
           <Upload className={`w-6 h-6 transition-all duration-200 ${dragOver ? 'text-primary' : 'text-muted-foreground'}`} />
         </div>
         <p className="text-sm font-semibold text-foreground">Click to upload or drag and drop</p>
-        <p className="text-xs text-muted-foreground mt-1">PDF files or folders · multiple allowed</p>
-        <button
-          type="button"
-          onClick={e => { e.stopPropagation(); folderInputRef.current?.click(); }}
-          className="mt-3 inline-flex items-center gap-1.5 text-xs font-medium text-primary hover:underline"
-          title="Select a folder — all PDFs inside will be uploaded"
-        >
-          <FolderOpen className="w-3.5 h-3.5" /> Select folder instead
-        </button>
-        <input ref={inputRef} type="file" accept=".pdf" multiple className="hidden" onChange={handleChange} />
-        <input ref={folderInputRef} type="file" multiple className="hidden" onChange={handleChange} />
+        <p className="text-xs text-muted-foreground mt-1">PDF files only · multiple allowed</p>
       </div>
+      <button
+        type="button"
+        onClick={() => folderInputRef.current?.click()}
+        className="w-full flex items-center justify-center gap-2 text-xs font-medium text-primary border border-dashed border-primary/30 rounded-xl py-2.5 hover:bg-primary/5 transition-colors"
+        title="Select a folder — all PDFs inside will be uploaded"
+      >
+        <FolderOpen className="w-4 h-4" /> Select folder
+      </button>
+      <input ref={inputRef} type="file" accept=".pdf" multiple className="hidden" onChange={handleChange} />
+      <input ref={folderInputRef} type="file" multiple className="hidden" onChange={handleChange} />
 
       {hasPending && (
         <>
