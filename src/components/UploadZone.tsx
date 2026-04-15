@@ -34,24 +34,29 @@ export default function UploadZone({
   const isPdf = (f: File) =>
     f.type === 'application/pdf' || /\.pdf$/i.test(f.name);
 
-  // Recursively walk a dropped DataTransferItem entry tree (folders on drag-drop).
+  // Recursively walk a dropped FileSystemEntry tree (folders on drag-drop).
   const collectFilesFromEntry = useCallback(
-    async (entry: any): Promise<File[]> => {
+    async (entry: FileSystemEntry | null): Promise<File[]> => {
       if (!entry) return [];
       if (entry.isFile) {
+        const fileEntry = entry as FileSystemFileEntry;
         return new Promise<File[]>(resolve => {
-          entry.file((f: File) => resolve(isPdf(f) ? [f] : []), () => resolve([]));
+          fileEntry.file(f => resolve(isPdf(f) ? [f] : []), () => resolve([]));
         });
       }
       if (entry.isDirectory) {
-        const reader = entry.createReader();
-        const entries: any[] = await new Promise(resolve => {
-          const out: any[] = [];
+        const dirEntry = entry as FileSystemDirectoryEntry;
+        const reader = dirEntry.createReader();
+        const entries: FileSystemEntry[] = await new Promise(resolve => {
+          const out: FileSystemEntry[] = [];
           const readBatch = () => {
-            reader.readEntries((batch: any[]) => {
-              if (batch.length === 0) resolve(out);
-              else { out.push(...batch); readBatch(); }
-            }, () => resolve(out));
+            reader.readEntries(
+              batch => {
+                if (batch.length === 0) resolve(out);
+                else { out.push(...batch); readBatch(); }
+              },
+              () => resolve(out),
+            );
           };
           readBatch();
         });
@@ -72,7 +77,7 @@ export default function UploadZone({
     if (items && items.length > 0 && typeof items[0].webkitGetAsEntry === 'function') {
       const entries = Array.from(items)
         .map(i => i.webkitGetAsEntry())
-        .filter(Boolean);
+        .filter((e): e is FileSystemEntry => e !== null);
       const collected = await Promise.all(entries.map(collectFilesFromEntry));
       const files = collected.flat();
       if (files.length) onFilesSelected(files);
@@ -123,9 +128,9 @@ export default function UploadZone({
           type="button"
           onClick={() => folderInputCompactRef.current?.click()}
           className="w-full flex items-center justify-center gap-1.5 text-[11px] font-medium text-primary hover:bg-primary/5 border border-dashed border-primary/30 rounded-lg py-1.5 transition-colors"
-          title="Select a folder — all PDFs inside will be uploaded"
+          title="Pick a folder. Click again to add more folders, or drop multiple folders into the box above."
         >
-          <FolderOpen className="w-3.5 h-3.5" /> Select folder
+          <FolderOpen className="w-3.5 h-3.5" /> Add folder
         </button>
         <input ref={inputRef} type="file" accept=".pdf" multiple className="hidden" onChange={handleChange} />
         <input ref={folderInputCompactRef} type="file" multiple className="hidden" onChange={handleChange} />
@@ -174,15 +179,15 @@ export default function UploadZone({
           <Upload className={`w-6 h-6 transition-all duration-200 ${dragOver ? 'text-primary' : 'text-muted-foreground'}`} />
         </div>
         <p className="text-sm font-semibold text-foreground">Click to upload or drag and drop</p>
-        <p className="text-xs text-muted-foreground mt-1">PDF files only · multiple allowed</p>
+        <p className="text-xs text-muted-foreground mt-1">PDF files · drop folders to add their contents</p>
       </div>
       <button
         type="button"
         onClick={() => folderInputRef.current?.click()}
         className="w-full flex items-center justify-center gap-2 text-xs font-medium text-primary border border-dashed border-primary/30 rounded-xl py-2.5 hover:bg-primary/5 transition-colors"
-        title="Select a folder — all PDFs inside will be uploaded"
+        title="Pick a folder. Click again to add more folders, or drop multiple folders into the box above."
       >
-        <FolderOpen className="w-4 h-4" /> Select folder
+        <FolderOpen className="w-4 h-4" /> Add folder
       </button>
       <input ref={inputRef} type="file" accept=".pdf" multiple className="hidden" onChange={handleChange} />
       <input ref={folderInputRef} type="file" multiple className="hidden" onChange={handleChange} />
