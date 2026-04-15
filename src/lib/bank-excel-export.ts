@@ -41,7 +41,6 @@ const groupBorder = (
 // ─── Fills ───────────────────────────────────────────────────────────────────
 const headerFill:     ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F497D' } };
 const propHeaderFill: ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD6E4F0' } };
-const totalFill:      ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEEF2F7' } };
 const darkBlueFill:   ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F497D' } };
 const sagGreenFill:   ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFC4D79B' } };
 const whiteFill:      ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFFFF' } };
@@ -579,7 +578,7 @@ const addRollupTable = (
   }
   totRow.eachCell((cell, colNum) => {
     if (colNum === 1) { cell.border = {}; return; }
-    cell.fill = totalFill; cell.font = boldFont; cell.border = allBorders;
+    cell.font = boldFont; cell.border = allBorders;
   });
 
   const avgRow = ws.addRow(['', 'Average', '', '', '', '', '', '', '', '', '']);
@@ -593,7 +592,7 @@ const addRollupTable = (
   }
   avgRow.eachCell((cell, colNum) => {
     if (colNum === 1) { cell.border = {}; return; }
-    cell.fill = totalFill; cell.font = boldFont; cell.border = allBorders;
+    cell.font = boldFont; cell.border = allBorders;
   });
 
   return { lastDataRn, headerRn };
@@ -708,7 +707,7 @@ export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilen
 
       // Row 4: dark blue anchor row — seeds the Unadj/Adj Balance chain below the header.
       const beginningBalance = acctItems[0]?.beginningBalance || 0;
-      const adjRow = ws.addRow(['', '', '', '', beginningBalance, '', 0, '', 0, '', '']);
+      const adjRow = ws.addRow(['', '', '', '', beginningBalance, '', '', '', '', '', '']);
       adjRow.eachCell((cell, colNum) => {
         if (colNum === 1) { cell.border = {}; return; }
         cell.fill   = headerFill;
@@ -802,7 +801,7 @@ export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilen
       }
       totRow.eachCell((cell, colNum) => {
         if (colNum === 1) { cell.border = {}; return; }
-        cell.fill = totalFill; cell.font = boldFont; cell.border = allBorders;
+        cell.font = boldFont; cell.border = allBorders;
       });
 
       // Average row — AVERAGEIF to skip blank/zero cells
@@ -815,6 +814,10 @@ export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilen
         avgRow.getCell(8).value  = { formula: `IFERROR(AVERAGEIF(H${firstDataRn}:H${lastDataRn},"<>0",H${firstDataRn}:H${lastDataRn}),0)` };
         avgRow.getCell(8).numFmt = currencyFmt;
       }
+      avgRow.eachCell((cell, colNum) => {
+        if (colNum === 1) { cell.border = {}; return; }
+        cell.font = boldFont; cell.border = allBorders;
+      });
     }); // end accountMap.forEach
 
     let trailingRefRow = sheetLastDataRn;
