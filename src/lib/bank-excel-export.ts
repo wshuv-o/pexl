@@ -628,11 +628,17 @@ export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilen
     items.push(flattenToItem(filename, rows));
   }
 
-  // Group by property → account
+  // Group by property → account.
+  // Fall back to account number, then filename, so PDFs with no extracted
+  // property_name don't all collapse into a single "Unknown Property" bucket.
   const groupedByProperty = new Map<string, Map<string, BankStatementItem[]>>();
   for (const item of items) {
-    const propKey = item.propertyName || 'Unknown Property';
-    const acctKey = item.accountNumber || 'Unknown Account';
+    const fileKey = (item.filename || '').replace(/\.pdf$/i, '').trim();
+    const propKey = item.propertyName.trim()
+      || item.accountNumber.trim()
+      || fileKey
+      || 'Unknown Property';
+    const acctKey = item.accountNumber.trim() || fileKey || 'Unknown Account';
     if (!groupedByProperty.has(propKey)) groupedByProperty.set(propKey, new Map());
     const acctMap = groupedByProperty.get(propKey)!;
     if (!acctMap.has(acctKey)) acctMap.set(acctKey, []);
@@ -739,19 +745,20 @@ export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilen
       adjRow.getCell(6).value  = { formula: `E${adjRn}` };
       adjRow.getCell(6).numFmt = currencyFmt;
 
-      // Row formula helper — fills E (Unadj Bal), F (Adj Bal), H (Actual Deposits), J (Diff)
+      // Row formula helper — fills E (Unadj Bal), F (Adj Bal), H (Actual Deposits), J (Diff).
+      // Uses N() so that empty-month rows (C/D = '') don't break the running balance chain.
       const applyRowFormulas = (row: ExcelJS.Row, rn: number) => {
         row.getCell(3).numFmt  = blankZeroCurrencyFmt;
         row.getCell(4).numFmt  = blankZeroCurrencyFmt;
-        row.getCell(5).value   = { formula: `IFERROR(E${rn - 1}+C${rn}-D${rn},0)` };
+        row.getCell(5).value   = { formula: `IFERROR(E${rn - 1}+N(C${rn})-N(D${rn}),0)` };
         row.getCell(5).numFmt  = currencyFmt;
-        row.getCell(6).value   = { formula: `IFERROR(F${rn - 1}+H${rn}-IF(D${rn}="",0,D${rn}),0)` };
+        row.getCell(6).value   = { formula: `IFERROR(F${rn - 1}+N(H${rn})-N(D${rn}),0)` };
         row.getCell(6).numFmt  = currencyFmt;
         row.getCell(7).numFmt  = blankZeroCurrencyFmt;
-        row.getCell(8).value   = { formula: `IFERROR(C${rn}-G${rn},0)` };
+        row.getCell(8).value   = { formula: `IFERROR(N(C${rn})-N(G${rn}),0)` };
         row.getCell(8).numFmt  = currencyFmt;
         row.getCell(9).numFmt  = blankZeroCurrencyFmt;
-        row.getCell(10).value  = { formula: `IFERROR(H${rn}-I${rn},0)` };
+        row.getCell(10).value  = { formula: `IFERROR(N(H${rn})-N(I${rn}),0)` };
         row.getCell(10).numFmt = currencyFmt;
         row.eachCell((cell, colNum) => {
           if (colNum === 1) { cell.border = {}; return; }
@@ -761,34 +768,38 @@ export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilen
         });
       };
 
-      // Main data rows — one per statement (PDF)
-      let sumDeposits = 0, sumWithdrawals = 0;
+      // Main data rows — always exactly 12 months (T-12 window ending at the
+      // latest statement date). Months without a matching statement render as
+      // empty rows, so the table always shows 12 months regardless of uploads.
+      const parsedDates = acctItems
+        .map(it => new Date(it.statementDate || ''))
+        .filter(d => !isNaN(d.getTime()));
+      const anchorDate = parsedDates.length > 0
+        ? parsedDates[parsedDates.length - 1]
+        : new Date();
+      const t12Months = buildT12Months(anchorDate);
+
+      const itemsByMonth = new Map<string, BankStatementItem>();
+      for (const it of acctItems) {
+        const p = new Date(it.statementDate || '');
+        if (!isNaN(p.getTime())) {
+          const key = fmtDate(getEndOfMonth(p.getFullYear(), p.getMonth()));
+          itemsByMonth.set(key, it);
+        }
+      }
+
       let firstDataRn: number | null = null, lastDataRn = 0;
 
-      for (const it of acctItems) {
-        // Use the raw extracted string values, not parsed numbers.
-        // parseNum may misinterpret concatenated/garbled values.
-        // Write the raw value and let ExcelJS handle it.
-        const depositsRaw  = it.totalCredits;
-        const withdrawRaw  = it.totalDebits;
+      for (const monthKey of t12Months) {
+        const it = itemsByMonth.get(monthKey);
+        const depositsRaw = it?.totalCredits ?? 0;
+        const withdrawRaw = it?.totalDebits  ?? 0;
 
-        sumDeposits    += depositsRaw;
-        sumWithdrawals += withdrawRaw;
-
-        // Format date to end-of-month
-        let formattedDate = it.statementDate;
-        const parsed = new Date(it.statementDate);
-        if (!isNaN(parsed.getTime())) {
-          formattedDate = fmtDate(getEndOfMonth(parsed.getFullYear(), parsed.getMonth()));
-        }
-
-        // Write deposits/withdrawals as numbers so Excel SUM works.
-        // Use empty string for zero to keep cells blank (like the original format).
         const dataRow = ws.addRow([
           '',
-          formattedDate,
-          depositsRaw  ? depositsRaw  : '',
-          withdrawRaw  ? withdrawRaw  : '',
+          monthKey,
+          depositsRaw || '',
+          withdrawRaw || '',
           '', '', 0, '', 0, '', '',
         ]);
         const rn = dataRow.number;
@@ -796,14 +807,14 @@ export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilen
         lastDataRn = rn;
         applyRowFormulas(dataRow, rn);
 
-        if (formattedDate) {
-          const pe = propertyDateMap.get(formattedDate) ?? { deposits: 0, withdrawals: 0 };
+        if (it) {
+          const pe = propertyDateMap.get(monthKey) ?? { deposits: 0, withdrawals: 0 };
           pe.deposits += depositsRaw; pe.withdrawals += withdrawRaw;
-          propertyDateMap.set(formattedDate, pe);
+          propertyDateMap.set(monthKey, pe);
 
-          const ge = globalDateMap.get(formattedDate) ?? { deposits: 0, withdrawals: 0 };
+          const ge = globalDateMap.get(monthKey) ?? { deposits: 0, withdrawals: 0 };
           ge.deposits += depositsRaw; ge.withdrawals += withdrawRaw;
-          globalDateMap.set(formattedDate, ge);
+          globalDateMap.set(monthKey, ge);
         }
       }
 
