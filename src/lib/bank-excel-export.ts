@@ -614,17 +614,18 @@ const addRollupTable = (
 export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilename: string) => {
   const wb = new ExcelJS.Workbook();
 
-  // Group ExtractedRow[] by file → ExtractedRow[]
-  const fileMap = new Map<string, ExtractedRow[]>();
+  // Group ExtractedRow[] by PDF session. Prefer sessionId so two uploads with
+  // the same filename don't collapse into a single item.
+  const fileMap = new Map<string, { filename: string; rows: ExtractedRow[] }>();
   for (const row of data) {
-    const key = row.filename || 'Unknown';
-    if (!fileMap.has(key)) fileMap.set(key, []);
-    fileMap.get(key)!.push(row);
+    const key = row.sessionId || row.filename || 'Unknown';
+    if (!fileMap.has(key)) fileMap.set(key, { filename: row.filename || '', rows: [] });
+    fileMap.get(key)!.rows.push(row);
   }
 
   // Build BankStatementItems
   const items: BankStatementItem[] = [];
-  for (const [filename, rows] of fileMap.entries()) {
+  for (const { filename, rows } of fileMap.values()) {
     items.push(flattenToItem(filename, rows));
   }
 

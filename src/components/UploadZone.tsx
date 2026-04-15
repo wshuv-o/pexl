@@ -1,5 +1,5 @@
-import { useCallback, useRef, useState } from 'react';
-import { Upload, FileText, ChevronDown } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Upload, FileText, FolderOpen, ChevronDown } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { DOCUMENT_TYPES, type DocumentType } from '@/types/utilscraper';
 
@@ -18,17 +18,75 @@ export default function UploadZone({
   compact, onFilesSelected, hasFiles, pendingFiles, docType, onDocTypeChange, onProcess, processing,
 }: UploadZoneProps) {
   const inputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
+  const folderInputCompactRef = useRef<HTMLInputElement>(null);
   const [dragOver, setDragOver] = useState(false);
 
-  const handleDrop = useCallback((e: React.DragEvent) => {
+  // webkitdirectory isn't in React's InputHTMLAttributes, so set it via DOM.
+  useEffect(() => {
+    for (const ref of [folderInputRef, folderInputCompactRef]) {
+      if (ref.current) {
+        ref.current.setAttribute('webkitdirectory', '');
+        ref.current.setAttribute('directory', '');
+      }
+    }
+  }, []);
+
+  const isPdf = (f: File) =>
+    f.type === 'application/pdf' || /\.pdf$/i.test(f.name);
+
+  // Recursively walk a dropped DataTransferItem entry tree (folders on drag-drop).
+  const collectFilesFromEntry = useCallback(
+    async (entry: any): Promise<File[]> => {
+      if (!entry) return [];
+      if (entry.isFile) {
+        return new Promise<File[]>(resolve => {
+          entry.file((f: File) => resolve(isPdf(f) ? [f] : []), () => resolve([]));
+        });
+      }
+      if (entry.isDirectory) {
+        const reader = entry.createReader();
+        const entries: any[] = await new Promise(resolve => {
+          const out: any[] = [];
+          const readBatch = () => {
+            reader.readEntries((batch: any[]) => {
+              if (batch.length === 0) resolve(out);
+              else { out.push(...batch); readBatch(); }
+            }, () => resolve(out));
+          };
+          readBatch();
+        });
+        const nested = await Promise.all(entries.map(collectFilesFromEntry));
+        return nested.flat();
+      }
+      return [];
+    },
+    [],
+  );
+
+  const handleDrop = useCallback(async (e: React.DragEvent) => {
     e.preventDefault();
     setDragOver(false);
-    const files = Array.from(e.dataTransfer.files).filter(f => f.type === 'application/pdf');
+
+    // Prefer the items API so dropped folders expand into their files.
+    const items = e.dataTransfer.items;
+    if (items && items.length > 0 && typeof items[0].webkitGetAsEntry === 'function') {
+      const entries = Array.from(items)
+        .map(i => i.webkitGetAsEntry())
+        .filter(Boolean);
+      const collected = await Promise.all(entries.map(collectFilesFromEntry));
+      const files = collected.flat();
+      if (files.length) onFilesSelected(files);
+      return;
+    }
+
+    // Fallback: plain file drop
+    const files = Array.from(e.dataTransfer.files).filter(isPdf);
     if (files.length) onFilesSelected(files);
-  }, [onFilesSelected]);
+  }, [onFilesSelected, collectFilesFromEntry]);
 
   const handleChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files || []);
+    const files = Array.from(e.target.files || []).filter(isPdf);
     if (files.length) onFilesSelected(files);
     e.target.value = '';
   }, [onFilesSelected]);
@@ -60,8 +118,17 @@ export default function UploadZone({
           onDrop={handleDrop}
         >
           <Upload className="w-4 h-4 text-primary shrink-0" />
-          <span className="text-muted-foreground text-xs">Drop more PDFs or click to browse</span>
+          <span className="text-muted-foreground text-xs flex-1">Drop more PDFs/folders or click</span>
+          <button
+            type="button"
+            onClick={e => { e.stopPropagation(); folderInputCompactRef.current?.click(); }}
+            className="flex items-center gap-1 text-[10px] font-medium text-primary hover:underline shrink-0"
+            title="Select a folder of PDFs"
+          >
+            <FolderOpen className="w-3 h-3" /> Folder
+          </button>
           <input ref={inputRef} type="file" accept=".pdf" multiple className="hidden" onChange={handleChange} />
+          <input ref={folderInputCompactRef} type="file" multiple className="hidden" onChange={handleChange} />
         </div>
 
         {hasPending && (
@@ -108,8 +175,17 @@ export default function UploadZone({
           <Upload className={`w-6 h-6 transition-all duration-200 ${dragOver ? 'text-primary' : 'text-muted-foreground'}`} />
         </div>
         <p className="text-sm font-semibold text-foreground">Click to upload or drag and drop</p>
-        <p className="text-xs text-muted-foreground mt-1">PDF files only · multiple allowed</p>
+        <p className="text-xs text-muted-foreground mt-1">PDF files or folders · multiple allowed</p>
+        <button
+          type="button"
+          onClick={e => { e.stopPropagation(); folderInputRef.current?.click(); }}
+          className="mt-3 inline-flex items-center gap-1.5 text-xs font-medium text-primary hover:underline"
+          title="Select a folder — all PDFs inside will be uploaded"
+        >
+          <FolderOpen className="w-3.5 h-3.5" /> Select folder instead
+        </button>
         <input ref={inputRef} type="file" accept=".pdf" multiple className="hidden" onChange={handleChange} />
+        <input ref={folderInputRef} type="file" multiple className="hidden" onChange={handleChange} />
       </div>
 
       {hasPending && (
