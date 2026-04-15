@@ -128,9 +128,9 @@ export default function UploadZone({
           type="button"
           onClick={() => folderInputCompactRef.current?.click()}
           className="w-full flex items-center justify-center gap-1.5 text-[11px] font-medium text-primary hover:bg-primary/5 border border-dashed border-primary/30 rounded-lg py-1.5 transition-colors"
-          title="Pick a folder. Click again to add more folders, or drop multiple folders into the box above."
+          title="Pick a parent folder — every PDF in it and its subfolders is uploaded in one click. Or drag-drop several folders into the box above."
         >
-          <FolderOpen className="w-3.5 h-3.5" /> Add folder
+          <FolderOpen className="w-3.5 h-3.5" /> Add folders
         </button>
         <input ref={inputRef} type="file" accept=".pdf" multiple className="hidden" onChange={handleChange} />
         <input ref={folderInputCompactRef} type="file" multiple className="hidden" onChange={handleChange} />
@@ -179,7 +179,7 @@ export default function UploadZone({
           <Upload className={`w-6 h-6 transition-all duration-200 ${dragOver ? 'text-primary' : 'text-muted-foreground'}`} />
         </div>
         <p className="text-sm font-semibold text-foreground">Click to upload or drag and drop</p>
-        <p className="text-xs text-muted-foreground mt-1">PDF files · drop folders to add their contents</p>
+        <p className="text-xs text-muted-foreground mt-1">PDFs or folders · drop a parent folder to grab every PDF inside</p>
       </div>
       <button
         type="button"
@@ -187,7 +187,7 @@ export default function UploadZone({
         className="w-full flex items-center justify-center gap-2 text-xs font-medium text-primary border border-dashed border-primary/30 rounded-xl py-2.5 hover:bg-primary/5 transition-colors"
         title="Pick a folder. Click again to add more folders, or drop multiple folders into the box above."
       >
-        <FolderOpen className="w-4 h-4" /> Add folder
+        <FolderOpen className="w-4 h-4" /> Add folders
       </button>
       <input ref={inputRef} type="file" accept=".pdf" multiple className="hidden" onChange={handleChange} />
       <input ref={folderInputRef} type="file" multiple className="hidden" onChange={handleChange} />
