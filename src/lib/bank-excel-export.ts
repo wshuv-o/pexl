@@ -706,8 +706,9 @@ export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilen
       const headerRn = hRow.number;
       if (firstAccount) sheetHeaderRn = headerRn;
 
-      // Row 4: dark blue anchor row (white text), G/I = 0
-      const adjRow = ws.addRow(['', '', '', '', '', '', 0, '', 0, '', '']);
+      // Row 4: dark blue anchor row — seeds the Unadj/Adj Balance chain below the header.
+      const beginningBalance = acctItems[0]?.beginningBalance || 0;
+      const adjRow = ws.addRow(['', '', '', '', beginningBalance, '', 0, '', 0, '', '']);
       adjRow.eachCell((cell, colNum) => {
         if (colNum === 1) { cell.border = {}; return; }
         cell.fill   = headerFill;
@@ -715,6 +716,9 @@ export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilen
         cell.border = allBorders;
       });
       const adjRn = adjRow.number;
+      adjRow.getCell(5).numFmt = currencyFmt;
+      adjRow.getCell(6).value  = { formula: `E${adjRn}` };
+      adjRow.getCell(6).numFmt = currencyFmt;
 
       // Row formula helper — fills E (Unadj Bal), F (Adj Bal), H (Actual Deposits), J (Diff)
       const applyRowFormulas = (row: ExcelJS.Row, rn: number) => {
@@ -744,11 +748,7 @@ export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilen
       const lastStatementDate  = parsedStatementDates.length > 0 ? parsedStatementDates[parsedStatementDates.length - 1] : null;
       const firstStatementDate = parsedStatementDates.length > 0 ? parsedStatementDates[0] : null;
 
-      // Beginning balance from the first item (chronologically sorted)
-      const beginningBalance = acctItems[0]?.beginningBalance || 0;
-
       // Gap-fill placeholder rows for months before first statement (within T-12 window)
-      let lastRowBeforeData = adjRn;
       if (lastStatementDate && firstStatementDate) {
         const t12StartMonth = lastStatementDate.getMonth() - 11;
         const t12StartYear  = lastStatementDate.getFullYear();
@@ -761,19 +761,9 @@ export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilen
           if (!parsedStatementDates.some(d => d.getMonth() === curMonth && d.getFullYear() === curYear)) {
             const pRow = ws.addRow(['', fmtDate(getEndOfMonth(curYear, curMonth)), '', '', '', '', 0, '', 0, '', '']);
             applyRowFormulas(pRow, pRow.number);
-            lastRowBeforeData = pRow.number;
           }
           curMonth++; if (curMonth > 11) { curMonth = 0; curYear++; }
         }
-      }
-
-      // Seed beginning balance into the last row before actual data (E and F)
-      if (beginningBalance) {
-        const targetRow = ws.getRow(lastRowBeforeData);
-        targetRow.getCell(5).value  = beginningBalance;
-        targetRow.getCell(5).numFmt = currencyFmt;
-        targetRow.getCell(6).value  = { formula: `E${lastRowBeforeData}` };
-        targetRow.getCell(6).numFmt = currencyFmt;
       }
 
       // Main data rows — one per statement (PDF)
