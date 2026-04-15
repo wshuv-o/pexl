@@ -741,31 +741,6 @@ export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilen
         });
       };
 
-      // Statement date range
-      const parsedStatementDates = acctItems
-        .map(it => new Date(it.statementDate || ''))
-        .filter(d => !isNaN(d.getTime()));
-      const lastStatementDate  = parsedStatementDates.length > 0 ? parsedStatementDates[parsedStatementDates.length - 1] : null;
-      const firstStatementDate = parsedStatementDates.length > 0 ? parsedStatementDates[0] : null;
-
-      // Gap-fill placeholder rows for months before first statement (within T-12 window)
-      if (lastStatementDate && firstStatementDate) {
-        const t12StartMonth = lastStatementDate.getMonth() - 11;
-        const t12StartYear  = lastStatementDate.getFullYear();
-        let curYear  = t12StartYear + Math.floor(t12StartMonth / 12);
-        let curMonth = ((t12StartMonth % 12) + 12) % 12;
-        while (
-          curYear < firstStatementDate.getFullYear() ||
-          (curYear === firstStatementDate.getFullYear() && curMonth < firstStatementDate.getMonth())
-        ) {
-          if (!parsedStatementDates.some(d => d.getMonth() === curMonth && d.getFullYear() === curYear)) {
-            const pRow = ws.addRow(['', fmtDate(getEndOfMonth(curYear, curMonth)), '', '', '', '', 0, '', 0, '', '']);
-            applyRowFormulas(pRow, pRow.number);
-          }
-          curMonth++; if (curMonth > 11) { curMonth = 0; curYear++; }
-        }
-      }
-
       // Main data rows — one per statement (PDF)
       let sumDeposits = 0, sumWithdrawals = 0;
       let firstDataRn: number | null = null, lastDataRn = 0;
