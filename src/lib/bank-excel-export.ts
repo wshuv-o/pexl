@@ -52,6 +52,9 @@ const blackFont:  Partial<ExcelJS.Font> = { bold: true, color: { argb: 'FF000000
 const baseFont:   Partial<ExcelJS.Font> = { name: 'Arial', size: 10 };
 const boldFont:   Partial<ExcelJS.Font> = { name: 'Arial', size: 10, bold: true };
 
+// ─── Alignment ───────────────────────────────────────────────────────────────
+const centerAlign: Partial<ExcelJS.Alignment> = { horizontal: 'center', vertical: 'middle' };
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 const colLetter = (n: number): string => {
   let result = '';
@@ -407,8 +410,8 @@ const addTrailingTable = (ws: ExcelJS.Worksheet, lastDataRn: number, startRow: n
   // Column widths
   ws.getColumn(12).width = 4;
   ws.getColumn(13).width = 4;
-  ws.getColumn(N).width  = 22;
-  ws.getColumn(O).width  = 22;
+  ws.getColumn(N).width  = 26;
+  ws.getColumn(O).width  = 26;
   ws.getColumn(P).width  = 12;
   ws.getColumn(Q).width  = 14;
   ws.getColumn(R).width  = 16;
@@ -516,7 +519,10 @@ const addRollupTable = (
   } else {
     metaRow = ws.addRow(metaLabels);
   }
-  metaRow.eachCell(cell => { cell.fill = propHeaderFill; cell.font = boldFont; cell.border = allBorders; });
+  metaRow.eachCell(cell => {
+    cell.fill = propHeaderFill; cell.font = boldFont; cell.border = allBorders;
+    cell.alignment = centerAlign;
+  });
 
   const fullHeaders = ['', ...mainHeaders];
   let hRow: ExcelJS.Row;
@@ -527,7 +533,10 @@ const addRollupTable = (
   } else {
     hRow = ws.addRow(fullHeaders);
   }
-  hRow.eachCell(cell => { cell.fill = headerFill; cell.font = headerFont; cell.border = allBorders; });
+  hRow.eachCell(cell => {
+    cell.fill = headerFill; cell.font = headerFont; cell.border = allBorders;
+    cell.alignment = centerAlign;
+  });
   const headerRn = hRow.number;
 
   const allDates = Array.from(dateMap.keys())
@@ -561,6 +570,7 @@ const addRollupTable = (
       if (colNum === 1) { cell.border = {}; return; }
       cell.font = baseFont;
       cell.border = allBorders;
+      cell.alignment = centerAlign;
     });
 
     totalDeposits    += deposits;
@@ -579,6 +589,7 @@ const addRollupTable = (
   totRow.eachCell((cell, colNum) => {
     if (colNum === 1) { cell.border = {}; return; }
     cell.font = boldFont; cell.border = allBorders;
+    cell.alignment = centerAlign;
   });
 
   const avgRow = ws.addRow(['', 'Average', '', '', '', '', '', '', '', '', '']);
@@ -593,6 +604,7 @@ const addRollupTable = (
   avgRow.eachCell((cell, colNum) => {
     if (colNum === 1) { cell.border = {}; return; }
     cell.font = boldFont; cell.border = allBorders;
+    cell.alignment = centerAlign;
   });
 
   return { lastDataRn, headerRn };
@@ -680,7 +692,10 @@ export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilen
       const propRow1 = ws.addRow(['', 'Property Name', '', '', '', '', '', '', '', '', '']);
       propRow1.eachCell((cell, colNum) => {
         cell.border = {};
-        if (colNum === 2) { cell.fill = propHeaderFill; cell.font = boldFont; cell.border = allBorders; }
+        if (colNum === 2) {
+          cell.fill = propHeaderFill; cell.font = boldFont; cell.border = allBorders;
+          cell.alignment = centerAlign;
+        }
       });
 
       // Row 2: bold property + account info
@@ -693,7 +708,10 @@ export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilen
       ]);
       propRow2.eachCell((cell, colNum) => {
         cell.border = {};
-        if (colNum >= 2 && colNum <= 4) { cell.font = boldFont; cell.border = allBorders; }
+        if (colNum >= 2 && colNum <= 4) {
+          cell.font = boldFont; cell.border = allBorders;
+          cell.alignment = centerAlign;
+        }
       });
 
       // Row 3: dark blue header (cols B–K)
@@ -701,6 +719,7 @@ export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilen
       hRow.eachCell((cell, colNum) => {
         if (colNum === 1) { cell.border = {}; return; }
         cell.fill = headerFill; cell.font = headerFont; cell.border = allBorders;
+        cell.alignment = centerAlign;
       });
       const headerRn = hRow.number;
       if (firstAccount) sheetHeaderRn = headerRn;
@@ -713,6 +732,7 @@ export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilen
         cell.fill   = headerFill;
         cell.font   = { name: 'Arial', size: 10, color: { argb: 'FFFFFFFF' } };
         cell.border = allBorders;
+        cell.alignment = centerAlign;
       });
       const adjRn = adjRow.number;
       adjRow.getCell(5).numFmt = currencyFmt;
@@ -737,6 +757,7 @@ export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilen
           if (colNum === 1) { cell.border = {}; return; }
           cell.font = baseFont;
           cell.border = allBorders;
+          cell.alignment = centerAlign;
         });
       };
 
@@ -802,6 +823,7 @@ export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilen
       totRow.eachCell((cell, colNum) => {
         if (colNum === 1) { cell.border = {}; return; }
         cell.font = boldFont; cell.border = allBorders;
+        cell.alignment = centerAlign;
       });
 
       // Average row — AVERAGEIF to skip blank/zero cells
@@ -817,6 +839,7 @@ export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilen
       avgRow.eachCell((cell, colNum) => {
         if (colNum === 1) { cell.border = {}; return; }
         cell.font = boldFont; cell.border = allBorders;
+        cell.alignment = centerAlign;
       });
     }); // end accountMap.forEach
 
