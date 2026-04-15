@@ -386,15 +386,15 @@ const addTrailingTable = (ws: ExcelJS.Worksheet, lastDataRn: number, startRow: n
   const pctFmt      = '0.00%';
 
   // Header row
-  applyCell(ws, startRow, N, 'Bank Statement Actual',  { fill: darkBlueFill, font: { ...whiteFont, size: 11 }, borders: gb('left',  true, true), align: { horizontal: 'center', vertical: 'middle' } });
-  applyCell(ws, startRow, O, 'Operating Stmts Actual', { fill: darkBlueFill, font: { ...whiteFont, size: 11 }, borders: gb('mid',   true, true), align: { horizontal: 'center', vertical: 'middle' } });
-  applyCell(ws, startRow, P, 'Diff %',                 { fill: darkBlueFill, font: { ...whiteFont, size: 11 }, borders: gb('right', true, true), align: { horizontal: 'center', vertical: 'middle' } });
+  applyCell(ws, startRow, N, 'Bank Statement Actual',  { fill: darkBlueFill, font: { ...whiteFont, size: 10 }, borders: gb('left',  true, true), align: { horizontal: 'center', vertical: 'middle' } });
+  applyCell(ws, startRow, O, 'Operating Stmts Actual', { fill: darkBlueFill, font: { ...whiteFont, size: 10 }, borders: gb('mid',   true, true), align: { horizontal: 'center', vertical: 'middle' } });
+  applyCell(ws, startRow, P, 'Diff %',                 { fill: darkBlueFill, font: { ...whiteFont, size: 10 }, borders: gb('right', true, true), align: { horizontal: 'center', vertical: 'middle' } });
 
   ws.mergeCells(startRow, Q, startRow, R);
-  applyCell(ws, startRow, Q, 'Bank Statement',  { fill: sagGreenFill, font: { ...blackFont, size: 11, italic: true }, borders: gb('left', true, true), align: { horizontal: 'center', vertical: 'middle' } });
+  applyCell(ws, startRow, Q, 'Bank Statement',  { fill: sagGreenFill, font: { ...blackFont, size: 10, italic: true }, borders: gb('left', true, true), align: { horizontal: 'center', vertical: 'middle' } });
   ws.mergeCells(startRow, S, startRow, T);
-  applyCell(ws, startRow, S, 'Operating Stmts', { fill: sagGreenFill, font: { ...blackFont, size: 11, italic: true }, borders: gb('left', true, true), align: { horizontal: 'center', vertical: 'middle' } });
-  applyCell(ws, startRow, U, 'Diff %',          { fill: sagGreenFill, font: { ...blackFont, size: 11, italic: true }, borders: gb('solo', true, true), align: { horizontal: 'center', vertical: 'middle' } });
+  applyCell(ws, startRow, S, 'Operating Stmts', { fill: sagGreenFill, font: { ...blackFont, size: 10, italic: true }, borders: gb('left', true, true), align: { horizontal: 'center', vertical: 'middle' } });
+  applyCell(ws, startRow, U, 'Diff %',          { fill: sagGreenFill, font: { ...blackFont, size: 10, italic: true }, borders: gb('solo', true, true), align: { horizontal: 'center', vertical: 'middle' } });
 
   // Extra empty colored row below header
   const extraRow = startRow + 1;
@@ -861,7 +861,7 @@ export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilen
       trailingRefRow = rollup.lastDataRn;
     }
 
-    addTrailingTable(ws, trailingRefRow, sheetHeaderRn);
+    addTrailingTable(ws, trailingRefRow, sheetHeaderRn - 1);
     clearOutsideBorders(ws);
 
     ws.getColumn(1).width = 4;
@@ -871,7 +871,7 @@ export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilen
   if (shouldCreateRollup && rollupSheet) {
     const { lastDataRn: rollupLastDataRn, headerRn: rollupHeaderRn } =
       addRollupTable(rollupSheet, 'All Properties', headers, globalDateMap, true);
-    addTrailingTable(rollupSheet, rollupLastDataRn, rollupHeaderRn);
+    addTrailingTable(rollupSheet, rollupLastDataRn, Math.max(1, rollupHeaderRn - 1));
     clearOutsideBorders(rollupSheet);
     rollupSheet.getColumn(1).width = 4;
     for (let i = 2; i <= 11; i++) rollupSheet.getColumn(i).width = 22;
