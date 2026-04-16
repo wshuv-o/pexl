@@ -504,45 +504,25 @@ const addRollupTable = (
   const currencyFmt          = '"$"#,##0.00';
   const blankZeroCurrencyFmt = '"$"#,##0.00;"$"#,##0.00;';
 
-  if (!startAtRow1) {
-    ws.addRow(Array(11).fill(''));
-    ws.addRow(Array(11).fill(''));
-    ws.addRow(Array(11).fill(''));
-  }
+  // Leading blank rows — 2 for the final roll-up sheet (top-of-sheet padding),
+  // 3 for the embedded roll-up (separation from the preceding data).
+  const leadingBlanks = startAtRow1 ? 2 : 3;
+  for (let i = 0; i < leadingBlanks; i++) ws.addRow(Array(11).fill(''));
 
+  // Meta row (propHeaderFill — the "extra blue header" row).
   const metaLabels = ['', propertyName ? `Property: ${propertyName}` : 'Roll-Up', 'Roll-Up (All Accounts)', '', '', '', '', '', '', '', ''];
-  let metaRow: ExcelJS.Row;
-  if (startAtRow1) {
-    metaRow = ws.getRow(1);
-    metaLabels.forEach((v, i) => { metaRow.getCell(i + 1).value = v; });
-    metaRow.commit();
-  } else {
-    metaRow = ws.addRow(metaLabels);
-  }
-  // Final roll-up sheet: property-name label is plain text (no fill, no border).
-  // Per-property embedded roll-up keeps the tinted header style.
-  metaRow.eachCell(cell => {
-    cell.font = boldFont;
+  const metaRow = ws.addRow(metaLabels);
+  metaRow.eachCell((cell, colNum) => {
+    if (colNum === 1) { cell.border = {}; return; }
+    cell.fill = propHeaderFill; cell.font = boldFont; cell.border = allBorders;
     cell.alignment = centerAlign;
-    if (startAtRow1) {
-      cell.fill = { type: 'pattern', pattern: 'none' };
-      cell.border = {};
-    } else {
-      cell.fill = propHeaderFill;
-      cell.border = allBorders;
-    }
   });
 
+  // Dark-blue column header row.
   const fullHeaders = ['', ...mainHeaders];
-  let hRow: ExcelJS.Row;
-  if (startAtRow1) {
-    hRow = ws.getRow(2);
-    fullHeaders.forEach((v, i) => { hRow.getCell(i + 1).value = v; });
-    hRow.commit();
-  } else {
-    hRow = ws.addRow(fullHeaders);
-  }
-  hRow.eachCell(cell => {
+  const hRow = ws.addRow(fullHeaders);
+  hRow.eachCell((cell, colNum) => {
+    if (colNum === 1) { cell.border = {}; return; }
     cell.fill = headerFill; cell.font = headerFont; cell.border = allBorders;
     cell.alignment = centerAlign;
   });
