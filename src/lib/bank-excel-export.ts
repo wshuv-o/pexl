@@ -684,7 +684,7 @@ export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilen
   let rollupSheet: ExcelJS.Worksheet | null = null;
   if (shouldCreateRollup) {
     rollupSheet = wb.addWorksheet('Roll-Up');
-    rollupSheet.views = [{ showGridLines: false }];
+    rollupSheet.views = [{ showGridLines: false, zoomScale: 85 }];
   }
 
   const currencyFmt          = '"$"#,##0.00';
@@ -693,7 +693,7 @@ export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilen
   groupedByProperty.forEach((accountMap, propertyKey) => {
     const sheetName = uniqueSheetName(wb, propertyKey);
     const ws        = wb.addWorksheet(sheetName);
-    ws.views = [{ showGridLines: false }];
+    ws.views = [{ showGridLines: false, zoomScale: 85 }];
     const isMultipleAccounts = accountMap.size > 1;
     const propertyDateMap    = new Map<string, { deposits: number; withdrawals: number }>();
 
