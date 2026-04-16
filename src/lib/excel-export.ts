@@ -22,16 +22,16 @@ const HEADER_COLORS: Record<DocumentType, { bg: string; font: string }> = {
 
 function hdr(bg: string, font: string, bold = true, sz = 10): any {
   return {
-    font:      { bold, color: { rgb: font }, sz },
+    font:      { name: 'Arial', bold, color: { rgb: font }, sz },
     fill:      { fgColor: { rgb: bg } },
     alignment: { horizontal: 'center', vertical: 'center', wrapText: true },
     border:    thinBorder(),
   };
 }
 
-function cell(bg: string, bold = false, align: 'left' | 'center' | 'right' = 'left', sz = 9): any {
+function cell(bg: string, bold = false, align: 'left' | 'center' | 'right' = 'left', sz = 10): any {
   return {
-    font:      { bold, color: { rgb: '000000' }, sz },
+    font:      { name: 'Arial', bold, color: { rgb: '000000' }, sz },
     fill:      { fgColor: { rgb: bg } },
     alignment: { horizontal: align, vertical: 'center', wrapText: true },
     border:    thinBorder(),
@@ -166,9 +166,9 @@ function buildSheetForFile(
       }),
     ];
     const r = push(rowCells);
-    sc(r, 0, cell(C.whiteBg, true, 'center', 9));
+    sc(r, 0, cell(C.whiteBg, true, 'center', 10));
     for (let c = 1; c < rowCells.length; c++) {
-      sc(r, c, cell(C.whiteBg, false, 'left', 9));
+      sc(r, c, cell(C.whiteBg, false, 'left', 10));
     }
   }
 
@@ -273,10 +273,10 @@ function buildStackedTablesSheet(
         }),
       ];
       const r = push(rowCells);
-      sc(r, 0, cell(C.whiteBg, true, 'left',   9));
-      sc(r, 1, cell(C.whiteBg, true, 'center', 9));
+      sc(r, 0, cell(C.whiteBg, true, 'left',   10));
+      sc(r, 1, cell(C.whiteBg, true, 'center', 10));
       for (let c = 2; c < totalCols; c++) {
-        sc(r, c, cell(C.whiteBg, false, 'left', 9));
+        sc(r, c, cell(C.whiteBg, false, 'left', 10));
       }
     }
   }
