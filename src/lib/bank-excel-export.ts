@@ -519,9 +519,18 @@ const addRollupTable = (
   } else {
     metaRow = ws.addRow(metaLabels);
   }
+  // Final roll-up sheet: property-name label is plain text (no fill, no border).
+  // Per-property embedded roll-up keeps the tinted header style.
   metaRow.eachCell(cell => {
-    cell.fill = propHeaderFill; cell.font = boldFont; cell.border = allBorders;
+    cell.font = boldFont;
     cell.alignment = centerAlign;
+    if (startAtRow1) {
+      cell.fill = { type: 'pattern', pattern: 'none' };
+      cell.border = {};
+    } else {
+      cell.fill = propHeaderFill;
+      cell.border = allBorders;
+    }
   });
 
   const fullHeaders = ['', ...mainHeaders];
@@ -538,6 +547,23 @@ const addRollupTable = (
     cell.alignment = centerAlign;
   });
   const headerRn = hRow.number;
+
+  // Final roll-up sheet mirrors the per-property sheet layout: blue anchor row
+  // + full Unadj/Adj running-balance chain + SUM/AVERAGEIF totals.
+  if (startAtRow1) {
+    const adjRow = ws.addRow(['', '', '', '', 0, '', '', '', '', '', '']);
+    adjRow.eachCell((cell, colNum) => {
+      if (colNum === 1) { cell.border = {}; return; }
+      cell.fill   = headerFill;
+      cell.font   = { name: 'Arial', size: 10, color: { argb: 'FFFFFFFF' } };
+      cell.border = allBorders;
+      cell.alignment = centerAlign;
+    });
+    const adjRn = adjRow.number;
+    adjRow.getCell(5).numFmt = currencyFmt;
+    adjRow.getCell(6).value  = { formula: `E${adjRn}` };
+    adjRow.getCell(6).numFmt = currencyFmt;
+  }
 
   const allDates = Array.from(dateMap.keys())
     .map(d => new Date(d))
@@ -557,15 +583,33 @@ const addRollupTable = (
     const deposits    = entry?.deposits    ?? 0;
     const withdrawals = entry?.withdrawals ?? 0;
 
-    const dataRow = ws.addRow(['', monthKey, deposits || '', withdrawals || '', '', '', '', '', '', '', '']);
+    const dataRow = startAtRow1
+      ? ws.addRow(['', monthKey, deposits || '', withdrawals || '', '', '', 0, '', 0, '', ''])
+      : ws.addRow(['', monthKey, deposits || '', withdrawals || '', '', '', '', '', '', '', '']);
     const rn = dataRow.number;
     if (firstDataRn === null) firstDataRn = rn;
     lastDataRn = rn;
 
     dataRow.getCell(3).numFmt = blankZeroCurrencyFmt;
     dataRow.getCell(4).numFmt = blankZeroCurrencyFmt;
-    dataRow.getCell(8).value  = { formula: `C${rn}` };
-    dataRow.getCell(8).numFmt = currencyFmt;
+
+    if (startAtRow1) {
+      // Match per-property sheet: E/F balance chain, H = C - G, J = H - I
+      dataRow.getCell(5).value   = { formula: `IFERROR(E${rn - 1}+N(C${rn})-N(D${rn}),0)` };
+      dataRow.getCell(5).numFmt  = currencyFmt;
+      dataRow.getCell(6).value   = { formula: `IFERROR(F${rn - 1}+N(H${rn})-N(D${rn}),0)` };
+      dataRow.getCell(6).numFmt  = currencyFmt;
+      dataRow.getCell(7).numFmt  = blankZeroCurrencyFmt;
+      dataRow.getCell(8).value   = { formula: `IFERROR(N(C${rn})-N(G${rn}),0)` };
+      dataRow.getCell(8).numFmt  = currencyFmt;
+      dataRow.getCell(9).numFmt  = blankZeroCurrencyFmt;
+      dataRow.getCell(10).value  = { formula: `IFERROR(N(H${rn})-N(I${rn}),0)` };
+      dataRow.getCell(10).numFmt = currencyFmt;
+    } else {
+      dataRow.getCell(8).value  = { formula: `C${rn}` };
+      dataRow.getCell(8).numFmt = currencyFmt;
+    }
+
     dataRow.eachCell((cell, colNum) => {
       if (colNum === 1) { cell.border = {}; return; }
       cell.font = baseFont;
