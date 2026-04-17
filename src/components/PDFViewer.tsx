@@ -813,6 +813,18 @@ export default function PDFViewer({
         className="flex-1 overflow-auto bg-viewer relative custom-scrollbar pr-6"
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
+        onMouseDown={e => {
+          // In text-select mode, clicking anywhere that isn't an actual
+          // text glyph (page margin, gap between lines, canvas, wrapper,
+          // or outside a page entirely) should clear any prior selection
+          // — matches Adobe's "click empty space to deselect" behaviour.
+          // The browser won't clear it automatically because .textLayer
+          // is `user-select: none`, so no fresh selection starts there.
+          if (tool !== 'text-select') return;
+          const t = e.target as HTMLElement | null;
+          const isOnTextSpan = !!(t && t.tagName === 'SPAN' && t.closest('.textLayer'));
+          if (!isOnTextSpan) window.getSelection()?.removeAllRanges();
+        }}
       >
         {/* First-use hint overlay */}
         {showFirstHint && tool === 'highlight' && allHighlights.length === 0 && (
