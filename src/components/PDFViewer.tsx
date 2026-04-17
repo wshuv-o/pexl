@@ -626,8 +626,12 @@ export default function PDFViewer({
 
             const item   = slot.item;
             const itemX  = item.transform[4];
-            const itemTop = vp.height - item.transform[5];
             const itemH  = item.height || Math.abs(item.transform[3]) || 12;
+            // transform[5] is the TEXT BASELINE in PDF space (origin
+            // bottom-left). Converting to viewport (origin top-left) gives
+            // the baseline's y in top-down coords; the glyphs extend UP
+            // from there, so the box's top is (baseline - height).
+            const itemTop = vp.height - item.transform[5] - itemH;
 
             hits.push({
               x:      (itemX + pStart * slot.itemW) / vp.width,
