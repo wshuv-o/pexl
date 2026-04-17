@@ -464,12 +464,36 @@ export default function PDFViewer({
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }, [totalPages]);
 
-  // External trigger (e.g. Excel panel row click) → jump to page
+  // External trigger (e.g. Excel panel row click) → jump to page.
+  // react-pdf renders each <Page>'s canvas asynchronously — until a page
+  // finishes rendering, it occupies an 800px placeholder. Target pages past
+  // page 1 therefore sit at a stale Y offset at first-scroll time, then
+  // shift as earlier pages finish rendering. We do one smooth scroll, then
+  // a handful of silent re-scrolls at increasing delays so the final
+  // position self-corrects once the layout settles.
   useEffect(() => {
     if (!scrollToPageTrigger || !pdfLoaded) return;
-    setCurrentPage(scrollToPageTrigger.page);
-    scrollToPage(scrollToPageTrigger.page);
-  }, [scrollToPageTrigger, pdfLoaded, scrollToPage]);
+    const { page } = scrollToPageTrigger;
+    setCurrentPage(page);
+
+    const jumpTo = (behavior: ScrollBehavior) => {
+      const clamped = Math.max(1, Math.min(page, totalPages));
+      const el = pageRefs.current[clamped];
+      if (el) el.scrollIntoView({ behavior, block: 'start' });
+    };
+
+    jumpTo('smooth');
+
+    let cancelled = false;
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    for (const delay of [250, 550, 1000, 1700]) {
+      timers.push(setTimeout(() => { if (!cancelled) jumpTo('auto'); }, delay));
+    }
+    return () => {
+      cancelled = true;
+      timers.forEach(clearTimeout);
+    };
+  }, [scrollToPageTrigger, pdfLoaded, totalPages]);
 
   // -----------------------------------------------------------------------
   // Text search
