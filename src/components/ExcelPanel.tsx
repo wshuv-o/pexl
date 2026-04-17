@@ -18,6 +18,8 @@ interface Props {
   onDataChange: (data: ExtractedRow[]) => void;
   multiFile?: boolean;
   onDownload?: () => void;
+  // Clicking a row jumps the PDF viewer to that sessionId/page.
+  onRowClick?: (sessionId: string, page: number) => void;
 }
 
 const CONF_PCT: Record<string, number> = { high: 95, medium: 65, low: 25 };
@@ -118,12 +120,13 @@ const parseDateValue = (val: string): number => {
 const isDateField = (field: string): boolean => /date$/i.test(field);
 
 export default function ExcelPanel({
-  data, filename, provider, onClose, onReExtract, onDataChange, multiFile, onDownload,
+  data, filename, provider, onClose, onReExtract, onDataChange, multiFile, onDownload, onRowClick,
 }: Props) {
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const [mergeGroups, setMergeGroups] = useState<MergeGroup[] | null>(null);
   const [sortCol, setSortCol]       = useState<string | null>(null);
   const [sortAsc, setSortAsc]       = useState(true);
+  const [selectedRowKey, setSelectedRowKey] = useState<string | null>(null);
 
   // ── Build page rows grouped by PDF (multi-value cells) ─────────────────
   const { groups, fieldColumns } = useMemo(() => {
@@ -397,12 +400,19 @@ export default function ExcelPanel({
                 <React.Fragment key={g.sessionId}>
                   {g.rows.map((row, ri) => {
                     const isLastInGroup = ri === g.rows.length - 1;
+                    const rowKey = `${g.sessionId}-${row.page}-${row.subIndex}`;
+                    const isSelected = selectedRowKey === rowKey;
                     return (
                       <tr
-                        key={`${g.sessionId}-${row.page}-${row.subIndex}`}
-                        className={`group/row transition-all duration-200 hover:bg-primary/5
+                        key={rowKey}
+                        className={`group/row transition-all duration-200 cursor-pointer hover:bg-primary/5
                           ${ri % 2 === 0 ? 'bg-card' : 'bg-muted/20'}
+                          ${isSelected ? 'bg-primary/10 shadow-[inset_3px_0_0_0_hsl(var(--primary))]' : ''}
                           ${isLastInGroup && gi < sortedGroups.length - 1 ? 'border-b-2 border-b-primary/40' : 'border-b border-border/40'}`}
+                        onClick={() => {
+                          setSelectedRowKey(rowKey);
+                          onRowClick?.(row.sessionId, row.page);
+                        }}
                       >
                         {multiFile && (
                           <td className="px-3 py-2 text-muted-foreground text-[10px] truncate max-w-[140px]" title={g.filename}>
@@ -435,6 +445,7 @@ export default function ExcelPanel({
                                   className="w-full bg-card border border-primary rounded px-2 py-1 text-xs outline-none shadow-sm text-foreground"
                                   defaultValue={cell.value || ''}
                                   autoFocus
+                                  onClick={e => e.stopPropagation()}
                                   onBlur={e => handleEdit(cellKey, cell, e.target.value)}
                                   onKeyDown={e => {
                                     if (e.key === 'Enter') handleEdit(cellKey, cell, (e.target as HTMLInputElement).value);

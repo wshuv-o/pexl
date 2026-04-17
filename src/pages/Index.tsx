@@ -38,6 +38,7 @@ export default function Index() {
   const [navCollapsed, setNavCollapsed]         = useState(false);
   const [pendingDocType, setPendingDocType]     = useState<DocumentType>('utility_bill');
   const [dragTabId, setDragTabId]               = useState<string | null>(null);
+  const [pageJump, setPageJump]                 = useState<{ sessionId: string; page: number; nonce: number } | null>(null);
 
   const activeSession = sessions.find(s => s.id === activeTabId);
   const hasUploaded   = sessions.length > 0 || pendingFiles.length > 0;
@@ -278,6 +279,17 @@ export default function Index() {
     }));
     toast.success('Highlights mirrored to all open PDFs (offset-mapped)');
   }, [activeTabId, sessions]);
+
+  // Excel panel row click → switch to that PDF's tab (if needed) and scroll its
+  // viewer to the row's page. Uses a nonce so clicking the same row repeatedly
+  // still re-fires the scroll.
+  const handleExcelRowClick = useCallback((sessionId: string, page: number) => {
+    if (sessionId !== activeTabId) {
+      setOpenTabs(prev => (prev.includes(sessionId) ? prev : [...prev, sessionId]));
+      setActiveTabId(sessionId);
+    }
+    setPageJump({ sessionId, page, nonce: Date.now() });
+  }, [activeTabId]);
 
   // Can we show a viewer?
   const hasActiveViewer = activeSession &&
@@ -561,6 +573,7 @@ export default function Index() {
                   onApplyToAllPdfs={handleApplyToAllPdfs}
                   onStartPageChange={handleStartPageChange}
                   extracting={extracting}
+                  scrollToPageTrigger={pageJump && pageJump.sessionId === activeSession.id ? pageJump : null}
                 />
               </div>
 
@@ -607,6 +620,7 @@ export default function Index() {
                       }}
                       multiFile={sessions.filter(s => s.extractedData.length > 0).length > 1}
                       onDownload={() => trackDownload().catch(() => {})}
+                      onRowClick={handleExcelRowClick}
                     />
                   </div>
                 </>

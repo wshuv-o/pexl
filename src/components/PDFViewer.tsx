@@ -18,6 +18,9 @@ interface PDFViewerProps {
   onApplyToAllPdfs: (sourceHighlights: Record<number, Highlight[]>) => void;
   onStartPageChange: (sessionId: string, startPage: number) => void;
   extracting: boolean;
+  // When this changes, scroll to the given page. `nonce` forces re-fire even if
+  // the user clicks the same row twice.
+  scrollToPageTrigger?: { page: number; nonce: number } | null;
 }
 
 export default function PDFViewer({
@@ -28,6 +31,7 @@ export default function PDFViewer({
   onApplyToAllPdfs,
   onStartPageChange,
   extracting,
+  scrollToPageTrigger,
 }: PDFViewerProps) {
   const [currentPage, setCurrentPage]   = useState(session.startPage || 1);
   const [zoom, setZoom]                 = useState<number | null>(null);
@@ -459,6 +463,13 @@ export default function PDFViewer({
     const el = pageRefs.current[clamped];
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }, [totalPages]);
+
+  // External trigger (e.g. Excel panel row click) → jump to page
+  useEffect(() => {
+    if (!scrollToPageTrigger || !pdfLoaded) return;
+    setCurrentPage(scrollToPageTrigger.page);
+    scrollToPage(scrollToPageTrigger.page);
+  }, [scrollToPageTrigger, pdfLoaded, scrollToPage]);
 
   // -----------------------------------------------------------------------
   // Text search
