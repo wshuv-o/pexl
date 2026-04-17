@@ -165,22 +165,25 @@
  * mousedown actually reaches it.
  * ------------------------------------------------------------------ */
 .textLayer {
-  user-select: text;
-  -webkit-user-select: text;
-  /* The container itself is transparent to pointer events — that way
-     a mousedown in a margin or a gap between two text spans does NOT
-     anchor the browser's drag-selection on the text layer's first
-     text node (which would cause the "drag anywhere → whole page
-     gets selected" behaviour). Only the spans below receive events. */
-  pointer-events: none;
+  /* Container itself is NOT a valid text-selection anchor — this is
+     the trick Adobe / pdfjs's own viewer use. Clicking in a margin
+     or in the gap between two lines therefore doesn't anchor the
+     browser's drag-selection on the layer's first text node (which
+     was the "drag anywhere → whole page selected" behaviour).
+     Pointer events still reach the layer, so pdfjs's own selection-
+     enhancement JS runs normally and selection extends through gaps
+     between spans as the cursor moves, just like Adobe. */
+  user-select: none;
+  -webkit-user-select: none;
   /* Above HighlightOverlay (z:10–40 — but those are pointer-events:
      none when text tool is active) and search boxes (z:5). */
   z-index: 20;
 }
 
 .textLayer > span {
-  /* Re-enable events on the actual text hit-targets. */
-  pointer-events: auto;
+  /* Only the glyph spans are valid selection anchors. */
+  user-select: text;
+  -webkit-user-select: text;
   cursor: text;
   /* Match the glyphs' typical extent for a reliable hit target. */
   line-height: 1;
