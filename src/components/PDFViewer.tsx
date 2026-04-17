@@ -497,15 +497,34 @@ export default function PDFViewer({
 
   // -----------------------------------------------------------------------
   // Text search
+  //
+  // Accuracy improvements over the naive "item.str.includes(query)" approach:
+  //   1. Unicode-normalize both query and PDF text (NFKD + strip combining
+  //      marks) so diacritics, ligatures, non-breaking spaces etc. all match.
+  //   2. Collapse whitespace runs so "Account  Number" / "Account\nNumber"
+  //      all match "account number".
+  //   3. Build a concatenated normalized page text with an offset→item map,
+  //      so a query that spans multiple pdfjs text items (very common —
+  //      pdfjs splits runs at kerning boundaries) is still found.
+  //   4. Highlight only the matched substring within each item (proportional
+  //      box based on character offset) instead of the entire text run.
+  //   5. Find every occurrence on the page, not just the first per item.
   // -----------------------------------------------------------------------
   const handleSearch = useCallback(async (query: string) => {
     setSearchQuery(query);
-    if (!query.trim() || !pdfDocRef.current) {
+
+    const normalize = (s: string) => s
+      .toLowerCase()
+      .normalize('NFKD')
+      .replace(/[\u0300-\u036f]/g, '')  // strip combining diacritics
+      .replace(/\s+/g, ' ');             // collapse whitespace runs
+
+    const q = normalize(query).trim();
+    if (!q || !pdfDocRef.current) {
       setSearchResults({});
       return;
     }
     try {
-      const queryLower = query.toLowerCase();
       const allHits: Record<number, { x: number; y: number; width: number; height: number }[]> = {};
       for (let p = 1; p <= totalPages; p++) {
         const page = await pdfDocRef.current.getPage(p);
@@ -513,16 +532,71 @@ export default function PDFViewer({
         const vp = page.getViewport({ scale: 1 });
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const items = content.items as any[];
-        const hits: { x: number; y: number; width: number; height: number }[] = [];
+
+        // Build a single normalized page text and remember which slice of
+        // the concatenated string each item contributed, so matches that
+        // straddle item boundaries can still be located and boxed.
+        type Slot = {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          item: any;
+          itemW: number;     // original width in PDF units
+          start: number;     // offset in pageText
+          end: number;       // exclusive
+          normLen: number;   // end - start, cached
+        };
+        const slots: Slot[] = [];
+        let pageText = '';
         for (const item of items) {
           if (!item.str || !item.transform) continue;
-          if (!item.str.toLowerCase().includes(queryLower)) continue;
-          const x = item.transform[4];
-          const itemTop = vp.height - item.transform[5];
-          const itemH = item.height || Math.abs(item.transform[3]) || 12;
+          const nText = normalize(item.str);
+          if (!nText) continue;
+
+          // Separator between items so "account" + "number" doesn't stick
+          // together as "accountnumber" and false-match. Skipped if the
+          // accumulator already ends with whitespace (pdfjs emits its own).
+          if (pageText.length > 0 && !pageText.endsWith(' ')) pageText += ' ';
+
+          const start = pageText.length;
+          pageText += nText;
+          const end = pageText.length;
           const itemW = item.width || item.str.length * 6;
-          hits.push({ x: x / vp.width, y: itemTop / vp.height, width: itemW / vp.width, height: itemH / vp.height });
+          slots.push({ item, itemW, start, end, normLen: end - start });
         }
+
+        const hits: { x: number; y: number; width: number; height: number }[] = [];
+        let searchFrom = 0;
+        while (searchFrom <= pageText.length) {
+          const matchIdx = pageText.indexOf(q, searchFrom);
+          if (matchIdx === -1) break;
+          const matchEnd = matchIdx + q.length;
+
+          // The match may span one or more items — emit a tight box per
+          // item it overlaps, proportioning the x-offset and width within
+          // that item's actual PDF width.
+          for (const slot of slots) {
+            const overlapStart = Math.max(slot.start, matchIdx);
+            const overlapEnd   = Math.min(slot.end,   matchEnd);
+            if (overlapStart >= overlapEnd) continue;
+
+            const pStart = (overlapStart - slot.start) / slot.normLen;
+            const pEnd   = (overlapEnd   - slot.start) / slot.normLen;
+
+            const item   = slot.item;
+            const itemX  = item.transform[4];
+            const itemTop = vp.height - item.transform[5];
+            const itemH  = item.height || Math.abs(item.transform[3]) || 12;
+
+            hits.push({
+              x:      (itemX + pStart * slot.itemW) / vp.width,
+              y:      itemTop / vp.height,
+              width:  Math.max(1, (pEnd - pStart) * slot.itemW) / vp.width,
+              height: itemH / vp.height,
+            });
+          }
+
+          searchFrom = matchEnd; // non-overlapping, Chrome-Ctrl+F-style
+        }
+
         if (hits.length > 0) allHits[p] = hits;
       }
       setSearchResults(allHits);
