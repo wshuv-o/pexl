@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
+import 'react-pdf/dist/Page/TextLayer.css';
 import type { PDFSession, Highlight, FieldLabel, ViewerTool } from '@/types/utilscraper';
 import ViewerToolbar from './ViewerToolbar';
 import HighlightOverlay from './HighlightOverlay';
@@ -860,12 +861,12 @@ export default function PDFViewer({
                 <div
                   key={pageNum}
                   ref={el => { pageRefs.current[pageNum] = el; }}
-                  className="relative shadow-2xl select-none"
+                  className={`relative shadow-2xl ${tool === 'text-select' ? '' : 'select-none'}`}
                   style={{
                     display:    'inline-block',
                     lineHeight: 0,
-                    cursor:     tool === 'highlight' ? 'crosshair' : 'default',
-                    userSelect: tool === 'highlight' ? 'none' : 'auto',
+                    cursor:     tool === 'highlight' ? 'crosshair' : tool === 'text-select' ? 'text' : 'default',
+                    userSelect: tool === 'highlight' ? 'none' : tool === 'text-select' ? 'text' : 'auto',
                     transform:  fineRotation !== 0 ? `rotate(${fineRotation}deg)` : undefined,
                     transition: 'transform 0.3s ease',
                     opacity:    isCover ? 0.5 : 1,
@@ -875,7 +876,7 @@ export default function PDFViewer({
                   <Page
                     pageNumber={pageNum}
                     scale={zoom ?? 1}
-                    renderTextLayer={false}
+                    renderTextLayer={tool === 'text-select'}
                     renderAnnotationLayer={false}
                     loading={
                       <div className="w-[600px] h-[800px] bg-white/5 animate-pulse rounded" />

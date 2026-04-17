@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
 import {
   ChevronLeft, ChevronRight, ZoomIn, ZoomOut,
-  MousePointer2, Square, Eraser, Loader2,
+  MousePointer2, Square, Eraser, Loader2, TextCursor,
   CopyPlus, Files, Trash2, ListChecks, ChevronDown, Search,
   SlidersHorizontal,
 } from 'lucide-react';
@@ -337,9 +337,10 @@ export default function ViewerToolbar({
 
       {/* Drawing tools */}
       <div className="flex items-center gap-0.5 shrink-0">
-        {toolBtn('cursor',    <MousePointer2 className="w-4 h-4" />, 'Cursor')}
-        {toolBtn('highlight', <Square        className="w-4 h-4" />, 'Highlight — draw boxes')}
-        {toolBtn('eraser',    <Eraser        className="w-4 h-4" />, 'Erase all on this page')}
+        {toolBtn('cursor',      <MousePointer2 className="w-4 h-4" />, 'Cursor')}
+        {toolBtn('highlight',   <Square        className="w-4 h-4" />, 'Highlight — draw boxes')}
+        {toolBtn('text-select', <TextCursor    className="w-4 h-4" />, 'Select text — copy from PDF')}
+        {toolBtn('eraser',      <Eraser        className="w-4 h-4" />, 'Erase all on this page')}
       </div>
 
       {/* Separator */}
