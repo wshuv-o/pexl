@@ -66,6 +66,8 @@ export default function PDFViewer({
   const [searchOpen, setSearchOpen]     = useState(false);
   const [searchQuery, setSearchQuery]   = useState('');
   const [searchResults, setSearchResults] = useState<Record<number, { x: number; y: number; width: number; height: number }[]>>({});
+  // -1 means "no match focused yet"; Enter in the search box advances this.
+  const [activeMatchIdx, setActiveMatchIdx] = useState<number>(-1);
   const [pdfLoaded, setPdfLoaded]       = useState(false);
 
   const pageRefs  = useRef<Record<number, HTMLDivElement | null>>({});
@@ -464,6 +466,47 @@ export default function PDFViewer({
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }, [totalPages]);
 
+  // Flat, ordered list of every search hit (by page, then by occurrence)
+  // so Enter/Shift+Enter in the search box can cycle through them linearly.
+  const flatMatches = useMemo(() => {
+    const out: { page: number; boxIndex: number; box: { x: number; y: number; width: number; height: number } }[] = [];
+    const pages = Object.keys(searchResults).map(Number).sort((a, b) => a - b);
+    for (const p of pages) {
+      const hits = searchResults[p];
+      for (let i = 0; i < hits.length; i++) out.push({ page: p, boxIndex: i, box: hits[i] });
+    }
+    return out;
+  }, [searchResults]);
+
+  // When the result set changes (user is typing), reset focus so Enter lands
+  // on the first match instead of some stale index that may no longer exist.
+  useEffect(() => { setActiveMatchIdx(-1); }, [searchResults]);
+
+  // Scroll so the i-th match is visible, ~1/3 of the way down the viewport.
+  const gotoMatch = useCallback((idx: number) => {
+    if (flatMatches.length === 0) return;
+    const wrapped = ((idx % flatMatches.length) + flatMatches.length) % flatMatches.length;
+    setActiveMatchIdx(wrapped);
+    const target = flatMatches[wrapped];
+    setCurrentPage(target.page);
+
+    const pageEl = pageRefs.current[target.page];
+    const container = scrollRef.current;
+    if (!pageEl || !container) return;
+
+    // pageEl.offsetTop is relative to its offsetParent — walk up until we
+    // find one inside the scroll container for a correct absolute offset.
+    let offsetTop = 0;
+    let node: HTMLElement | null = pageEl;
+    while (node && node !== container) {
+      offsetTop += node.offsetTop;
+      node = node.offsetParent as HTMLElement | null;
+    }
+    const matchY = target.box.y * pageEl.clientHeight;
+    const targetScroll = offsetTop + matchY - container.clientHeight / 3;
+    container.scrollTo({ top: Math.max(0, targetScroll), behavior: 'smooth' });
+  }, [flatMatches]);
+
   // External trigger (e.g. Excel panel row click) → jump to page.
   // react-pdf renders each <Page>'s canvas asynchronously — until a page
   // finishes rendering, it occupies an 800px placeholder. Target pages past
@@ -720,17 +763,30 @@ export default function PDFViewer({
         <div className="bg-card border-b border-border px-3 py-1.5 flex items-center gap-2 shrink-0">
           <input
             className="flex-1 h-7 text-xs bg-muted rounded px-2 border-none outline-none focus:ring-1 focus:ring-primary text-foreground"
-            placeholder="Search text on this page..."
+            placeholder="Search (Enter: next · Shift+Enter: previous)"
             autoFocus
             value={searchQuery}
             onChange={e => handleSearch(e.target.value)}
             onKeyDown={e => {
-              if (e.key === 'Escape') { setSearchOpen(false); setSearchQuery(''); setSearchResults({}); }
+              if (e.key === 'Escape') {
+                setSearchOpen(false); setSearchQuery(''); setSearchResults({});
+                return;
+              }
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                if (flatMatches.length === 0) return;
+                if (e.shiftKey) gotoMatch(activeMatchIdx - 1);
+                else            gotoMatch(activeMatchIdx + 1);
+              }
             }}
           />
           {searchQuery && (
             <span className="text-[11px] text-muted-foreground shrink-0">
-              {(() => { const total = Object.values(searchResults).reduce((s, h) => s + h.length, 0); return `${total} match${total !== 1 ? 'es' : ''}`; })()}
+              {flatMatches.length === 0
+                ? 'No matches'
+                : activeMatchIdx >= 0
+                  ? `${activeMatchIdx + 1} of ${flatMatches.length}`
+                  : `${flatMatches.length} match${flatMatches.length !== 1 ? 'es' : ''}`}
             </span>
           )}
           <button
@@ -846,24 +902,30 @@ export default function PDFViewer({
                     tool={tool}
                   />
 
-                  {/* Search highlights (shown on current page) */}
+                  {/* Search highlights (active match gets brighter orange). */}
                   {(searchResults[pageNum]?.length ?? 0) > 0 && (
                     <div className="absolute inset-0 pointer-events-none overflow-hidden">
-                      {(searchResults[pageNum] ?? []).map((r, i) => (
-                        <div
-                          key={i}
-                          className="absolute rounded-sm"
-                          style={{
-                            left:            `${r.x * 100}%`,
-                            top:             `${r.y * 100}%`,
-                            width:           `${r.width * 100}%`,
-                            height:          `${r.height * 100}%`,
-                            backgroundColor: 'rgba(250, 204, 21, 0.4)',
-                            border:          '1px solid rgba(250, 204, 21, 0.8)',
-                            zIndex:          5,
-                          }}
-                        />
-                      ))}
+                      {(searchResults[pageNum] ?? []).map((r, i) => {
+                        const isActive =
+                          activeMatchIdx >= 0 &&
+                          flatMatches[activeMatchIdx]?.page === pageNum &&
+                          flatMatches[activeMatchIdx]?.boxIndex === i;
+                        return (
+                          <div
+                            key={i}
+                            className="absolute rounded-sm"
+                            style={{
+                              left:            `${r.x * 100}%`,
+                              top:             `${r.y * 100}%`,
+                              width:           `${r.width * 100}%`,
+                              height:          `${r.height * 100}%`,
+                              backgroundColor: isActive ? 'rgba(251, 146, 60, 0.65)' : 'rgba(250, 204, 21, 0.4)',
+                              border:          isActive ? '1.5px solid rgba(234, 88, 12, 0.95)' : '1px solid rgba(250, 204, 21, 0.8)',
+                              zIndex:          isActive ? 6 : 5,
+                            }}
+                          />
+                        );
+                      })}
                     </div>
                   )}
 
