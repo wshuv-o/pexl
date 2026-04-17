@@ -167,13 +167,20 @@
 .textLayer {
   user-select: text;
   -webkit-user-select: text;
-  pointer-events: auto;
+  /* The container itself is transparent to pointer events — that way
+     a mousedown in a margin or a gap between two text spans does NOT
+     anchor the browser's drag-selection on the text layer's first
+     text node (which would cause the "drag anywhere → whole page
+     gets selected" behaviour). Only the spans below receive events. */
+  pointer-events: none;
   /* Above HighlightOverlay (z:10–40 — but those are pointer-events:
      none when text tool is active) and search boxes (z:5). */
   z-index: 20;
 }
 
 .textLayer > span {
+  /* Re-enable events on the actual text hit-targets. */
+  pointer-events: auto;
   cursor: text;
   /* Match the glyphs' typical extent for a reliable hit target. */
   line-height: 1;
