@@ -861,12 +861,13 @@ export default function PDFViewer({
                 <div
                   key={pageNum}
                   ref={el => { pageRefs.current[pageNum] = el; }}
-                  className={`relative shadow-2xl ${tool === 'text-select' ? '' : 'select-none'}`}
+                  // Always `select-none` on the wrapper — selection is
+                  // re-enabled inside .textLayer only (see index.css).
+                  className="relative shadow-2xl select-none"
                   style={{
                     display:    'inline-block',
                     lineHeight: 0,
                     cursor:     tool === 'highlight' ? 'crosshair' : tool === 'text-select' ? 'text' : 'default',
-                    userSelect: tool === 'highlight' ? 'none' : tool === 'text-select' ? 'text' : 'auto',
                     transform:  fineRotation !== 0 ? `rotate(${fineRotation}deg)` : undefined,
                     transition: 'transform 0.3s ease',
                     opacity:    isCover ? 0.5 : 1,

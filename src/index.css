@@ -148,3 +148,42 @@
   background: hsl(var(--muted-foreground) / 0.3);
   border-radius: 3px;
 }
+
+/* ------------------------------------------------------------------
+ * react-pdf text-selection accuracy (react-pdf v10 / pdfjs v4)
+ * ------------------------------------------------------------------
+ * react-pdf v10 renders the selectable layer as <div class="textLayer">
+ * (not .react-pdf__Page__textContent — that was an older API).
+ *
+ * The page wrapper stays `user-select: none`; we *only* enable text
+ * selection on .textLayer. That way mousedowns that land in empty
+ * page margins / gaps don't drag the browser's selection anchor
+ * across every span in the layer (which is what made "select one
+ * word" behave like "select the whole page").
+ *
+ * Lift the text layer above our highlight / search overlays so the
+ * mousedown actually reaches it.
+ * ------------------------------------------------------------------ */
+.textLayer {
+  user-select: text;
+  -webkit-user-select: text;
+  pointer-events: auto;
+  /* Above HighlightOverlay (z:10–40 — but those are pointer-events:
+     none when text tool is active) and search boxes (z:5). */
+  z-index: 20;
+}
+
+.textLayer > span {
+  cursor: text;
+  /* Match the glyphs' typical extent for a reliable hit target. */
+  line-height: 1;
+  /* Pixel-snap the per-span transform so sub-pixel rounding doesn't
+     offset the hit-box from the rendered character. */
+  transform-origin: 0% 0%;
+}
+
+.textLayer ::selection,
+.textLayer ::-moz-selection {
+  background: rgba(59, 130, 246, 0.35);
+  color: transparent;
+}
