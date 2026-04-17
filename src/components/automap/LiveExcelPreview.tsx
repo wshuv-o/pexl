@@ -14,18 +14,24 @@ interface Props {
 export default function LiveExcelPreview({
   source, mappings, targetRow0, onTargetRowChange, onDownload,
 }: Props) {
-  // Snapshot of the currently-pending values keyed by header.
-  const live: Record<string, string> = {};
+  // Pending values, keyed by the column INDEX (not header string) so that
+  // duplicate or empty headers in the template don't cause values to
+  // collide on the same key. We look up each mapping's Excel header in
+  // source.headers to find its column index.
+  const live: Record<number, string> = {};
   for (const m of mappings) {
     if (m.status === 'rejected') continue;
     const v = m.override ?? m.chosenBox?.value ?? m.match.box?.value ?? '';
-    if (v) live[m.match.header] = v;
+    if (!v) continue;
+    const colIdx = source.headers.indexOf(m.mapping.excelHeader);
+    if (colIdx >= 0) live[colIdx] = v;
   }
 
   // Build a virtual row list — if targetRow0 is past the existing data,
   // pad empty rows so the preview scrolls far enough to reveal it.
   const rowCount = Math.max(source.rows.length, targetRow0 + 1);
-  const rows = Array.from({ length: rowCount }, (_, i) => source.rows[i] ?? {});
+  const colCount = source.headers.length;
+  const rows: string[][] = Array.from({ length: rowCount }, (_, i) => source.rows[i] ?? Array(colCount).fill(''));
 
   return (
     <div className="flex flex-col h-full bg-card">
@@ -33,7 +39,7 @@ export default function LiveExcelPreview({
         <div className="flex-1 min-w-0">
           <h2 className="text-sm font-bold text-foreground">Live Excel preview</h2>
           <p className="text-[11px] text-muted-foreground mt-0.5">
-            Sheet: {source.sheetName} · {source.rows.length} existing row{source.rows.length !== 1 ? 's' : ''}
+            {source.sheetName} · header row {source.headerRow + 1} · {source.headers.length} columns · {source.rows.length} data rows
           </p>
         </div>
         <div className="flex items-center gap-1.5">
@@ -67,9 +73,9 @@ export default function LiveExcelPreview({
           <thead className="sticky top-0 z-10">
             <tr className="bg-primary text-primary-foreground text-[11px] font-semibold">
               <th className="text-left px-2 py-2 border-r border-white/10 w-10">#</th>
-              {source.headers.map(h => (
-                <th key={h} className="text-left px-3 py-2 whitespace-nowrap border-l border-white/10">
-                  {h}
+              {source.headers.map((h, i) => (
+                <th key={i} className="text-left px-3 py-2 whitespace-nowrap border-l border-white/10">
+                  {h || <span className="text-white/40 italic">col {i + 1}</span>}
                 </th>
               ))}
             </tr>
@@ -85,14 +91,14 @@ export default function LiveExcelPreview({
                               border-b border-border/40`}
                 >
                   <td className="px-2 py-2 text-muted-foreground font-medium">{i + 1}</td>
-                  {source.headers.map(h => {
-                    const existing = row[h] ?? '';
-                    const pending = isTarget ? live[h] ?? '' : '';
-                    const value = pending || existing;
+                  {source.headers.map((_, c) => {
+                    const existing = row[c] ?? '';
+                    const pending  = isTarget ? live[c] ?? '' : '';
+                    const value     = pending || existing;
                     const isPending = isTarget && !!pending && pending !== existing;
                     return (
                       <td
-                        key={h}
+                        key={c}
                         className={`px-3 py-2 border-l border-border/40 max-w-[220px] truncate
                           ${isPending ? 'text-primary font-medium' : 'text-foreground'}`}
                         title={value}

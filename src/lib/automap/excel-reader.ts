@@ -9,9 +9,10 @@ import * as XLSX from 'xlsx-js-style';
 export interface SourceExcel {
   workbook: XLSX.WorkBook;
   sheetName: string;
-  headers: string[];          // row 1, trimmed
-  headerRow: number;          // 0-based row index of the header row (usually 0)
-  rows: Record<string, string>[]; // data rows after the header
+  headers: string[];          // the detected header row, trimmed
+  headerRow: number;          // 0-based row index of the header row
+  rows: string[][];           // data rows after the header — column-indexed so
+                              // duplicate / empty headers don't collide
 }
 
 export const readSourceExcel = async (file: File): Promise<SourceExcel> => {
@@ -27,18 +28,41 @@ export const readSourceExcel = async (file: File): Promise<SourceExcel> => {
     blankrows: false,
   });
 
+  // Smart header-row detection: templates often have a merged title row
+  // (or a few) above the actual header row. Scan the first 15 rows and
+  // pick the one whose string-valued-cell count is the largest; ties go
+  // to the earlier row. A row must have at least 2 string cells to be
+  // eligible, so "319 data rows of numbers" doesn't out-vote a 10-header
+  // label row.
+  const countStringCells = (row: any[]) =>
+    row.filter(v => typeof v === 'string' && v.trim() !== '').length;
+
+  const scanLimit = Math.min(aoa.length, 15);
   let headerRow = 0;
-  while (headerRow < aoa.length && (!aoa[headerRow] || aoa[headerRow].every(c => c === '' || c == null))) {
-    headerRow++;
+  let bestScore = -1;
+  for (let r = 0; r < scanLimit; r++) {
+    const score = countStringCells(aoa[r] ?? []);
+    if (score >= 2 && score > bestScore) {
+      bestScore = score;
+      headerRow = r;
+    }
+  }
+  // Fallback: if we never saw a row with ≥2 string cells, just take the
+  // first non-empty row (old behaviour).
+  if (bestScore < 0) {
+    while (headerRow < aoa.length && (!aoa[headerRow] || aoa[headerRow].every(c => c === '' || c == null))) {
+      headerRow++;
+    }
   }
 
   const headers = (aoa[headerRow] ?? []).map(h => String(h ?? '').trim());
-  const rows: Record<string, string>[] = [];
+  const colCount = headers.length;
+  const rows: string[][] = [];
   for (let r = headerRow + 1; r < aoa.length; r++) {
     const row = aoa[r] ?? [];
-    const entry: Record<string, string> = {};
-    headers.forEach((h, i) => { entry[h] = String(row[i] ?? ''); });
-    rows.push(entry);
+    const padded: string[] = [];
+    for (let c = 0; c < colCount; c++) padded.push(String(row[c] ?? ''));
+    rows.push(padded);
   }
 
   return { workbook, sheetName, headers, headerRow, rows };

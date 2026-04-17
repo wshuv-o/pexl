@@ -43,7 +43,7 @@ export default function AutoHighlightViewer({
   // Auto-jump to the active header's page when it changes.
   useEffect(() => {
     if (!activeHeader) return;
-    const m = mappings.find(x => x.match.header === activeHeader);
+    const m = mappings.find(x => x.mapping.excelHeader === activeHeader);
     const b = m?.chosenBox ?? m?.match.box;
     if (b && b.page !== page) setPage(b.page);
   }, [activeHeader, mappings, page]);
@@ -107,7 +107,7 @@ export default function AutoHighlightViewer({
               {/* Overlay the highlight boxes for every mapping on this page */}
               {mappingsOnPage.map(m => {
                 const b = (m.chosenBox ?? m.match.box)!;
-                const isActive = m.match.header === activeHeader;
+                const isActive = m.mapping.excelHeader === activeHeader;
                 const colorByStatus =
                   m.status === 'confirmed' ? 'rgba(34,197,94,0.25)'
                   : m.status === 'rejected'  ? 'rgba(239,68,68,0.18)'
@@ -117,7 +117,7 @@ export default function AutoHighlightViewer({
                   : m.status === 'rejected'  ? 'rgba(185,28,28,0.7)'
                   : 'rgba(202,138,4,0.95)';
                 return (
-                  <div key={m.match.header}>
+                  <div key={m.mapping.excelHeader}>
                     <div
                       className="absolute pointer-events-none rounded-sm"
                       style={{
@@ -139,7 +139,7 @@ export default function AutoHighlightViewer({
                         zIndex: 7,
                       }}
                     >
-                      {m.match.header}
+                      {m.mapping.excelHeader}{m.mapping.fieldLabel && m.mapping.fieldLabel !== m.mapping.excelHeader ? ` · ${m.mapping.fieldLabel}` : ''}
                     </div>
                   </div>
                 );
@@ -151,7 +151,7 @@ export default function AutoHighlightViewer({
 
       {/* Per-header confirm bar — shown when a header is active */}
       {activeHeader && (() => {
-        const m = mappings.find(x => x.match.header === activeHeader);
+        const m = mappings.find(x => x.mapping.excelHeader === activeHeader);
         if (!m) return null;
         const b = m.chosenBox ?? m.match.box;
         const value = m.override ?? b?.value ?? '';
