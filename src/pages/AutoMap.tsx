@@ -37,6 +37,9 @@ export default function AutoMap() {
   // Null = never successfully processed the PDF on the backend; we fall
   // back to client-side autoMatch in that case.
   const [sessionId,  setSessionId]   = useState<string | null>(null);
+  // Latched once the backend /api/automap/match endpoint has failed, so we
+  // stop spamming the server and the user with repeated fallback toasts.
+  const [backendMatchDown, setBackendMatchDown] = useState(false);
   const [mappings,   setMappings]    = useState<MappingState[]>([]);
   const [activeHeader, setActiveHeader] = useState<string | null>(null);
   const [targetRow0,   setTargetRow0]   = useState(0);
@@ -61,31 +64,48 @@ export default function AutoMap() {
     }
   }, []);
 
-  // Run a one-header PDF match. The single search term is the canonical
-  // field label the user just picked from the dropdown. Uses the stored
-  // session when available, otherwise falls back to client-side autoMatch
-  // against the PDF file.
+  // Run a one-header PDF match. Tries the backend first when a session is
+  // available; on ANY backend failure (404, 500, network error, …) falls
+  // through to the client-side autoMatch so the feature keeps working
+  // even if `/api/automap/match` isn't deployed.
   const matchOneHeader = useCallback(async (
     pdf: File,
     session: string | null,
     searchTerm: string,
   ): Promise<HeaderMatch | null> => {
-    try {
-      if (session) {
+    // 1. Backend path — only if we have a session AND haven't already
+    //    observed that the endpoint is down in this session.
+    if (session && !backendMatchDown) {
+      try {
         setProgress({ label: `Matching "${searchTerm}" on the server`, done: 0, total: 1 });
         const [hit] = await matchHeadersBackend(session, [searchTerm]);
+        setProgress(null);
         return hit ?? null;
+      } catch (err) {
+        const msg = (err as Error).message || String(err);
+        console.warn(`[auto-map] backend match failed for "${searchTerm}", falling back client-side:`, err);
+        setBackendMatchDown(true);
+        // Show the user a single actionable toast, not one per header.
+        if (msg.includes('404')) {
+          toast.warning('Backend /api/automap/match not found (404) — matching locally. Deploy the endpoint to use server-side matching.');
+        } else {
+          toast.warning(`Backend match failed — matching locally. (${msg.slice(0, 120)})`);
+        }
       }
+    }
+
+    // 2. Client fallback — always try, even if the backend just failed.
+    try {
       setProgress({ label: `Matching "${searchTerm}" locally`, done: 0, total: 1 });
       const [hit] = await autoMatch(pdf, [searchTerm]);
       return hit ?? null;
     } catch (err) {
-      console.warn(`[auto-map] match for "${searchTerm}" failed:`, err);
+      console.warn(`[auto-map] client match for "${searchTerm}" failed:`, err);
       return null;
     } finally {
       setProgress(null);
     }
-  }, []);
+  }, [backendMatchDown]);
 
   const start = useCallback(async () => {
     if (pdfFiles.length === 0 || !excelFile) return;
