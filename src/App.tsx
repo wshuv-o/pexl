@@ -8,6 +8,7 @@ import ProtectedRoute from "@/components/ProtectedRoute";
 import Index from "./pages/Index";
 import Login from "./pages/Login";
 import Admin from "./pages/Admin";
+import AutoMap from "./pages/AutoMap";
 import NotFound from "./pages/NotFound";
 import { ReactNode } from "react";
 
@@ -43,6 +44,14 @@ const App = () => (
                   <AdminRoute>
                     <Admin />
                   </AdminRoute>
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/auto-map"
+              element={
+                <ProtectedRoute>
+                  <AutoMap />
                 </ProtectedRoute>
               }
             />
