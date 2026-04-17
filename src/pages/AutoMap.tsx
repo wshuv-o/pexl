@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import { ArrowLeft, Wand2 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
@@ -43,6 +43,11 @@ export default function AutoMap() {
   const [mappings,   setMappings]    = useState<MappingState[]>([]);
   const [activeHeader, setActiveHeader] = useState<string | null>(null);
   const [targetRow0,   setTargetRow0]   = useState(0);
+  const [targetAuto,   setTargetAuto]   = useState<number | null>(null); // set by key-field row matching
+  // The Excel column whose extracted value identifies which row to write
+  // to. When set, each PDF's key-field match value is looked up in that
+  // column of source.rows and targetRow0 is pointed at the matching row.
+  const [rowKeyHeader, setRowKeyHeader] = useState<string | null>(null);
   const [running,      setRunning]      = useState(false);
   const [progress,     setProgress]     = useState<{ label: string; done: number; total: number } | null>(null);
 
@@ -126,9 +131,10 @@ export default function AutoMap() {
 
       const fieldMaps = buildInitialMappings(src.headers);
       setMappings(fieldMaps.map(fm => ({
-        mapping: fm,
-        match:   { header: fm.excelHeader, box: null, alternatives: [] },
-        status:  'pending' as const,
+        mapping:  fm,
+        match:    { header: fm.excelHeader, box: null, alternatives: [] },
+        status:   'pending' as const,
+        included: false,     // opt-in; user checks the ones they need
       })));
       setActiveHeader(fieldMaps[0]?.excelHeader ?? null);
 
@@ -165,6 +171,46 @@ export default function AutoMap() {
   const onRejectHeader = useCallback((excelHeader: string) => {
     patchMapping(excelHeader, { status: 'rejected' });
   }, [patchMapping]);
+
+  // Opt-in toggle — only included rows participate in matching + download.
+  const onToggleIncluded = useCallback((excelHeader: string, included: boolean) => {
+    setMappings(prev => prev.map(m =>
+      m.mapping.excelHeader === excelHeader ? { ...m, included } : m,
+    ));
+    if (!included && activeHeader === excelHeader) setActiveHeader(null);
+  }, [activeHeader]);
+
+  const onIncludeAll = useCallback((included: boolean) => {
+    setMappings(prev => prev.map(m => ({ ...m, included })));
+    if (!included) setActiveHeader(null);
+  }, []);
+
+  // Mark a column as the row-identifier. Unsetting clears the auto-target,
+  // so the manual row picker in the right panel takes over again.
+  const onSetRowKey = useCallback((excelHeader: string | null) => {
+    setRowKeyHeader(excelHeader);
+    if (!excelHeader) setTargetAuto(null);
+  }, []);
+
+  // Whenever a mapping's match settles, if it is the row-key, look its
+  // value up in the corresponding column of the source Excel. First row
+  // where the trimmed, case-insensitive cell value equals the extracted
+  // value wins. Miss → keep the manual row pick.
+  useEffect(() => {
+    if (!source || !rowKeyHeader) { setTargetAuto(null); return; }
+    const km = mappings.find(m => m.mapping.excelHeader === rowKeyHeader);
+    const value = km?.override ?? km?.chosenBox?.value ?? km?.match.box?.value ?? '';
+    if (!value.trim()) { setTargetAuto(null); return; }
+    const colIdx = source.headers.indexOf(rowKeyHeader);
+    if (colIdx < 0) { setTargetAuto(null); return; }
+    const needle = value.trim().toLowerCase();
+    const rowIdx = source.rows.findIndex(r => (r[colIdx] ?? '').trim().toLowerCase() === needle);
+    setTargetAuto(rowIdx >= 0 ? rowIdx : null);
+  }, [source, rowKeyHeader, mappings]);
+
+  // Effective target row: auto-resolved via the key field if available,
+  // otherwise the user's manual pick.
+  const effectiveTargetRow = targetAuto ?? targetRow0;
 
   const onEditHeader = useCallback((excelHeader: string, value: string) => {
     patchMapping(excelHeader, { override: value });
@@ -212,14 +258,16 @@ export default function AutoMap() {
         : m,
     ));
 
-    if (!searchText.trim() || !activePdf) return;
+    // Don't run a PDF search for excluded rows, even if they have text.
+    const isIncluded = mappings.find(m => m.mapping.excelHeader === excelHeader)?.included;
+    if (!searchText.trim() || !activePdf || !isIncluded) return;
     const hit = await matchOneHeader(activePdf, sessionId, searchText.trim());
     if (!hit) return;
     setMappings(prev => prev.map(m =>
       m.mapping.excelHeader === excelHeader ? { ...m, match: hit } : m,
     ));
     setActiveHeader(excelHeader);
-  }, [activePdf, sessionId, matchOneHeader]);
+  }, [activePdf, sessionId, mappings, matchOneHeader]);
 
   // Re-run the PDF match for every header that has a non-empty search
   // phrase. Useful after switching PDFs or when the user wants to force
@@ -229,6 +277,7 @@ export default function AutoMap() {
     setRunning(true);
     try {
       for (const m of mappings) {
+        if (!m.included) continue;
         const q = m.mapping.searchText.trim();
         if (!q) continue;
         const hit = await matchOneHeader(activePdf, sessionId, q);
@@ -257,6 +306,7 @@ export default function AutoMap() {
     // stays out; confirmed-with-edit uses the override.)
     const values: Record<string, string> = {};
     for (const m of mappings) {
+      if (!m.included) continue;
       if (m.status !== 'confirmed') continue;
       const v = m.override ?? m.chosenBox?.value ?? m.match.box?.value ?? '';
       values[m.mapping.excelHeader] = v;
@@ -265,11 +315,11 @@ export default function AutoMap() {
       toast.warning('Confirm at least one mapping before downloading.');
       return;
     }
-    const wb = writeValuesToWorkbook({ source, rowIndex0: targetRow0, values });
+    const wb = writeValuesToWorkbook({ source, rowIndex0: effectiveTargetRow, values });
     const blob = workbookToBlob(wb);
-    const outName = (excelFile?.name || 'output').replace(/\.[^.]+$/, '') + `_filled_row${targetRow0 + 1}.xlsx`;
+    const outName = (excelFile?.name || 'output').replace(/\.[^.]+$/, '') + `_filled_row${effectiveTargetRow + 1}.xlsx`;
     downloadBlob(blob, outName);
-  }, [source, mappings, targetRow0, excelFile]);
+  }, [source, mappings, effectiveTargetRow, excelFile]);
 
   // Advance to the next queued PDF: upload it, reset confirmations, bump
   // the target row. User's header→field mappings are preserved; each
@@ -290,17 +340,19 @@ export default function AutoMap() {
       const sid = await uploadPdf(pdf);
       setSessionId(sid);
 
-      // Preserve existing header→field mapping; reset match + status and
-      // re-run a match for each header that has a canonical field picked.
+      // Preserve existing header→field mapping AND the user's include
+      // selection; only the match result / confirmation status resets.
       const prev = mappings;
       setMappings(prev.map(m => ({
-        mapping: m.mapping,
-        match:   { header: m.mapping.excelHeader, box: null, alternatives: [] },
-        status:  'pending' as const,
+        mapping:  m.mapping,
+        included: m.included,
+        match:    { header: m.mapping.excelHeader, box: null, alternatives: [] },
+        status:   'pending' as const,
       })));
 
       let found = 0;
       for (const m of prev) {
+        if (!m.included) continue;          // skip excluded rows
         const q = m.mapping.searchText.trim();
         if (!q) continue;
         const hit = await matchOneHeader(pdf, sid, q);
@@ -394,9 +446,13 @@ export default function AutoMap() {
               mappings={viewerMappings}
               docType={docType}
               activeHeader={activeHeader}
+              rowKeyHeader={rowKeyHeader}
               onSelect={setActiveHeader}
               onFieldRemap={onFieldRemap}
               onSearchTextChange={onSearchTextChange}
+              onToggleIncluded={onToggleIncluded}
+              onIncludeAll={onIncludeAll}
+              onSetRowKey={onSetRowKey}
               onRematchAll={onRematchAll}
               matching={running}
             />
@@ -474,8 +530,9 @@ export default function AutoMap() {
             <LiveExcelPreview
               source={source}
               mappings={viewerMappings}
-              targetRow0={targetRow0}
-              onTargetRowChange={setTargetRow0}
+              targetRow0={effectiveTargetRow}
+              autoTargetFromKey={targetAuto !== null}
+              onTargetRowChange={r => { setTargetAuto(null); setTargetRow0(r); }}
               onDownload={onDownload}
             />
           ) : (

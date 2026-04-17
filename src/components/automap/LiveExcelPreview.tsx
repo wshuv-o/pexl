@@ -1,4 +1,4 @@
-import { Download, ChevronsUpDown } from 'lucide-react';
+import { Download, Key } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import type { SourceExcel } from '@/lib/automap/excel-reader';
 import type { MappingState } from './MappingReview';
@@ -7,12 +7,13 @@ interface Props {
   source: SourceExcel;
   mappings: MappingState[];
   targetRow0: number;
+  autoTargetFromKey?: boolean;                // target row resolved via a key-field match
   onTargetRowChange: (r: number) => void;
   onDownload: () => void;
 }
 
 export default function LiveExcelPreview({
-  source, mappings, targetRow0, onTargetRowChange, onDownload,
+  source, mappings, targetRow0, autoTargetFromKey, onTargetRowChange, onDownload,
 }: Props) {
   // Pending values, keyed by the column INDEX (not header string) so that
   // duplicate or empty headers in the template don't cause values to
@@ -43,11 +44,15 @@ export default function LiveExcelPreview({
           </p>
         </div>
         <div className="flex items-center gap-1.5">
-          <label className="text-[11px] text-muted-foreground">Write to row</label>
-          <div className="flex items-center gap-0.5 bg-muted rounded">
+          <label className="text-[11px] text-muted-foreground flex items-center gap-1">
+            {autoTargetFromKey && <Key className="w-3 h-3 text-amber-500" />}
+            {autoTargetFromKey ? 'Row (auto)' : 'Write to row'}
+          </label>
+          <div className={`flex items-center gap-0.5 rounded ${autoTargetFromKey ? 'bg-amber-500/10 ring-1 ring-amber-500/30' : 'bg-muted'}`}>
             <button
               className="px-1.5 py-0.5 text-xs hover:bg-muted/80"
               onClick={() => onTargetRowChange(Math.max(0, targetRow0 - 1))}
+              title="Manual override will disable key-field auto-row"
             >−</button>
             <input
               type="number"
@@ -55,13 +60,13 @@ export default function LiveExcelPreview({
               value={targetRow0 + 1}
               onChange={e => onTargetRowChange(Math.max(0, (parseInt(e.target.value) || 1) - 1))}
               className="w-12 text-center bg-transparent text-xs outline-none"
+              title={autoTargetFromKey ? 'Auto-resolved by key-field match (edit to override)' : 'Target row for the downloaded workbook'}
             />
             <button
               className="px-1.5 py-0.5 text-xs hover:bg-muted/80"
               onClick={() => onTargetRowChange(targetRow0 + 1)}
             >+</button>
           </div>
-          <ChevronsUpDown className="w-3.5 h-3.5 text-muted-foreground" />
         </div>
         <Button size="sm" className="gap-1.5" onClick={onDownload}>
           <Download className="w-3.5 h-3.5" /> Download

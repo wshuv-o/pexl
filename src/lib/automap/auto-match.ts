@@ -100,20 +100,41 @@ const belowLine = (a: TextItem, b: TextItem): boolean => {
 };
 
 // Given a "label" item, find the most likely value item.
-// Preference: first item on the same line after the label (after any ":" or "-"
-// separator), else the first item below it.
+// Preference ordering:
+//   1. If the label item itself contains "label: value" (inline colon and
+//      the remainder is non-empty), synthesise a TextItem for that suffix.
+//      Very common — pdfjs frequently emits a label+value pair as a single run.
+//   2. First item on the same line AFTER the label (skipping a stray
+//      colon/dash separator item if pdfjs split it off on its own).
+//   3. First item BELOW the label that horizontally overlaps.
 const findValueAfterLabel = (label: TextItem, all: TextItem[]): TextItem | null => {
-  // Same-line candidates to the right.
+  // (1) Inline "Label: value" in a single run.
+  const colonIdx = label.str.search(/[:\-–—]/);
+  if (colonIdx >= 0 && colonIdx < label.str.length - 1) {
+    const tail = label.str.slice(colonIdx + 1).trim();
+    if (tail) {
+      const leadingShare = (colonIdx + 1) / label.str.length;
+      return {
+        str:     tail,
+        normStr: normalize(tail),
+        x:       label.x + label.width * leadingShare,
+        y:       label.y,
+        width:   label.width * (1 - leadingShare),
+        height:  label.height,
+      };
+    }
+  }
+
+  // (2) Same-line candidates to the right.
   const right = all
     .filter(it => it !== label && sameLine(label, it) && it.x > label.x + label.width * 0.4)
     .sort((a, b) => a.x - b.x);
   if (right.length > 0) {
-    // Skip a leading ':' or '-' separator item if pdfjs emitted it separately.
     const first = right[0];
     if (/^[:\-–—]$/.test(first.str.trim()) && right.length > 1) return right[1];
     return first;
   }
-  // Below candidates.
+  // (3) Below candidates.
   const below = all
     .filter(it => it !== label && belowLine(label, it))
     .sort((a, b) => a.y - b.y || a.x - b.x);
