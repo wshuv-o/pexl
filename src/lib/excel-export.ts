@@ -183,8 +183,154 @@ function buildSheetForFile(
 //  with formulas, T-12 trailing metrics, gap-fill, and roll-up sheets.)
 
 // ---------------------------------------------------------------------------
+// Lease contract sheet — fixed 10-column "Lease" template on the right side
+// of the sheet. One row per PDF. Any non-template fields (custom labels or
+// the older `rent_and_charges`/concession/discount keys) are inserted to the
+// LEFT of the core columns, preserving the template on the right.
+//
+//   file_name │ [extras…] │ Contract Date │ Executed? │ Tenant Name(s) │
+//   Utilities included in Rent │ Lease Start │ Lease End │ Lease Term* │
+//   Security Deposit │ Monthly Rent │ Lease Value*
+//
+//   *Lease Term  = (Lease End − Lease Start) / 365.25
+//   *Lease Value = Monthly Rent × Lease Term × 12
+// ---------------------------------------------------------------------------
+function buildLeaseSheet(fileMap: Map<string, ExtractedRow[]>): XLSX.WorkSheet {
+  const docType: DocumentType = 'lease_contract';
+  const headerColor = HEADER_COLORS[docType];
+
+  const parseMoney = (s: string): number | null => {
+    const n = parseFloat(s.replace(/[$,\s]/g, ''));
+    return isNaN(n) ? null : n;
+  };
+
+  type CoreKey =
+    | 'lease_date' | 'executed' | 'parties' | 'utilities_included'
+    | 'lease_begin_date' | 'lease_end_date' | 'lease_term'
+    | 'security_deposit' | 'monthly_rent' | 'lease_value';
+
+  interface CoreCol {
+    key: CoreKey;
+    field: string | null;   // ExtractedRow.field value (null = computed column)
+    label: string;
+    width: number;
+    type?: 'checkbox' | 'money';
+    formula?: (row1: number, L: Record<CoreKey, string>) => string;
+  }
+
+  const core: CoreCol[] = [
+    { key: 'lease_date',         field: 'lease_date',         label: 'Contract Date', width: 13 },
+    { key: 'executed',           field: 'executed',           label: 'Executed?', width: 10, type: 'checkbox' },
+    { key: 'parties',            field: 'parties',            label: 'Tenant Name(s)', width: 20 },
+    { key: 'utilities_included', field: 'utilities_included', label: 'Utilities included in Rent', width: 24 },
+    { key: 'lease_begin_date',   field: 'lease_begin_date',   label: 'Lease Start', width: 12 },
+    { key: 'lease_end_date',     field: 'lease_end_date',     label: 'Lease End', width: 12 },
+    { key: 'lease_term', field: null, label: 'Lease Term', width: 10,
+      formula: (r, L) => `IFERROR((DATEVALUE(${L.lease_end_date}${r})-DATEVALUE(${L.lease_begin_date}${r}))/365.25,0)` },
+    { key: 'security_deposit',   field: 'security_deposit',   label: 'Security Deposit', width: 15, type: 'money' },
+    { key: 'monthly_rent',       field: 'monthly_rent',       label: 'Monthly Rent', width: 13, type: 'money' },
+    { key: 'lease_value', field: null, label: 'Lease Value', width: 14,
+      formula: (r, L) => `IFERROR(${L.monthly_rent}${r}*${L.lease_term}${r}*12,0)` },
+  ];
+
+  // Any field key not in `core` is treated as an "extra" and goes left of the template.
+  const coreFields = new Set(core.map(c => c.field).filter((f): f is string => !!f));
+  const extras = new Set<string>();
+  for (const rows of fileMap.values()) {
+    for (const row of rows) if (!coreFields.has(row.field)) extras.add(row.field);
+  }
+  const extraFields = Array.from(extras);
+
+  const startExtraIdx = 1;
+  const startCoreIdx  = startExtraIdx + extraFields.length;
+  const totalCols     = startCoreIdx + core.length;
+
+  // Column letter for each core key, for formula references.
+  const L = {} as Record<CoreKey, string>;
+  core.forEach((c, i) => { L[c.key] = XLSX.utils.encode_col(startCoreIdx + i); });
+
+  const wsData: any[][] = [];
+  const styles: { row: number; col: number; style: any }[] = [];
+  const merges: { s: { r: number; c: number }; e: { r: number; c: number } }[] = [];
+  let ri = 0;
+  const push = (cells: any[]) => { wsData.push(cells); return ri++; };
+  const sc   = (r: number, c: number, s: any) => styles.push({ row: r, col: c, style: s });
+
+  // Row 0 — "Lease" title merged over the core columns.
+  const titleRow = Array(totalCols).fill('');
+  titleRow[startCoreIdx] = 'Lease';
+  const titleR = push(titleRow);
+  merges.push({ s: { r: titleR, c: startCoreIdx }, e: { r: titleR, c: totalCols - 1 } });
+  sc(titleR, startCoreIdx, hdr(headerColor.bg, headerColor.font, true, 11));
+  for (let c = 0; c < startCoreIdx; c++) sc(titleR, c, cell(C.whiteBg, false, 'left', 10));
+
+  // Row 1 — column headers.
+  const headerCells = [
+    'file_name',
+    ...extraFields,
+    ...core.map(c => c.label),
+  ];
+  const hr = push(headerCells);
+  for (let c = 0; c < totalCols; c++) sc(hr, c, hdr(headerColor.bg, headerColor.font));
+
+  // One data row per PDF.
+  for (const [filename, rows] of fileMap.entries()) {
+    const values: Record<string, string> = {};
+    for (const row of rows) {
+      if (!row.value) continue;
+      if (values[row.field]) continue; // first-wins
+      values[row.field] = row.value;
+    }
+
+    const row1 = ri + 1;
+    const rowCells: any[] = [
+      filename.replace(/\.pdf$/i, ''),
+      ...extraFields.map(k => values[k] ?? ''),
+    ];
+
+    for (const col of core) {
+      if (col.formula) {
+        rowCells.push({ t: 'n', v: 0, f: col.formula(row1, L) });
+      } else if (col.type === 'checkbox') {
+        const raw = (col.field ? values[col.field] : '') ?? '';
+        const checked = /^(y|yes|true|executed|signed|checked|x|✓|☒|☑|1)$/i.test(raw.trim());
+        rowCells.push(checked ? '☒' : '☐');
+      } else if (col.type === 'money') {
+        const raw = col.field ? values[col.field] : '';
+        const n = raw ? parseMoney(raw) : null;
+        if (n !== null) rowCells.push({ t: 'n', v: n, z: '"$"#,##0.00' });
+        else rowCells.push(raw ?? '');
+      } else {
+        rowCells.push(col.field ? values[col.field] ?? '' : '');
+      }
+    }
+
+    const r = push(rowCells);
+    sc(r, 0, cell(C.whiteBg, true, 'left', 10));
+    for (let c = startExtraIdx; c < startCoreIdx; c++) sc(r, c, cell(C.whiteBg, false, 'left', 10));
+    core.forEach((col, i) => {
+      const align: 'left' | 'center' | 'right' =
+        col.type === 'checkbox' ? 'center' :
+        col.type === 'money' || col.formula ? 'right' : 'left';
+      sc(r, startCoreIdx + i, cell(C.whiteBg, false, align, col.type === 'checkbox' ? 12 : 10));
+    });
+  }
+
+  const ws = XLSX.utils.aoa_to_sheet(wsData);
+  applyStyles(ws, wsData, styles);
+  if (merges.length > 0) ws['!merges'] = merges;
+  ws['!cols'] = [
+    { wch: 30 },
+    ...extraFields.map(() => ({ wch: 18 })),
+    ...core.map(c => ({ wch: c.width })),
+  ];
+  ws['!freeze'] = { xSplit: 1, ySplit: 2 };
+  return ws;
+}
+
+// ---------------------------------------------------------------------------
 // Build a stacked-tables sheet — one table per PDF on a single sheet.
-// Used for appraisal and lease contract exports.
+// Used for appraisal exports.
 // ---------------------------------------------------------------------------
 function buildStackedTablesSheet(
   fileMap: Map<string, ExtractedRow[]>,
@@ -288,94 +434,10 @@ function buildStackedTablesSheet(
 }
 
 // ---------------------------------------------------------------------------
-// Build a single-table sheet with one row per PDF. All pages of a given PDF
-// are collapsed into that one row — for each field column, the first
-// non-empty value across the PDF's pages wins. Columns whose field is empty
-// across every PDF are dropped entirely ("empty fields hidden").
-// Used for lease contracts.
-// ---------------------------------------------------------------------------
-function buildMergedSheet(
-  fileMap: Map<string, ExtractedRow[]>,
-  docType: DocumentType,
-): XLSX.WorkSheet {
-  const headerColor = HEADER_COLORS[docType];
-
-  // Field columns for this doc type (exclude the 'custom' placeholder).
-  const fieldDefs = getFieldLabelsForType(docType).filter(f => f.value !== 'custom');
-
-  // Any user-defined field keys used across the files go at the end.
-  const knownFields = new Set(fieldDefs.map(f => f.value as string));
-  const customFields: string[] = [];
-  for (const rows of fileMap.values()) {
-    for (const row of rows) {
-      if (!knownFields.has(row.field) && !customFields.includes(row.field)) {
-        customFields.push(row.field);
-      }
-    }
-  }
-
-  const allColumns = [
-    ...fieldDefs.map(f => ({ key: f.value, label: f.label })),
-    ...customFields.map(f => ({ key: f, label: f })),
-  ];
-
-  // Flatten each PDF to one value per field (first non-empty wins — the
-  // same policy the bank-statement exporter uses).
-  const perFile: Array<{ filename: string; values: Record<string, string> }> = [];
-  for (const [filename, rows] of fileMap.entries()) {
-    const values: Record<string, string> = {};
-    for (const row of rows) {
-      if (!row.value) continue;
-      if (values[row.field]) continue;
-      values[row.field] = row.value;
-    }
-    perFile.push({ filename, values });
-  }
-
-  // Drop columns where no PDF has a value.
-  const usedColumns = allColumns.filter(col => perFile.some(pf => !!pf.values[col.key]));
-
-  const wsData: any[][] = [];
-  const styles: { row: number; col: number; style: any }[] = [];
-  let ri = 0;
-  const push = (cells: any[]) => { wsData.push(cells); return ri++; };
-  const sc = (r: number, c: number, s: any) => styles.push({ row: r, col: c, style: s });
-
-  const totalCols = 1 + usedColumns.length;
-
-  // Header row — file_name + field labels.
-  const headerCells = ['file_name', ...usedColumns.map(c => c.label)];
-  const hr = push(headerCells);
-  for (let c = 0; c < totalCols; c++) {
-    sc(hr, c, hdr(headerColor.bg, headerColor.font));
-  }
-
-  // One data row per PDF.
-  for (const { filename, values } of perFile) {
-    const cleanName = filename.replace(/\.pdf$/i, '');
-    const rowCells: any[] = [
-      cleanName,
-      ...usedColumns.map(col => values[col.key] ?? ''),
-    ];
-    const r = push(rowCells);
-    sc(r, 0, cell(C.whiteBg, true, 'left', 10));
-    for (let c = 1; c < totalCols; c++) {
-      sc(r, c, cell(C.whiteBg, false, 'left', 10));
-    }
-  }
-
-  const ws = XLSX.utils.aoa_to_sheet(wsData);
-  applyStyles(ws, wsData, styles);
-  ws['!cols'] = [{ wch: 30 }, ...usedColumns.map(() => ({ wch: 22 }))];
-  ws['!freeze'] = { xSplit: 1, ySplit: 1 };
-  return ws;
-}
-
-// ---------------------------------------------------------------------------
 // Main export
 //   - bank_statement → single combined sheet, file_name as first column
 //   - appraisal      → stacked tables, one per PDF
-//   - lease_contract → single merged sheet (one row per PDF, empty cols hidden)
+//   - lease_contract → fixed "Lease" template (right-aligned), extras on left
 //   - other types    → one sheet per PDF
 // ---------------------------------------------------------------------------
 export function exportToExcel(
@@ -412,9 +474,9 @@ export function exportToExcel(
     const ws = buildStackedTablesSheet(fileMap, 'appraisal', 'E5D6F0'); // light purple
     XLSX.utils.book_append_sheet(wb, ws, 'Appraisals');
   } else if (overallType === 'lease_contract') {
-    // One sheet, one merged row per PDF — fields collapsed across pages,
-    // columns with no values anywhere are hidden.
-    const ws = buildMergedSheet(fileMap, 'lease_contract');
+    // Fixed "Lease" template — 10 core columns on the right, extras on
+    // the left, computed Lease Term / Lease Value columns.
+    const ws = buildLeaseSheet(fileMap);
     XLSX.utils.book_append_sheet(wb, ws, 'Lease Contracts');
   } else {
     // Per-file sheets (utility)

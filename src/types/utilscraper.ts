@@ -67,10 +67,13 @@ export type FieldLabel =
   | 'property_type'
   // Lease contract fields
   | 'lease_date'
+  | 'executed'
   | 'parties'
+  | 'utilities_included'
   | 'lease_begin_date'
   | 'lease_end_date'
   | 'security_deposit'
+  | 'monthly_rent'
   | 'rent_and_charges'
   | 'onetime_concession_amount'
   | 'onetime_concession_comment'
@@ -113,11 +116,14 @@ export const FIELD_LABELS: FieldLabelOption[] = [
   { value: 'appraised_as_is_value', label: 'Appraised As-Is Value', color: '#dc2626', bgColor: 'rgba(220,38,38,0.18)', docTypes: ['appraisal'] },
   { value: 'property_type',        label: 'Property Type',          color: '#0891b2', bgColor: 'rgba(8,145,178,0.18)',  docTypes: ['appraisal'] },
   // ── Lease contract fields ───────────────────────────────────────────
-  { value: 'lease_date',                label: 'Date of Lease',            color: '#7c3aed', bgColor: 'rgba(124,58,237,0.18)',  docTypes: ['lease_contract'] },
-  { value: 'parties',                   label: 'Parties',                  color: '#1d4ed8', bgColor: 'rgba(29,78,216,0.18)',   docTypes: ['lease_contract'] },
-  { value: 'lease_begin_date',          label: 'Lease Begin Date',         color: '#0891b2', bgColor: 'rgba(8,145,178,0.18)',   docTypes: ['lease_contract'] },
-  { value: 'lease_end_date',            label: 'Lease End Date',           color: '#0284c7', bgColor: 'rgba(2,132,199,0.18)',   docTypes: ['lease_contract'] },
+  { value: 'lease_date',                label: 'Contract Date',            color: '#7c3aed', bgColor: 'rgba(124,58,237,0.18)',  docTypes: ['lease_contract'] },
+  { value: 'executed',                  label: 'Executed?',                color: '#059669', bgColor: 'rgba(5,150,105,0.18)',   docTypes: ['lease_contract'] },
+  { value: 'parties',                   label: 'Tenant Name(s)',           color: '#1d4ed8', bgColor: 'rgba(29,78,216,0.18)',   docTypes: ['lease_contract'] },
+  { value: 'utilities_included',        label: 'Utilities included in Rent', color: '#b45309', bgColor: 'rgba(180,83,9,0.18)', docTypes: ['lease_contract'] },
+  { value: 'lease_begin_date',          label: 'Lease Start',              color: '#0891b2', bgColor: 'rgba(8,145,178,0.18)',   docTypes: ['lease_contract'] },
+  { value: 'lease_end_date',            label: 'Lease End',                color: '#0284c7', bgColor: 'rgba(2,132,199,0.18)',   docTypes: ['lease_contract'] },
   { value: 'security_deposit',          label: 'Security Deposit',         color: '#16a34a', bgColor: 'rgba(22,163,74,0.18)',   docTypes: ['lease_contract'] },
+  { value: 'monthly_rent',              label: 'Monthly Rent',             color: '#be123c', bgColor: 'rgba(190,18,60,0.18)',   docTypes: ['lease_contract'] },
   { value: 'rent_and_charges',          label: 'Rent & Charges',           color: '#dc2626', bgColor: 'rgba(220,38,38,0.18)',   docTypes: ['lease_contract'] },
   { value: 'onetime_concession_amount', label: 'One-Time Concession $',    color: '#d97706', bgColor: 'rgba(217,119,6,0.18)',   docTypes: ['lease_contract'] },
   { value: 'onetime_concession_comment',label: 'One-Time Concession Note', color: '#9333ea', bgColor: 'rgba(147,51,234,0.18)', docTypes: ['lease_contract'] },
