@@ -39,6 +39,9 @@ export default function Index() {
   const [pendingDocType, setPendingDocType]     = useState<DocumentType>('utility_bill');
   const [dragTabId, setDragTabId]               = useState<string | null>(null);
   const [pageJump, setPageJump]                 = useState<{ sessionId: string; page: number; nonce: number } | null>(null);
+  // Session-wide custom field labels — survive tab switches and show up in
+  // every PDF's label picker.
+  const [customFields, setCustomFields]         = useState<string[]>([]);
 
   const activeSession = sessions.find(s => s.id === activeTabId);
   const hasUploaded   = sessions.length > 0 || pendingFiles.length > 0;
@@ -283,6 +286,14 @@ export default function Index() {
   // Excel panel row click → switch to that PDF's tab (if needed) and scroll its
   // viewer to the row's page. Uses a nonce so clicking the same row repeatedly
   // still re-fires the scroll.
+  // Adds a user-typed custom field label to the session-wide list, so every
+  // PDF's label picker shows it.
+  const handleAddCustomField = useCallback((name: string) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    setCustomFields(prev => (prev.includes(trimmed) ? prev : [...prev, trimmed]));
+  }, []);
+
   const handleExcelRowClick = useCallback((sessionId: string, page: number) => {
     if (sessionId !== activeTabId) {
       setOpenTabs(prev => (prev.includes(sessionId) ? prev : [...prev, sessionId]));
@@ -574,6 +585,8 @@ export default function Index() {
                   onStartPageChange={handleStartPageChange}
                   extracting={extracting}
                   scrollToPageTrigger={pageJump && pageJump.sessionId === activeSession.id ? pageJump : null}
+                  customFields={customFields}
+                  onCustomFieldAdd={handleAddCustomField}
                 />
               </div>
 

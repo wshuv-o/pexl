@@ -288,9 +288,94 @@ function buildStackedTablesSheet(
 }
 
 // ---------------------------------------------------------------------------
+// Build a single-table sheet with one row per PDF. All pages of a given PDF
+// are collapsed into that one row — for each field column, the first
+// non-empty value across the PDF's pages wins. Columns whose field is empty
+// across every PDF are dropped entirely ("empty fields hidden").
+// Used for appraisals.
+// ---------------------------------------------------------------------------
+function buildMergedSheet(
+  fileMap: Map<string, ExtractedRow[]>,
+  docType: DocumentType,
+): XLSX.WorkSheet {
+  const headerColor = HEADER_COLORS[docType];
+
+  // Field columns for this doc type (exclude the 'custom' placeholder).
+  const fieldDefs = getFieldLabelsForType(docType).filter(f => f.value !== 'custom');
+
+  // Any user-defined field keys used across the files go at the end.
+  const knownFields = new Set(fieldDefs.map(f => f.value as string));
+  const customFields: string[] = [];
+  for (const rows of fileMap.values()) {
+    for (const row of rows) {
+      if (!knownFields.has(row.field) && !customFields.includes(row.field)) {
+        customFields.push(row.field);
+      }
+    }
+  }
+
+  const allColumns = [
+    ...fieldDefs.map(f => ({ key: f.value, label: f.label })),
+    ...customFields.map(f => ({ key: f, label: f })),
+  ];
+
+  // Flatten each PDF to one value per field (first non-empty wins — the
+  // same policy the bank-statement exporter uses).
+  const perFile: Array<{ filename: string; values: Record<string, string> }> = [];
+  for (const [filename, rows] of fileMap.entries()) {
+    const values: Record<string, string> = {};
+    for (const row of rows) {
+      if (!row.value) continue;
+      if (values[row.field]) continue;
+      values[row.field] = row.value;
+    }
+    perFile.push({ filename, values });
+  }
+
+  // Drop columns where no PDF has a value.
+  const usedColumns = allColumns.filter(col => perFile.some(pf => !!pf.values[col.key]));
+
+  const wsData: any[][] = [];
+  const styles: { row: number; col: number; style: any }[] = [];
+  let ri = 0;
+  const push = (cells: any[]) => { wsData.push(cells); return ri++; };
+  const sc = (r: number, c: number, s: any) => styles.push({ row: r, col: c, style: s });
+
+  const totalCols = 1 + usedColumns.length;
+
+  // Header row — file_name + field labels.
+  const headerCells = ['file_name', ...usedColumns.map(c => c.label)];
+  const hr = push(headerCells);
+  for (let c = 0; c < totalCols; c++) {
+    sc(hr, c, hdr(headerColor.bg, headerColor.font));
+  }
+
+  // One data row per PDF.
+  for (const { filename, values } of perFile) {
+    const cleanName = filename.replace(/\.pdf$/i, '');
+    const rowCells: any[] = [
+      cleanName,
+      ...usedColumns.map(col => values[col.key] ?? ''),
+    ];
+    const r = push(rowCells);
+    sc(r, 0, cell(C.whiteBg, true, 'left', 10));
+    for (let c = 1; c < totalCols; c++) {
+      sc(r, c, cell(C.whiteBg, false, 'left', 10));
+    }
+  }
+
+  const ws = XLSX.utils.aoa_to_sheet(wsData);
+  applyStyles(ws, wsData, styles);
+  ws['!cols'] = [{ wch: 30 }, ...usedColumns.map(() => ({ wch: 22 }))];
+  ws['!freeze'] = { xSplit: 1, ySplit: 1 };
+  return ws;
+}
+
+// ---------------------------------------------------------------------------
 // Main export
 //   - bank_statement → single combined sheet, file_name as first column
-//   - appraisal      → single sheet, one table per PDF stacked vertically
+//   - appraisal      → single merged sheet (one row per PDF, empty cols hidden)
+//   - lease_contract → stacked tables, one per PDF
 //   - other types    → one sheet per PDF
 // ---------------------------------------------------------------------------
 export function exportToExcel(
@@ -323,8 +408,9 @@ export function exportToExcel(
     });
     return;
   } else if (overallType === 'appraisal') {
-    // One sheet, one table per PDF stacked vertically
-    const ws = buildStackedTablesSheet(fileMap, 'appraisal', 'E5D6F0'); // light purple
+    // One sheet, one merged row per PDF — fields collapsed across pages,
+    // columns with no values anywhere are hidden.
+    const ws = buildMergedSheet(fileMap, 'appraisal');
     XLSX.utils.book_append_sheet(wb, ws, 'Appraisals');
   } else if (overallType === 'lease_contract') {
     // One sheet, one table per PDF stacked vertically

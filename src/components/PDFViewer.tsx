@@ -21,6 +21,10 @@ interface PDFViewerProps {
   // When this changes, scroll to the given page. `nonce` forces re-fire even if
   // the user clicks the same row twice.
   scrollToPageTrigger?: { page: number; nonce: number } | null;
+  // Session-wide custom-field list (owned by the parent so it survives tab
+  // switches and shows up in every PDF's label picker).
+  customFields: string[];
+  onCustomFieldAdd: (name: string) => void;
 }
 
 export default function PDFViewer({
@@ -32,6 +36,8 @@ export default function PDFViewer({
   onStartPageChange,
   extracting,
   scrollToPageTrigger,
+  customFields,
+  onCustomFieldAdd,
 }: PDFViewerProps) {
   const [currentPage, setCurrentPage]   = useState(session.startPage || 1);
   const [zoom, setZoom]                 = useState<number | null>(null);
@@ -47,9 +53,6 @@ export default function PDFViewer({
     rect: { x: number; y: number; w: number; h: number };
     page: number;
   } | null>(null);
-
-  // Custom field names added by the user during this session
-  const [customFields, setCustomFields] = useState<string[]>([]);
 
   // Rubber-band selection + multi-select
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -340,13 +343,14 @@ export default function PDFViewer({
       const existing = session.highlights[pg] ?? [];
       updateHighlights(pg, [...existing, hl]);
       // Remember user-added custom field name so it appears in subsequent pickers
+      // across every PDF in the session (state lives in the parent).
       if (customLabel && customLabel.trim()) {
-        setCustomFields(prev => prev.includes(customLabel) ? prev : [...prev, customLabel]);
+        onCustomFieldAdd(customLabel.trim());
       }
       setPickerPos(null);
       setShowFirstHint(false);
     },
-    [pickerPos, session.highlights, updateHighlights],
+    [pickerPos, session.highlights, updateHighlights, onCustomFieldAdd],
   );
 
   // -----------------------------------------------------------------------
