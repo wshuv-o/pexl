@@ -292,7 +292,7 @@ function buildStackedTablesSheet(
 // are collapsed into that one row — for each field column, the first
 // non-empty value across the PDF's pages wins. Columns whose field is empty
 // across every PDF are dropped entirely ("empty fields hidden").
-// Used for appraisals.
+// Used for lease contracts.
 // ---------------------------------------------------------------------------
 function buildMergedSheet(
   fileMap: Map<string, ExtractedRow[]>,
@@ -374,8 +374,8 @@ function buildMergedSheet(
 // ---------------------------------------------------------------------------
 // Main export
 //   - bank_statement → single combined sheet, file_name as first column
-//   - appraisal      → single merged sheet (one row per PDF, empty cols hidden)
-//   - lease_contract → stacked tables, one per PDF
+//   - appraisal      → stacked tables, one per PDF
+//   - lease_contract → single merged sheet (one row per PDF, empty cols hidden)
 //   - other types    → one sheet per PDF
 // ---------------------------------------------------------------------------
 export function exportToExcel(
@@ -408,13 +408,13 @@ export function exportToExcel(
     });
     return;
   } else if (overallType === 'appraisal') {
-    // One sheet, one merged row per PDF — fields collapsed across pages,
-    // columns with no values anywhere are hidden.
-    const ws = buildMergedSheet(fileMap, 'appraisal');
+    // One sheet, one table per PDF stacked vertically
+    const ws = buildStackedTablesSheet(fileMap, 'appraisal', 'E5D6F0'); // light purple
     XLSX.utils.book_append_sheet(wb, ws, 'Appraisals');
   } else if (overallType === 'lease_contract') {
-    // One sheet, one table per PDF stacked vertically
-    const ws = buildStackedTablesSheet(fileMap, 'lease_contract', 'F5E0C5'); // light orange
+    // One sheet, one merged row per PDF — fields collapsed across pages,
+    // columns with no values anywhere are hidden.
+    const ws = buildMergedSheet(fileMap, 'lease_contract');
     XLSX.utils.book_append_sheet(wb, ws, 'Lease Contracts');
   } else {
     // Per-file sheets (utility)
