@@ -12,9 +12,9 @@ import { readSourceExcel, type SourceExcel } from '@/lib/automap/excel-reader';
 import { autoMatch, type HeaderMatch } from '@/lib/automap/auto-match';
 import { matchHeadersBackend } from '@/lib/automap/api';
 import { writeValuesToWorkbook, workbookToBlob, downloadBlob } from '@/lib/automap/excel-writer';
-import { buildInitialMappings, type HeaderToField } from '@/lib/automap/header-mapping';
+import { buildInitialMappings } from '@/lib/automap/header-mapping';
 import { processFile } from '@/lib/api';
-import type { FieldLabel } from '@/types/utilscraper';
+import type { FieldLabel, DocumentType } from '@/types/utilscraper';
 
 // ───────────────────────────────────────────────────────────────────────────
 // Auto-map page: Source PDF + Source output Excel → read headers → rule-based
@@ -25,10 +25,11 @@ import type { FieldLabel } from '@/types/utilscraper';
 export default function AutoMap() {
   const navigate = useNavigate();
 
+  const [docType,   setDocType]   = useState<DocumentType | null>(null);
   const [pdfFiles,  setPdfFiles]  = useState<File[]>([]);
   const [activePdfIdx, setActivePdfIdx] = useState(0);
   const [excelFile, setExcelFile] = useState<File | null>(null);
-  const [leftWidth,  setLeftWidth]  = useState(320);   // px — drag to resize
+  const [leftWidth,  setLeftWidth]  = useState(340);   // px — drag to resize
   const [rightWidth, setRightWidth] = useState(520);   // px — drag to resize
   const [source,    setSource]    = useState<SourceExcel | null>(null);
   // Backend session for the currently-active PDF. Used by onFieldRemap to
@@ -111,7 +112,7 @@ export default function AutoMap() {
       })));
       setActiveHeader(fieldMaps[0]?.excelHeader ?? null);
 
-      toast.success(`Read ${src.headers.length} header${src.headers.length !== 1 ? 's' : ''}. Map each one to a canonical field using the dropdown.`);
+      toast.success(`Read ${src.headers.length} Excel header${src.headers.length !== 1 ? 's' : ''}. Set the canonical field and the exact PDF search phrase for each.`);
     } catch (err) {
       const msg = (err as Error).message || 'Unknown error';
       toast.error(msg);
@@ -158,39 +159,77 @@ export default function AutoMap() {
     toast.success(`${status === 'confirmed' ? 'Confirmed' : 'Rejected'} all mappings on page ${page}`);
   }, []);
 
-  // User picked a canonical field from the dropdown. Update the mapping
-  // and immediately run a single-header PDF match for the new field label.
-  // Unmapping clears the previous match so nothing lingers.
-  const onFieldRemap = useCallback(async (
+  // Canonical-field dropdown change — pure metadata (used for Excel
+  // normalization and the UI pill). Does NOT trigger a PDF search; that's
+  // driven separately by the "search text" input below (onSearchTextChange).
+  const onFieldRemap = useCallback((
     excelHeader: string,
     fieldKey: FieldLabel | null,
     fieldLabel: string | null,
   ) => {
-    // 1. Update the mapping synchronously so the UI reflects the choice.
-    setMappings(prev => prev.map(m => {
-      if (m.mapping.excelHeader !== excelHeader) return m;
-      return {
-        ...m,
-        mapping: { ...m.mapping, fieldKey, fieldLabel },
-        // Clear previous match + overrides when the mapping changes.
-        match:   { header: excelHeader, box: null, alternatives: [] },
-        override: undefined,
-        chosenBox: undefined,
-        status:  'pending' as const,
-      };
-    }));
-    if (!fieldLabel || !activePdf) return;
-
-    // 2. Fire the per-header match (backend first, client fallback).
-    const hit = await matchOneHeader(activePdf, sessionId, fieldLabel);
-    if (!hit) return;
     setMappings(prev => prev.map(m =>
       m.mapping.excelHeader === excelHeader
-        ? { ...m, match: hit }
+        ? { ...m, mapping: { ...m.mapping, fieldKey, fieldLabel } }
         : m,
+    ));
+  }, []);
+
+  // User committed a new exact-search phrase for a header (blur/Enter in
+  // the third-column input). Store it, then run a one-header PDF match
+  // against the current active PDF using that exact phrase.
+  const onSearchTextChange = useCallback(async (excelHeader: string, searchText: string) => {
+    setMappings(prev => prev.map(m =>
+      m.mapping.excelHeader === excelHeader
+        ? {
+            ...m,
+            mapping: { ...m.mapping, searchText },
+            // Clear previous match so stale values don't hang around.
+            match:   { header: excelHeader, box: null, alternatives: [] },
+            override: undefined,
+            chosenBox: undefined,
+            status:  'pending' as const,
+          }
+        : m,
+    ));
+
+    if (!searchText.trim() || !activePdf) return;
+    const hit = await matchOneHeader(activePdf, sessionId, searchText.trim());
+    if (!hit) return;
+    setMappings(prev => prev.map(m =>
+      m.mapping.excelHeader === excelHeader ? { ...m, match: hit } : m,
     ));
     setActiveHeader(excelHeader);
   }, [activePdf, sessionId, matchOneHeader]);
+
+  // Re-run the PDF match for every header that has a non-empty search
+  // phrase. Useful after switching PDFs or when the user wants to force
+  // a refresh.
+  const onRematchAll = useCallback(async () => {
+    if (!activePdf) return;
+    setRunning(true);
+    try {
+      for (const m of mappings) {
+        const q = m.mapping.searchText.trim();
+        if (!q) continue;
+        const hit = await matchOneHeader(activePdf, sessionId, q);
+        setMappings(curr => curr.map(x =>
+          x.mapping.excelHeader === m.mapping.excelHeader
+            ? {
+                ...x,
+                match: hit ?? { header: x.mapping.excelHeader, box: null, alternatives: [] },
+                status: 'pending' as const,
+                override: undefined,
+                chosenBox: undefined,
+              }
+            : x,
+        ));
+      }
+      toast.success('Re-ran all configured searches against the current PDF.');
+    } finally {
+      setRunning(false);
+      setProgress(null);
+    }
+  }, [activePdf, sessionId, mappings, matchOneHeader]);
 
   const onDownload = useCallback(() => {
     if (!source) return;
@@ -242,8 +281,9 @@ export default function AutoMap() {
 
       let found = 0;
       for (const m of prev) {
-        if (!m.mapping.fieldLabel) continue;
-        const hit = await matchOneHeader(pdf, sid, m.mapping.fieldLabel);
+        const q = m.mapping.searchText.trim();
+        if (!q) continue;
+        const hit = await matchOneHeader(pdf, sid, q);
         if (hit) {
           found++;
           setMappings(curr => curr.map(x =>
@@ -309,6 +349,8 @@ export default function AutoMap() {
           {!hasData ? (
             <div className="p-4">
               <DualUpload
+                docType={docType}
+                onDocTypeChange={setDocType}
                 pdfFiles={pdfFiles}
                 excelFile={excelFile}
                 onPdfsChange={setPdfFiles}
@@ -330,9 +372,13 @@ export default function AutoMap() {
           ) : (
             <MappingReview
               mappings={viewerMappings}
+              docType={docType}
               activeHeader={activeHeader}
               onSelect={setActiveHeader}
               onFieldRemap={onFieldRemap}
+              onSearchTextChange={onSearchTextChange}
+              onRematchAll={onRematchAll}
+              matching={running}
             />
           )}
         </aside>

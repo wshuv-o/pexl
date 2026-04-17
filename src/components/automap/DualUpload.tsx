@@ -1,8 +1,11 @@
 import { useRef } from 'react';
 import { FileText, Sheet, Upload, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { DOCUMENT_TYPES, type DocumentType } from '@/types/utilscraper';
 
 interface Props {
+  docType: DocumentType | null;
+  onDocTypeChange: (t: DocumentType) => void;
   pdfFiles: File[];
   excelFile: File | null;
   onPdfsChange: (f: File[]) => void;
@@ -12,14 +15,38 @@ interface Props {
 }
 
 export default function DualUpload({
+  docType, onDocTypeChange,
   pdfFiles, excelFile, onPdfsChange, onExcelChange, onStart, running,
 }: Props) {
   const pdfRef = useRef<HTMLInputElement>(null);
   const xlRef  = useRef<HTMLInputElement>(null);
-  const ready = pdfFiles.length > 0 && !!excelFile;
+  const ready = !!docType && pdfFiles.length > 0 && !!excelFile;
 
   return (
     <div className="space-y-3">
+      {/* Doc type — required before anything else */}
+      <div>
+        <label className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wide">
+          Document type
+        </label>
+        <div className="grid grid-cols-2 gap-1.5 mt-1.5">
+          {DOCUMENT_TYPES.map(dt => (
+            <button
+              key={dt.value}
+              type="button"
+              onClick={() => onDocTypeChange(dt.value)}
+              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border text-xs font-medium transition-colors
+                ${docType === dt.value
+                  ? 'border-primary bg-primary/10 text-foreground'
+                  : 'border-border hover:border-primary/50 text-muted-foreground hover:text-foreground'}`}
+            >
+              <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: dt.color }} />
+              <span className="truncate">{dt.label}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+
       {/* Multi-PDF tile */}
       <div
         role="button"
@@ -126,10 +153,12 @@ export default function DualUpload({
         disabled={!ready || running}
       >
         {running
-          ? 'Matching…'
+          ? 'Working…'
           : ready
-            ? `Auto-match ${pdfFiles.length > 1 ? `${pdfFiles.length} PDFs` : 'PDF'} → Excel`
-            : 'Pick PDF(s) + Excel to continue'}
+            ? `Start · read Excel & process ${pdfFiles.length > 1 ? `${pdfFiles.length} PDFs` : 'PDF'}`
+            : !docType
+              ? 'Pick a document type first'
+              : 'Pick PDF(s) + Excel to continue'}
       </Button>
     </div>
   );
