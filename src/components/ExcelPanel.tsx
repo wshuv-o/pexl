@@ -246,7 +246,12 @@ export default function ExcelPanel({
     });
   }, [displayGroups, sortCol, sortAsc]);
 
-  // Flatten sorted groups back to ExtractedRow[] for export
+  // Flatten sorted groups back to ExtractedRow[] for export.
+  // The display model keeps only the FIRST value per (page, field) — but
+  // some exports (bank statement's total_credits / total_debits) depend
+  // on seeing every highlighted value to compute correct totals. So we
+  // first emit rows in the user's sort order, then append any remaining
+  // rows from the raw `data` so nothing is silently dropped.
   const sortedFlat = useMemo(() => {
     const out: ExtractedRow[] = [];
     const seen = new Set<ExtractedRow>();
@@ -261,8 +266,16 @@ export default function ExcelPanel({
         }
       }
     }
+    // Append every extracted row the display layer discarded (e.g. a
+    // second/third value of the same field on the same page).
+    for (const row of data) {
+      if (!seen.has(row)) {
+        out.push(row);
+        seen.add(row);
+      }
+    }
     return out;
-  }, [sortedGroups, fieldColumns]);
+  }, [data, sortedGroups, fieldColumns]);
 
   const handleSort = (col: string) => {
     if (sortCol === col) setSortAsc(!sortAsc);
