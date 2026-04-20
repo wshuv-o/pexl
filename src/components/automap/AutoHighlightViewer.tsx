@@ -4,6 +4,7 @@ import { Document, Page, pdfjs } from 'react-pdf';
 import 'react-pdf/dist/Page/TextLayer.css';
 import { Check, X, Pencil, Layers, ZoomIn, ZoomOut, Search, RotateCw, RotateCcw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { getFieldConfig } from '@/types/utilscraper';
 import type { MappingState } from './MappingReview';
 
 pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
@@ -439,37 +440,64 @@ export default function AutoHighlightViewer({
                       const b = (m.chosenBox ?? m.match.box)!;
                       const isActive = m.mapping.excelHeader === activeHeader;
                       const value = m.override ?? b.value;
-                      const stroke =
-                        m.status === 'confirmed' ? 'rgba(22,163,74,0.9)'
-                        : m.status === 'rejected'  ? 'rgba(185,28,28,0.7)'
-                        : 'rgba(22,163,74,0.9)';   // pending matches get the same green pill as confirmed
+
+                      // Match the main viewer's highlight style: field-
+                      // specific color from FIELD_LABELS when the mapping
+                      // has a canonical field; else fall back to status
+                      // colors (red for rejected, neutral green otherwise).
+                      const cfg = m.mapping.fieldKey ? getFieldConfig(m.mapping.fieldKey) : null;
+                      const rect = m.status === 'rejected'
+                        ? { bg: 'rgba(239,68,68,0.18)', border: 'rgba(185,28,28,0.85)' }
+                        : cfg
+                          ? { bg: cfg.bgColor, border: cfg.color }
+                          : { bg: 'rgba(34,197,94,0.22)', border: 'rgba(22,163,74,0.9)' };
+                      const pillFg = m.status === 'rejected' ? '#991b1b' : '#14532d';
+                      const pillBg = m.status === 'rejected' ? '#fee2e2' : '#dcfce7';
+
                       return (
                         <div key={m.mapping.excelHeader}>
-                          {/* Subtle rectangle — kept for context, but no longer
-                              the primary cue (the glyphs themselves go green
-                              via CSS, and the value-pill below is prominent). */}
+                          {/* Solid field-colored rectangle — same style the
+                              main PDF viewer uses in HighlightOverlay. */}
                           <div
-                            className="absolute pointer-events-none rounded-sm"
+                            className="absolute pointer-events-none rounded-sm transition-all"
                             style={{
                               left:   `${b.x * 100}%`,
                               top:    `${b.y * 100}%`,
                               width:  `${b.width * 100}%`,
                               height: `${b.height * 100}%`,
-                              outline: `${isActive ? 2 : 1}px dashed ${stroke}`,
-                              zIndex: isActive ? 6 : 4,
+                              background: rect.bg,
+                              border:     `${isActive ? 2.5 : 2}px solid ${rect.border}`,
+                              borderRadius: 3,
+                              boxShadow:  isActive ? `0 0 0 2px ${rect.border}40, 0 4px 12px rgba(0,0,0,0.15)` : undefined,
+                              zIndex:     isActive ? 6 : 4,
                             }}
                           />
-                          {/* Value pill — green, shown right above the box.
-                              This is the always-visible evidence that a value
-                              was extracted, even if the box alignment is off. */}
+                          {/* Status / confidence dot in the top-right corner,
+                              matching the main viewer's confidence indicator. */}
+                          <div
+                            className="absolute pointer-events-none rounded-full"
+                            style={{
+                              left:   `calc(${b.x * 100}% + ${b.width * 100}% - 6px)`,
+                              top:    `calc(${b.y * 100}% - 4px)`,
+                              width:  8,
+                              height: 8,
+                              background:
+                                m.status === 'confirmed' ? '#22c55e'
+                                : m.status === 'rejected'  ? '#ef4444'
+                                : '#f59e0b',
+                              boxShadow: '0 0 0 1px white',
+                              zIndex: 9,
+                            }}
+                          />
+                          {/* Value pill above the box — label + extracted text. */}
                           <div
                             className="absolute text-[11px] font-semibold px-2 py-0.5 rounded-md shadow whitespace-nowrap pointer-events-none"
                             style={{
                               left:  `${b.x * 100}%`,
                               top:   `calc(${b.y * 100}% - 22px)`,
-                              background: m.status === 'rejected' ? '#fee2e2' : '#dcfce7',
-                              color:      m.status === 'rejected' ? '#991b1b' : '#14532d',
-                              border:     `1px solid ${stroke}`,
+                              background: pillBg,
+                              color:      pillFg,
+                              border:     `1px solid ${rect.border}`,
                               zIndex: 8,
                               maxWidth: '60%',
                               overflow: 'hidden',

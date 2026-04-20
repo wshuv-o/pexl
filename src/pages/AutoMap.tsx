@@ -472,11 +472,11 @@ export default function AutoMap() {
       <div className="flex-1 flex overflow-hidden">
         {/* Left rail — uploads + mapping list (drag the handle to its right to resize) */}
         <aside
-          className="shrink-0 border-r border-border flex flex-col bg-card"
+          className="shrink-0 border-r border-border flex flex-col bg-card min-h-0"
           style={{ width: `${leftWidth}px` }}
         >
           {!hasData ? (
-            <div className="p-4">
+            <div className="flex-1 overflow-y-auto custom-scrollbar p-4">
               <DualUpload
                 docType={docType}
                 onDocTypeChange={setDocType}
