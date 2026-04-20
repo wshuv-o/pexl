@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useEffect, useMemo } from 'react';
 import { toast } from 'sonner';
 import {
   Upload, ChevronLeft, ChevronRight,
@@ -12,8 +12,13 @@ import PDFCardList from '@/components/PDFCardList';
 import ProcessingModal from '@/components/ProcessingModal';
 import PDFViewer from '@/components/PDFViewer';
 import ExcelPanel from '@/components/ExcelPanel';
+import SourceExcelSection from '@/components/SourceExcelSection';
+import SourceExcelViewerPanel from '@/components/SourceExcelViewerPanel';
 import ThemeToggle from '@/components/ThemeToggle';
-import type { PDFSession, Highlight, ExtractedRow, DocumentType } from '@/types/utilscraper';
+import type { PDFSession, Highlight, ExtractedRow, DocumentType, FieldLabel } from '@/types/utilscraper';
+import { readSourceExcel, type SourceExcel } from '@/lib/automap/excel-reader';
+import { buildInitialMappings, type HeaderToField } from '@/lib/automap/header-mapping';
+import { fillAndDownloadSourceExcel } from '@/lib/automap/excel-writer';
 import { DOCUMENT_TYPES } from '@/types/utilscraper';
 import { processFile, extractRegions } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
@@ -42,9 +47,30 @@ export default function Index() {
   // Session-wide custom field labels — survive tab switches and show up in
   // every PDF's label picker.
   const [customFields, setCustomFields]         = useState<string[]>([]);
+  // Controls whether the PDF upload zone is visible in the sidebar.
+  // Default true until files exist, then hidden so the sidebar stays
+  // tidy; the user reveals it again with a "+ Add PDFs" chip.
+  const [showUploadZone, setShowUploadZone]     = useState(true);
+
+  // ── Optional source-Excel mode ────────────────────────────────────────
+  // When the user uploads an Excel template, it's used as the download
+  // output. Without one, the normal per-doc-type export flow runs
+  // untouched. Route flips to /source-excel while the template is active.
+  const [sourceExcel,   setSourceExcel]   = useState<SourceExcel | null>(null);
+  const [headerMappings, setHeaderMappings] = useState<HeaderToField[]>([]);
+  const [rowKeyHeader, setRowKeyHeader]   = useState<string | null>(null);
 
   const activeSession = sessions.find(s => s.id === activeTabId);
   const hasUploaded   = sessions.length > 0 || pendingFiles.length > 0;
+
+  // Hide the upload zone only AFTER files have actually been processed
+  // (sessions exist). While `pendingFiles` is populated the Process button
+  // lives inside the zone, so we must keep it visible until the user
+  // clicks it. The "+ Add PDFs" chip in the Your-PDFs header brings it
+  // back when the user wants to queue more.
+  useEffect(() => {
+    if (sessions.length > 0 && pendingFiles.length === 0) setShowUploadZone(false);
+  }, [sessions.length, pendingFiles.length]);
 
   // Tab sessions in order, resolved from IDs
   const tabSessions = useMemo(
@@ -297,6 +323,39 @@ export default function Index() {
   // Excel panel row click → switch to that PDF's tab (if needed) and scroll its
   // viewer to the row's page. Uses a nonce so clicking the same row repeatedly
   // still re-fires the scroll.
+  // ── Source Excel handlers ─────────────────────────────────────────────
+  const handleSourceExcelUpload = useCallback(async (file: File) => {
+    try {
+      const src = await readSourceExcel(file);
+      setSourceExcel(src);
+      setHeaderMappings(buildInitialMappings(src.headers));
+      setRowKeyHeader(null);
+      // Open the right panel automatically so the user can see the
+      // template they just uploaded (even if no PDFs have been processed yet).
+      setShowExcel(true);
+      if (window.location.pathname !== '/source-excel') navigate('/source-excel');
+      toast.success(`Read ${src.headers.length} header${src.headers.length !== 1 ? 's' : ''} from ${file.name}`);
+    } catch (err) {
+      toast.error((err as Error).message || 'Could not read the Excel file.');
+    }
+  }, [navigate]);
+
+  const handleSourceExcelClear = useCallback(() => {
+    setSourceExcel(null);
+    setHeaderMappings([]);
+    setRowKeyHeader(null);
+    if (window.location.pathname !== '/') navigate('/');
+  }, [navigate]);
+
+  const handleHeaderFieldRemap = useCallback(
+    (excelHeader: string, fieldKey: FieldLabel | null, fieldLabel: string | null) => {
+      setHeaderMappings(prev => prev.map(m =>
+        m.excelHeader === excelHeader ? { ...m, fieldKey, fieldLabel } : m,
+      ));
+    },
+    [],
+  );
+
   // Adds a user-typed custom field label to the session-wide list, so every
   // PDF's label picker shows it.
   const handleAddCustomField = useCallback((name: string) => {
@@ -356,22 +415,53 @@ export default function Index() {
           ) : (
             <div className="p-4 space-y-5">
 
-              {/* Upload section */}
-              <div>
-                <div className="flex items-center gap-2 mb-2.5">
-                  <Upload className="w-3.5 h-3.5 text-primary" />
-                  <h2 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Upload PDFs</h2>
+              {/* Source Excel (optional) — top of the sidebar so it's
+                  easy to find. When loaded, flips the route to
+                  /source-excel and hides the PDF upload zone below in
+                  favour of the header mapping list. */}
+              <SourceExcelSection
+                sourceExcel={sourceExcel}
+                docType={pendingDocType}
+                headerMappings={headerMappings}
+                rowKeyHeader={rowKeyHeader}
+                onUpload={handleSourceExcelUpload}
+                onClear={handleSourceExcelClear}
+                onFieldRemap={handleHeaderFieldRemap}
+                onSetRowKey={setRowKeyHeader}
+              />
+
+              {/* Upload section — visible only when no files are queued
+                  yet, or when the user explicitly re-opens it via the
+                  "+ Add PDFs" chip in the Your-PDFs header. Keeps the
+                  sidebar focused once PDFs are loaded. */}
+              {showUploadZone && (
+                <div>
+                  {!sourceExcel && (
+                    <div className="flex items-center gap-2 mb-2.5">
+                      <Upload className="w-3.5 h-3.5 text-primary" />
+                      <h2 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Upload PDFs</h2>
+                      {hasUploaded && (
+                        <button
+                          className="ml-auto text-[10px] text-muted-foreground hover:text-foreground"
+                          onClick={() => setShowUploadZone(false)}
+                          title="Hide the upload area"
+                        >
+                          hide
+                        </button>
+                      )}
+                    </div>
+                  )}
+                  <UploadZone
+                    compact={hasUploaded || !!sourceExcel}
+                    onFilesSelected={handleFilesSelected}
+                    pendingFiles={pendingFiles}
+                    docType={pendingDocType}
+                    onDocTypeChange={setPendingDocType}
+                    onProcess={handleProcess}
+                    processing={processing}
+                  />
                 </div>
-                <UploadZone
-                  compact={hasUploaded}
-                  onFilesSelected={handleFilesSelected}
-                  pendingFiles={pendingFiles}
-                  docType={pendingDocType}
-                  onDocTypeChange={setPendingDocType}
-                  onProcess={handleProcess}
-                  processing={processing}
-                />
-              </div>
+              )}
 
               {/* Instructions — shown before first upload */}
               {!hasUploaded && (
@@ -394,7 +484,16 @@ export default function Index() {
                   <div className="flex items-center gap-2 mb-2.5">
                     <FileSearch className="w-3.5 h-3.5 text-muted-foreground" />
                     <h2 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Your PDFs</h2>
-                    <span className="ml-auto text-[10px] text-muted-foreground/60">{sessions.length} file{sessions.length !== 1 ? 's' : ''}</span>
+                    <span className="text-[10px] text-muted-foreground/60">{sessions.length} file{sessions.length !== 1 ? 's' : ''}</span>
+                    {!showUploadZone && (
+                      <button
+                        className="ml-auto flex items-center gap-1 text-[10px] font-medium text-primary hover:underline"
+                        onClick={() => setShowUploadZone(true)}
+                        title="Show the upload area again"
+                      >
+                        <Upload className="w-3 h-3" /> Add PDFs
+                      </button>
+                    )}
                   </div>
 
                   {/* Bulk start-page control — skip cover pages for ALL PDFs at once */}
@@ -601,7 +700,7 @@ export default function Index() {
                 />
               </div>
 
-              {showExcel && combinedExtractedData.length > 0 && (
+              {showExcel && (sourceExcel || combinedExtractedData.length > 0) && (
                 <>
                   {/* Drag handle */}
                   <div
@@ -630,22 +729,38 @@ export default function Index() {
                     className="border-l border-border shrink-0 overflow-hidden"
                     style={{ width: `${excelWidth}px` }}
                   >
-                    <ExcelPanel
-                      data={combinedExtractedData}
-                      filename={sessions.filter(s => s.extractedData.length > 0).map(s => s.filename).join(', ')}
-                      provider={DOCUMENT_TYPES.find(d => d.value === activeSession.docType)?.label ?? 'Document'}
-                      onClose={() => setShowExcel(false)}
-                      onReExtract={handleExtract}
-                      onDataChange={(d: ExtractedRow[]) => {
-                        setSessions(prev => prev.map(s => ({
-                          ...s,
-                          extractedData: d.filter(r => r.sessionId === s.id),
-                        })));
-                      }}
-                      multiFile={sessions.filter(s => s.extractedData.length > 0).length > 1}
-                      onDownload={() => trackDownload().catch(() => {})}
-                      onRowClick={handleExcelRowClick}
-                    />
+                    {sourceExcel ? (
+                      <SourceExcelViewerPanel
+                        sourceExcel={sourceExcel}
+                        headerMappings={headerMappings}
+                        data={combinedExtractedData}
+                        rowKeyHeader={rowKeyHeader}
+                        onClose={() => setShowExcel(false)}
+                        onDownload={() => {
+                          fillAndDownloadSourceExcel(
+                            combinedExtractedData, sourceExcel, headerMappings, rowKeyHeader,
+                          );
+                          trackDownload().catch(() => {});
+                        }}
+                      />
+                    ) : (
+                      <ExcelPanel
+                        data={combinedExtractedData}
+                        filename={sessions.filter(s => s.extractedData.length > 0).map(s => s.filename).join(', ')}
+                        provider={DOCUMENT_TYPES.find(d => d.value === activeSession.docType)?.label ?? 'Document'}
+                        onClose={() => setShowExcel(false)}
+                        onReExtract={handleExtract}
+                        onDataChange={(d: ExtractedRow[]) => {
+                          setSessions(prev => prev.map(s => ({
+                            ...s,
+                            extractedData: d.filter(r => r.sessionId === s.id),
+                          })));
+                        }}
+                        multiFile={sessions.filter(s => s.extractedData.length > 0).length > 1}
+                        onDownload={() => trackDownload().catch(() => {})}
+                        onRowClick={handleExcelRowClick}
+                      />
+                    )}
                   </div>
                 </>
               )}

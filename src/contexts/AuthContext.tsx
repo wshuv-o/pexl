@@ -85,6 +85,26 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const [authLoading, setAuthLoading] = useState(true);
 
   useEffect(() => {
+    // ── Localhost dev bypass ──────────────────────────────────────────────
+    // When running `npm run dev` on localhost / 127.0.0.1 we inject a
+    // synthetic admin user so the ProtectedRoute doesn't bounce you to
+    // /login during local testing. Never fires in a production build
+    // (Vite's import.meta.env.DEV is false there).
+    if (import.meta.env.DEV && typeof window !== 'undefined') {
+      const host = window.location.hostname;
+      if (host === 'localhost' || host === '127.0.0.1') {
+        setUser({
+          id: 0,
+          username: 'dev',
+          email: 'dev@localhost',
+          roles: ['admin'],
+          employee: { first_name: 'Dev', last_name: 'Local', designation: 'Local dev' },
+        });
+        setAuthLoading(false);
+        return;
+      }
+    }
+
     verifyToken().then(async me => {
       if (me) {
         setUser(me);
