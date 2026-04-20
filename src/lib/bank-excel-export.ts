@@ -1,4 +1,3 @@
-/* eslint-disable no-useless-escape */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
@@ -669,7 +668,7 @@ export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilen
   // property_name don't all collapse into a single "Unknown Property" bucket.
   const groupedByProperty = new Map<string, Map<string, BankStatementItem[]>>();
   for (const item of items) {
-    const fileKey = (item.filename || '').replace(/\.pdf$/i, '').trim();
+    const fileKey = (item.filename || '').replace(/\.(pdf|docx?)$/i, '').trim();
     const propKey = item.propertyName.trim()
       || item.accountNumber.trim()
       || fileKey

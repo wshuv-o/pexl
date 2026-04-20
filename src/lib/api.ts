@@ -286,14 +286,21 @@ export async function processFile(
       let detail = '';
       try {
         const body = await res.json();
-        detail = body.detail || body.message || '';
+        // FastAPI uses `detail`; legacy handlers use `error` or `message`.
+        detail = body.detail || body.error || body.message || '';
       } catch { /* body may be empty or non-JSON */ }
 
+      // The deployed backend hasn't shipped DOC/DOCX support yet — its
+      // validator still rejects with "Only PDF files are supported".
+      // Make that case obvious to the user.
+      if (/only pdf/i.test(detail) && wordDoc) {
+        throw new Error('The server hasn\u2019t shipped Word support yet. Save the document as PDF and try again, or ping your deployment team to redeploy the backend.');
+      }
       if (res.status === 415) {
         throw new Error('That file type isn\u2019t supported. Upload a PDF or Word document.');
       }
       if (res.status === 400) {
-        throw new Error('The uploaded file appears to be empty.');
+        throw new Error(detail || 'The uploaded file appears to be empty.');
       }
       const friendly = friendlyConversionError(detail);
       if (friendly) throw new Error(friendly);

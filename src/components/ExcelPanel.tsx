@@ -480,7 +480,7 @@ export default function ExcelPanel({
                       >
                         {multiFile && (
                           <td className="px-3 py-2 text-muted-foreground text-[10px] truncate max-w-[140px]" title={g.filename}>
-                            {ri === 0 ? g.filename.replace(/\.pdf$/i, '') : ''}
+                            {ri === 0 ? g.filename.replace(/\.(pdf|docx?)$/i, '') : ''}
                           </td>
                         )}
                         <td className="px-3 py-2 text-muted-foreground font-medium">

@@ -79,7 +79,7 @@ function detectDocType(rows: ExtractedRow[]): DocumentType {
 // ---------------------------------------------------------------------------
 function sanitizeSheetName(name: string, usedNames: Set<string>): string {
   let clean = name
-    .replace(/\.pdf$/i, '')
+    .replace(/\.(pdf|docx?)$/i, '')
     .replace(/[[\]:*?/\\]/g, '-')
     .trim();
   if (clean.length > 28) clean = clean.slice(0, 28);
@@ -284,7 +284,7 @@ function buildLeaseSheet(fileMap: Map<string, ExtractedRow[]>): XLSX.WorkSheet {
 
     const row1 = ri + 1;
     const rowCells: any[] = [
-      filename.replace(/\.pdf$/i, ''),
+      filename.replace(/\.(pdf|docx?)$/i, ''),
       ...extraFields.map(k => values[k] ?? ''),
     ];
 
@@ -377,7 +377,7 @@ function buildStackedTablesSheet(
     }
     first = false;
 
-    const cleanName = filename.replace(/\.pdf$/i, '');
+    const cleanName = filename.replace(/\.(pdf|docx?)$/i, '');
 
     // ── File header row (light tinted color) ──────────────────────────────
     const fileRow = [`File: ${cleanName}`, ...Array(totalCols - 1).fill('')];
