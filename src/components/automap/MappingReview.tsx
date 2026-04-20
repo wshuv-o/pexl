@@ -70,6 +70,11 @@ export default function MappingReview({
           <span className="text-foreground font-medium">{includedCount}</span> / {mappings.length} included ·
           &nbsp;{confirmedCount} confirmed · {withSearch} with search
         </p>
+        <p className="text-[10px] text-muted-foreground/80 italic">
+          Tip: click the <Key className="w-2.5 h-2.5 inline text-amber-500" /> on a column like
+          <span className="text-foreground"> Unit&nbsp;ID </span>
+          to pick which Excel row each PDF goes into.
+        </p>
 
         {/* Filter + bulk controls */}
         <div className="flex items-center gap-1.5">

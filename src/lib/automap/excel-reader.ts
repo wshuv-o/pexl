@@ -9,8 +9,12 @@ import * as XLSX from 'xlsx-js-style';
 export interface SourceExcel {
   workbook: XLSX.WorkBook;
   sheetName: string;
-  headers: string[];          // the detected header row, trimmed
+  headers: string[];          // the visible header row, trimmed (hidden cols filtered)
   headerRow: number;          // 0-based row index of the header row
+  sheetColumns: number[];     // for each entry in `headers`, the original 0-based
+                              // column index in the source sheet — the writer uses
+                              // this to put values back into the right cell even
+                              // though hidden / empty columns have been skipped
   rows: string[][];           // data rows after the header — column-indexed so
                               // duplicate / empty headers don't collide
 }
@@ -55,15 +59,33 @@ export const readSourceExcel = async (file: File): Promise<SourceExcel> => {
     }
   }
 
-  const headers = (aoa[headerRow] ?? []).map(h => String(h ?? '').trim());
-  const colCount = headers.length;
+  const rawHeaders = (aoa[headerRow] ?? []).map(h => String(h ?? '').trim());
+  const rawColCount = rawHeaders.length;
+
+  // ── Drop columns that the user hid in Excel, plus any columns where the
+  // header is blank AND no data row has a value. Keeps the panel focused on
+  // the actual working columns of the template.
+  const cols = (sheet['!cols'] ?? []) as Array<{ hidden?: boolean } | undefined>;
+  const keep: number[] = [];
+  for (let c = 0; c < rawColCount; c++) {
+    if (cols[c]?.hidden) continue;
+    const hasHeader = rawHeaders[c] !== '';
+    let hasData = false;
+    if (!hasHeader) {
+      for (let r = headerRow + 1; r < aoa.length; r++) {
+        const v = aoa[r]?.[c];
+        if (v !== '' && v != null) { hasData = true; break; }
+      }
+    }
+    if (hasHeader || hasData) keep.push(c);
+  }
+
+  const headers = keep.map(c => rawHeaders[c]);
   const rows: string[][] = [];
   for (let r = headerRow + 1; r < aoa.length; r++) {
     const row = aoa[r] ?? [];
-    const padded: string[] = [];
-    for (let c = 0; c < colCount; c++) padded.push(String(row[c] ?? ''));
-    rows.push(padded);
+    rows.push(keep.map(c => String(row[c] ?? '')));
   }
 
-  return { workbook, sheetName, headers, headerRow, rows };
+  return { workbook, sheetName, headers, headerRow, sheetColumns: keep, rows };
 };

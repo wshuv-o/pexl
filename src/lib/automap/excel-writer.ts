@@ -17,13 +17,18 @@ export interface WriteOptions {
 }
 
 export const writeValuesToWorkbook = ({ source, rowIndex0, values }: WriteOptions): XLSX.WorkBook => {
-  const { workbook, sheetName, headers, headerRow } = source;
+  const { workbook, sheetName, headers, headerRow, sheetColumns } = source;
   const sheet = workbook.Sheets[sheetName];
   const targetRow = headerRow + 1 + rowIndex0; // 0-based in the sheet
 
-  headers.forEach((h, col) => {
+  let maxSheetCol = 0;
+  headers.forEach((h, i) => {
     if (!(h in values)) return;
-    const addr = XLSX.utils.encode_cell({ r: targetRow, c: col });
+    // Map the panel-local index back to the column it came from in the
+    // actual sheet (hidden / empty columns were skipped by the reader).
+    const sheetCol = sheetColumns[i] ?? i;
+    if (sheetCol > maxSheetCol) maxSheetCol = sheetCol;
+    const addr = XLSX.utils.encode_cell({ r: targetRow, c: sheetCol });
     const prev = sheet[addr] ?? {};
     sheet[addr] = {
       ...prev,
@@ -38,7 +43,7 @@ export const writeValuesToWorkbook = ({ source, rowIndex0, values }: WriteOption
   if (ref) {
     const range = XLSX.utils.decode_range(ref);
     if (targetRow > range.e.r) range.e.r = targetRow;
-    if (headers.length - 1 > range.e.c) range.e.c = headers.length - 1;
+    if (maxSheetCol > range.e.c) range.e.c = maxSheetCol;
     sheet['!ref'] = XLSX.utils.encode_range(range);
   }
 

@@ -179,17 +179,68 @@ export default function AutoMap() {
   }, [patchMapping]);
 
   // Opt-in toggle — only included rows participate in matching + download.
+  // When the user first includes a header with no search phrase typed yet,
+  // default the search phrase to the Excel header text itself so the match
+  // fires immediately. They can override by typing into the search field.
   const onToggleIncluded = useCallback((excelHeader: string, included: boolean) => {
-    setMappings(prev => prev.map(m =>
-      m.mapping.excelHeader === excelHeader ? { ...m, included } : m,
-    ));
+    let needsMatch: { term: string } | null = null;
+    setMappings(prev => prev.map(m => {
+      if (m.mapping.excelHeader !== excelHeader) return m;
+      if (included && !m.mapping.searchText.trim() && excelHeader.trim()) {
+        needsMatch = { term: excelHeader.trim() };
+        return {
+          ...m,
+          included,
+          mapping: { ...m.mapping, searchText: excelHeader.trim() },
+        };
+      }
+      return { ...m, included };
+    }));
     if (!included && activeHeader === excelHeader) setActiveHeader(null);
-  }, [activeHeader]);
+    // Fire a one-header match using the header as the search term.
+    if (included && needsMatch && activePdf) {
+      (async () => {
+        const hit = await matchOneHeader(activePdf, sessionId, (needsMatch as { term: string }).term);
+        if (!hit) return;
+        setMappings(curr => curr.map(x =>
+          x.mapping.excelHeader === excelHeader ? { ...x, match: hit } : x,
+        ));
+        setActiveHeader(excelHeader);
+      })();
+    }
+  }, [activeHeader, activePdf, sessionId, matchOneHeader]);
 
   const onIncludeAll = useCallback((included: boolean) => {
-    setMappings(prev => prev.map(m => ({ ...m, included })));
+    // Same auto-seed behaviour as single-row toggle: newly-included rows
+    // without a search term get the Excel header as their search phrase.
+    const toMatch: Array<{ excelHeader: string; term: string }> = [];
+    setMappings(prev => prev.map(m => {
+      if (!included) return { ...m, included: false };
+      if (m.included) return m; // already included, no change
+      const term = m.mapping.searchText.trim() || m.mapping.excelHeader.trim();
+      if (!m.mapping.searchText.trim() && term) {
+        toMatch.push({ excelHeader: m.mapping.excelHeader, term });
+        return {
+          ...m,
+          included: true,
+          mapping: { ...m.mapping, searchText: term },
+        };
+      }
+      return { ...m, included: true };
+    }));
     if (!included) setActiveHeader(null);
-  }, []);
+    if (included && activePdf && toMatch.length > 0) {
+      (async () => {
+        for (const t of toMatch) {
+          const hit = await matchOneHeader(activePdf, sessionId, t.term);
+          if (!hit) continue;
+          setMappings(curr => curr.map(x =>
+            x.mapping.excelHeader === t.excelHeader ? { ...x, match: hit } : x,
+          ));
+        }
+      })();
+    }
+  }, [activePdf, sessionId, matchOneHeader]);
 
   // Mark a column as the row-identifier. Unsetting clears the auto-target,
   // so the manual row picker in the right panel takes over again.

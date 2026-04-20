@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
 import 'react-pdf/dist/Page/TextLayer.css';
-import { Check, X, Pencil, Layers, ZoomIn, ZoomOut, Search } from 'lucide-react';
+import { Check, X, Pencil, Layers, ZoomIn, ZoomOut, Search, RotateCw, RotateCcw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import type { MappingState } from './MappingReview';
 
@@ -42,6 +42,8 @@ export default function AutoHighlightViewer({
   const [searchQuery, setSearchQuery]     = useState('');
   const [searchHits, setSearchHits]       = useState<Record<number, { x: number; y: number; width: number; height: number }[]>>({});
   const [activeHitIdx, setActiveHitIdx]   = useState(-1);
+  // Fine rotation — matches the main viewer's feature for nudging pages.
+  const [rotation, setRotation]           = useState(0);  // degrees
 
   // Compute fit-width zoom on first page load so 66-column landscape PDFs
   // aren't tiny or overflowing.
@@ -308,6 +310,13 @@ export default function AutoHighlightViewer({
         <Button size="sm" variant="ghost" onClick={() => setScale(s => Math.min(2.5, (s ?? 1) + 0.1))}>
           <ZoomIn className="w-4 h-4" />
         </Button>
+        <div className="w-px h-5 bg-border mx-1" />
+        <Button size="sm" variant="ghost" title="Rotate -90°" onClick={() => setRotation(r => (r - 90 + 360) % 360)}>
+          <RotateCcw className="w-4 h-4" />
+        </Button>
+        <Button size="sm" variant="ghost" title="Rotate +90°" onClick={() => setRotation(r => (r + 90) % 360)}>
+          <RotateCw className="w-4 h-4" />
+        </Button>
         <Button
           size="sm"
           variant={searchOpen ? 'default' : 'ghost'}
@@ -411,7 +420,12 @@ export default function AutoHighlightViewer({
                     key={pageNum}
                     ref={el => { pageRefs.current[pageNum] = el; }}
                     className="relative shadow-2xl select-none"
-                    style={{ display: 'inline-block', lineHeight: 0 }}
+                    style={{
+                      display: 'inline-block',
+                      lineHeight: 0,
+                      transform: rotation !== 0 ? `rotate(${rotation}deg)` : undefined,
+                      transition: 'transform 0.2s ease',
+                    }}
                   >
                     <Page
                       pageNumber={pageNum}
