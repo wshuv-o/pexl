@@ -31,8 +31,13 @@ export default function UploadZone({
     }
   }, []);
 
-  const isPdf = (f: File) =>
-    f.type === 'application/pdf' || /\.pdf$/i.test(f.name);
+  // Backend accepts PDF + Word (DOC / DOCX); Word docs are converted to
+  // PDF server-side before OCR/extraction.
+  const isSupportedDoc = (f: File) =>
+    f.type === 'application/pdf'
+    || f.type === 'application/msword'
+    || f.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    || /\.(pdf|docx?)$/i.test(f.name);
 
   // Recursively walk a dropped FileSystemEntry tree (folders on drag-drop).
   const collectFilesFromEntry = useCallback(
@@ -41,7 +46,7 @@ export default function UploadZone({
       if (entry.isFile) {
         const fileEntry = entry as FileSystemFileEntry;
         return new Promise<File[]>(resolve => {
-          fileEntry.file(f => resolve(isPdf(f) ? [f] : []), () => resolve([]));
+          fileEntry.file(f => resolve(isSupportedDoc(f) ? [f] : []), () => resolve([]));
         });
       }
       if (entry.isDirectory) {
@@ -85,12 +90,12 @@ export default function UploadZone({
     }
 
     // Fallback: plain file drop
-    const files = Array.from(e.dataTransfer.files).filter(isPdf);
+    const files = Array.from(e.dataTransfer.files).filter(isSupportedDoc);
     if (files.length) onFilesSelected(files);
   }, [onFilesSelected, collectFilesFromEntry]);
 
   const handleChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files || []).filter(isPdf);
+    const files = Array.from(e.target.files || []).filter(isSupportedDoc);
     if (files.length) onFilesSelected(files);
     e.target.value = '';
   }, [onFilesSelected]);
@@ -122,7 +127,7 @@ export default function UploadZone({
           onDrop={handleDrop}
         >
           <Upload className="w-4 h-4 text-primary shrink-0" />
-          <span className="text-muted-foreground text-xs">Drop more PDFs or click to browse</span>
+          <span className="text-muted-foreground text-xs">Drop more PDFs or Word docs · click to browse</span>
         </div>
         <button
           type="button"
@@ -132,7 +137,7 @@ export default function UploadZone({
         >
           <FolderOpen className="w-3.5 h-3.5" /> Add folders
         </button>
-        <input ref={inputRef} type="file" accept=".pdf" multiple className="hidden" onChange={handleChange} />
+        <input ref={inputRef} type="file" accept=".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document" multiple className="hidden" onChange={handleChange} />
         <input ref={folderInputCompactRef} type="file" multiple className="hidden" onChange={handleChange} />
 
         {hasPending && (
@@ -179,7 +184,7 @@ export default function UploadZone({
           <Upload className={`w-6 h-6 transition-all duration-200 ${dragOver ? 'text-primary' : 'text-muted-foreground'}`} />
         </div>
         <p className="text-sm font-semibold text-foreground">Click to upload or drag and drop</p>
-        <p className="text-xs text-muted-foreground mt-1">PDFs or folders · drop a parent folder to grab every PDF inside</p>
+        <p className="text-xs text-muted-foreground mt-1">PDFs, Word docs (.doc / .docx), or folders · Word is converted server-side</p>
       </div>
       <button
         type="button"
@@ -189,7 +194,7 @@ export default function UploadZone({
       >
         <FolderOpen className="w-4 h-4" /> Add folders
       </button>
-      <input ref={inputRef} type="file" accept=".pdf" multiple className="hidden" onChange={handleChange} />
+      <input ref={inputRef} type="file" accept=".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document" multiple className="hidden" onChange={handleChange} />
       <input ref={folderInputRef} type="file" multiple className="hidden" onChange={handleChange} />
 
       {hasPending && (

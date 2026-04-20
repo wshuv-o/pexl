@@ -225,17 +225,42 @@ export function isBackendOnline() {
 // ---------------------------------------------------------------------------
 // processFile — upload PDF, detect pages, run OCR on scanned pages
 // ---------------------------------------------------------------------------
+// Word-format detection — these can't be parsed client-side via pdfjs, so
+// if the backend fails we must surface the error instead of silently
+// falling through to a fallback that will never work.
+const isWordFile = (f: File) =>
+  f.type === 'application/msword'
+  || f.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+  || /\.docx?$/i.test(f.name);
+
+// Map backend conversion-error details to friendly user-facing messages.
+const friendlyConversionError = (detail: string): string | null => {
+  const d = (detail || '').toLowerCase();
+  if (d.includes('libreoffice not installed') || d.includes('soffice: not found')) {
+    return 'Document conversion is temporarily unavailable. Please try again in a minute or upload a PDF.';
+  }
+  if (d.includes('timed out') || d.includes('timeout')) {
+    return 'The Word document took too long to convert. Try a smaller file or save it as PDF first.';
+  }
+  if (d.includes('libreoffice conversion failed') || d.includes('conversion failed')) {
+    return 'Couldn\u2019t read that Word document. Try saving it as PDF and uploading that instead.';
+  }
+  return null;
+};
+
 export async function processFile(
   file: File,
   provider: string,
   onProgress: (step: number, detail?: string) => void,
 ): Promise<{ session_id: string; total_pages: number; pages: PageInfo[] }> {
 
+  const wordDoc = isWordFile(file);
+
   // Try backend first
   try {
     const checked = await checkBackend();
     if (checked) {
-      onProgress(0, 'Uploading PDF...');
+      onProgress(0, wordDoc ? 'Uploading & converting Word document...' : 'Uploading PDF...');
       const formData = new FormData();
       formData.append('file', file);
       formData.append('provider', provider);
@@ -254,9 +279,30 @@ export async function processFile(
           pages: data.pages,
         };
       }
+
+      // Non-OK response — lift the detail out of the body and throw a
+      // friendly error. Word-specific errors (415 / 500 from LibreOffice)
+      // need to surface; falling through would just crash pdfjs.
+      let detail = '';
+      try {
+        const body = await res.json();
+        detail = body.detail || body.message || '';
+      } catch { /* body may be empty or non-JSON */ }
+
+      if (res.status === 415) {
+        throw new Error('That file type isn\u2019t supported. Upload a PDF or Word document.');
+      }
+      if (res.status === 400) {
+        throw new Error('The uploaded file appears to be empty.');
+      }
+      const friendly = friendlyConversionError(detail);
+      if (friendly) throw new Error(friendly);
+      throw new Error(`Server error (${res.status})${detail ? `: ${detail}` : ''}`);
     }
-  } catch {
-    /* fall through to client-side */
+  } catch (err) {
+    // Word files have no viable client-side fallback — surface the error.
+    if (wordDoc) throw err;
+    /* else: fall through to client-side pdfjs */
   }
 
   // Client-side fallback using pdfjs

@@ -58,7 +58,10 @@ export default function DualUpload({
         onDrop={e => {
           e.preventDefault();
           const dropped = Array.from(e.dataTransfer.files).filter(f =>
-            f.type === 'application/pdf' || /\.pdf$/i.test(f.name),
+            f.type === 'application/pdf'
+            || f.type === 'application/msword'
+            || f.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+            || /\.(pdf|docx?)$/i.test(f.name),
           );
           if (dropped.length) onPdfsChange([...pdfFiles, ...dropped]);
         }}
@@ -66,10 +69,10 @@ export default function DualUpload({
         <div className="flex items-center gap-3">
           <FileText className="w-5 h-5 text-primary" />
           <div className="flex-1 min-w-0">
-            <p className="text-xs font-semibold text-foreground">Source PDF{pdfFiles.length > 1 ? 's' : ''}</p>
+            <p className="text-xs font-semibold text-foreground">Source document{pdfFiles.length > 1 ? 's' : ''} (PDF or Word)</p>
             <p className="text-[11px] text-muted-foreground">
               {pdfFiles.length === 0
-                ? 'Drop one or more PDFs — they get processed in order, one row each'
+                ? 'Drop one or more PDFs / Word docs — they get processed in order, one row each'
                 : `${pdfFiles.length} file${pdfFiles.length !== 1 ? 's' : ''} queued`}
             </p>
           </div>
@@ -97,7 +100,7 @@ export default function DualUpload({
         <input
           ref={pdfRef}
           type="file"
-          accept=".pdf"
+          accept=".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
           multiple
           className="hidden"
           onChange={e => {
