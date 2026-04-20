@@ -342,12 +342,23 @@ const parseNum = (s: string | undefined): number => {
 };
 
 // Flatten ExtractedRow[] for one PDF into a BankStatementItem.
-// First-occurrence wins for each field.
+// First-occurrence wins for most fields; `total_credits` and `total_debits`
+// are SUMMED across every extracted occurrence in the PDF so a statement
+// with multiple credit/debit subtotals (per page or several highlights on
+// one page) ends up with the correct grand total for Deposits / Withdrawals.
 const flattenToItem = (filename: string, rows: ExtractedRow[]): BankStatementItem => {
   const map: Record<string, string> = {};
+  let creditSum = 0;
+  let debitSum  = 0;
   for (const r of rows) {
     if (!r.value) continue;
-    if (!map[r.field]) map[r.field] = r.value;
+    if (r.field === 'total_credits') {
+      creditSum += parseNum(r.value);
+    } else if (r.field === 'total_debits') {
+      debitSum += parseNum(r.value);
+    } else if (!map[r.field]) {
+      map[r.field] = r.value;
+    }
   }
   return {
     filename,
@@ -358,8 +369,8 @@ const flattenToItem = (filename: string, rows: ExtractedRow[]): BankStatementIte
     statementDate:    map.statement_date     || '',
     beginningBalance: parseNum(map.beginning_balance),
     endingBalance:    parseNum(map.ending_balance),
-    totalCredits:     parseNum(map.total_credits),
-    totalDebits:      parseNum(map.total_debits),
+    totalCredits:     creditSum,
+    totalDebits:      debitSum,
   };
 };
 
