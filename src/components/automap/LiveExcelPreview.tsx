@@ -8,12 +8,11 @@ interface Props {
   mappings: MappingState[];
   targetRow0: number;
   autoTargetFromKey?: boolean;                // target row resolved via a key-field match
-  onTargetRowChange: (r: number) => void;
   onDownload: () => void;
 }
 
 export default function LiveExcelPreview({
-  source, mappings, targetRow0, autoTargetFromKey, onTargetRowChange, onDownload,
+  source, mappings, targetRow0, autoTargetFromKey, onDownload,
 }: Props) {
   // Pending values, keyed by the column INDEX (not header string) so that
   // duplicate or empty headers in the template don't cause values to
@@ -43,31 +42,12 @@ export default function LiveExcelPreview({
             {source.sheetName} · header row {source.headerRow + 1} · {source.headers.length} columns · {source.rows.length} data rows
           </p>
         </div>
-        <div className="flex items-center gap-1.5">
-          <label className="text-[11px] text-muted-foreground flex items-center gap-1">
-            {autoTargetFromKey && <Key className="w-3 h-3 text-amber-500" />}
-            {autoTargetFromKey ? 'Row (auto)' : 'Write to row'}
-          </label>
-          <div className={`flex items-center gap-0.5 rounded ${autoTargetFromKey ? 'bg-amber-500/10 ring-1 ring-amber-500/30' : 'bg-muted'}`}>
-            <button
-              className="px-1.5 py-0.5 text-xs hover:bg-muted/80"
-              onClick={() => onTargetRowChange(Math.max(0, targetRow0 - 1))}
-              title="Manual override will disable key-field auto-row"
-            >−</button>
-            <input
-              type="number"
-              min={1}
-              value={targetRow0 + 1}
-              onChange={e => onTargetRowChange(Math.max(0, (parseInt(e.target.value) || 1) - 1))}
-              className="w-12 text-center bg-transparent text-xs outline-none"
-              title={autoTargetFromKey ? 'Auto-resolved by key-field match (edit to override)' : 'Target row for the downloaded workbook'}
-            />
-            <button
-              className="px-1.5 py-0.5 text-xs hover:bg-muted/80"
-              onClick={() => onTargetRowChange(targetRow0 + 1)}
-            >+</button>
-          </div>
-        </div>
+        {autoTargetFromKey && (
+          <span className="flex items-center gap-1 text-[11px] text-amber-500 bg-amber-500/10 border border-amber-500/30 rounded px-2 py-0.5">
+            <Key className="w-3 h-3" />
+            Row {targetRow0 + 1} · matched via key field
+          </span>
+        )}
         <Button size="sm" className="gap-1.5" onClick={onDownload}>
           <Download className="w-3.5 h-3.5" /> Download
         </Button>

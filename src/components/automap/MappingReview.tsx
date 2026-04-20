@@ -1,5 +1,5 @@
 import { CheckCircle2, Circle, XCircle, Pencil, ChevronDown, Search, RefreshCw, SquareCheck, Square, Key } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import type { HeaderMatch, MatchBox } from '@/lib/automap/auto-match';
 import { fieldsForDocType, type HeaderToField } from '@/lib/automap/header-mapping';
 import type { FieldLabel, DocumentType } from '@/types/utilscraper';
@@ -22,7 +22,6 @@ interface Props {
   rowKeyHeader: string | null;         // which column's value identifies the Excel row
   onSelect:     (excelHeader: string) => void;
   onFieldRemap: (excelHeader: string, fieldKey: FieldLabel | null, fieldLabel: string | null) => void;
-  onSearchTextChange: (excelHeader: string, searchText: string) => void;   // fired on blur/Enter
   onToggleIncluded:   (excelHeader: string, included: boolean) => void;
   onIncludeAll:       (included: boolean) => void;
   onSetRowKey:        (excelHeader: string | null) => void;
@@ -32,7 +31,7 @@ interface Props {
 
 export default function MappingReview({
   mappings, docType, activeHeader, rowKeyHeader,
-  onSelect, onFieldRemap, onSearchTextChange, onToggleIncluded, onIncludeAll,
+  onSelect, onFieldRemap, onToggleIncluded, onIncludeAll,
   onSetRowKey, onRematchAll, matching,
 }: Props) {
   const [hideExcluded, setHideExcluded] = useState(false);
@@ -128,7 +127,6 @@ export default function MappingReview({
             isRowKey={m.mapping.excelHeader === rowKeyHeader}
             onSelect={() => m.included && onSelect(m.mapping.excelHeader)}
             onFieldRemap={(fk, fl) => onFieldRemap(m.mapping.excelHeader, fk, fl)}
-            onSearchTextCommit={txt => onSearchTextChange(m.mapping.excelHeader, txt)}
             onToggleIncluded={v => onToggleIncluded(m.mapping.excelHeader, v)}
             onSetRowKey={() =>
               onSetRowKey(m.mapping.excelHeader === rowKeyHeader ? null : m.mapping.excelHeader)
@@ -147,28 +145,20 @@ interface RowProps {
   isRowKey: boolean;
   onSelect: () => void;
   onFieldRemap: (fieldKey: FieldLabel | null, fieldLabel: string | null) => void;
-  onSearchTextCommit: (text: string) => void;
   onToggleIncluded: (included: boolean) => void;
   onSetRowKey: () => void;
 }
 
 function MappingRow({
   state, docType, isActive, isRowKey,
-  onSelect, onFieldRemap, onSearchTextCommit, onToggleIncluded, onSetRowKey,
+  onSelect, onFieldRemap, onToggleIncluded, onSetRowKey,
 }: RowProps) {
   const [open, setOpen] = useState(false);
-  const [searchDraft, setSearchDraft] = useState(state.mapping.searchText);
-  useEffect(() => { setSearchDraft(state.mapping.searchText); }, [state.mapping.searchText]);
 
   const { mapping, status, match, override, chosenBox, included } = state;
   const box = chosenBox ?? match.box;
   const displayValue = override ?? box?.value ?? '';
   const options = fieldsForDocType(docType);
-
-  const commitSearch = () => {
-    const next = searchDraft.trim();
-    if (next !== state.mapping.searchText.trim()) onSearchTextCommit(next);
-  };
 
   return (
     <li
@@ -265,25 +255,6 @@ function MappingRow({
         </div>
       )}
 
-      {/* Row 3: user search text */}
-      <div className="flex items-center gap-1.5 mt-1.5 ml-5">
-        <span className="text-[10px] uppercase text-muted-foreground tracking-wide w-10">search</span>
-        <div className="flex-1 flex items-center bg-muted rounded px-1.5">
-          <Search className="w-3 h-3 text-muted-foreground shrink-0" />
-          <input
-            className="flex-1 bg-transparent text-[11px] px-1 py-1 outline-none text-foreground placeholder:text-muted-foreground/60"
-            placeholder="Exact phrase to find in PDF"
-            value={searchDraft}
-            onClick={e => e.stopPropagation()}
-            onChange={e => setSearchDraft(e.target.value)}
-            onBlur={commitSearch}
-            onKeyDown={e => {
-              if (e.key === 'Enter') { e.preventDefault(); commitSearch(); }
-              if (e.key === 'Escape') setSearchDraft(state.mapping.searchText);
-            }}
-          />
-        </div>
-      </div>
 
       {/* Row 4: extracted value preview */}
       {(displayValue || box) && (

@@ -506,7 +506,6 @@ export default function AutoMap() {
               rowKeyHeader={rowKeyHeader}
               onSelect={setActiveHeader}
               onFieldRemap={onFieldRemap}
-              onSearchTextChange={onSearchTextChange}
               onToggleIncluded={onToggleIncluded}
               onIncludeAll={onIncludeAll}
               onSetRowKey={onSetRowKey}
@@ -589,7 +588,6 @@ export default function AutoMap() {
               mappings={viewerMappings}
               targetRow0={effectiveTargetRow}
               autoTargetFromKey={targetAuto !== null}
-              onTargetRowChange={r => { setTargetAuto(null); setTargetRow0(r); }}
               onDownload={onDownload}
             />
           ) : (
