@@ -106,7 +106,18 @@ export default function Index() {
         const ocrCount = result.pages.filter(p => p.is_ocr).length;
         // Update temp session with real ID
         setSessions(prev => prev.map(s => s.id === tempId
-          ? { ...s, id: result.session_id, total_pages: result.total_pages, pages: result.pages, status: 'ready' as const } : s
+          ? {
+              ...s,
+              id: result.session_id,
+              total_pages: result.total_pages,
+              pages: result.pages,
+              // Replace the in-browser Word blob with the backend-converted
+              // PDF so react-pdf can render it in the viewer.
+              file: result.convertedPdf ?? s.file,
+              filename: result.convertedPdf?.name ?? s.filename,
+              status: 'ready' as const,
+            }
+          : s,
         ));
         // Also fix any tab that was opened with the tempId
         setOpenTabs(prev => prev.map(t => t === tempId ? result.session_id : t));

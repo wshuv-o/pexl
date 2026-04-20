@@ -233,6 +233,22 @@ const isWordFile = (f: File) =>
   || f.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
   || /\.docx?$/i.test(f.name);
 
+// After the backend converts a Word upload, fetch the resulting PDF bytes
+// so the viewer can render (react-pdf can't read .doc/.docx directly).
+// Returns a File that can replace the original session.file.
+export async function fetchConvertedPdf(sessionId: string, originalName: string): Promise<File | null> {
+  try {
+    const res = await fetch(`${BACKEND_URL}/api/utility/session/${sessionId}/pdf`);
+    if (!res.ok) return null;
+    const blob = await res.blob();
+    // Preserve the display name (strip any .doc/.docx suffix, append .pdf).
+    const stem = originalName.replace(/\.(docx?|pdf)$/i, '');
+    return new File([blob], `${stem || sessionId}.pdf`, { type: 'application/pdf' });
+  } catch {
+    return null;
+  }
+}
+
 // Map backend conversion-error details to friendly user-facing messages.
 const friendlyConversionError = (detail: string): string | null => {
   const d = (detail || '').toLowerCase();
@@ -252,7 +268,7 @@ export async function processFile(
   file: File,
   provider: string,
   onProgress: (step: number, detail?: string) => void,
-): Promise<{ session_id: string; total_pages: number; pages: PageInfo[] }> {
+): Promise<{ session_id: string; total_pages: number; pages: PageInfo[]; convertedPdf?: File }> {
 
   const wordDoc = isWordFile(file);
 
@@ -272,11 +288,29 @@ export async function processFile(
 
       if (res.ok) {
         const data = await res.json();
+
+        // For Word uploads the browser holds only the .docx/.doc blob,
+        // which react-pdf can't render. Pull the converted PDF bytes
+        // back from the backend so the viewer has something to show.
+        let convertedPdf: File | undefined;
+        if (wordDoc) {
+          onProgress(2, 'Fetching converted PDF...');
+          const pdf = await fetchConvertedPdf(data.session_id, file.name);
+          if (pdf) convertedPdf = pdf;
+          else {
+            throw new Error(
+              'Backend accepted the Word document but did not expose the converted PDF. '
+              + 'Ask ops to implement GET /api/utility/session/{session_id}/pdf.',
+            );
+          }
+        }
+
         onProgress(3, `Ready — ${data.ocr_pages_count ?? 0} pages OCR'd`);
         return {
           session_id: data.session_id,
           total_pages: data.total_pages,
           pages: data.pages,
+          convertedPdf,
         };
       }
 

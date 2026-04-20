@@ -54,14 +54,20 @@ export default function AutoMap() {
   const activePdf = pdfFiles[activePdfIdx] ?? null;
 
   // Upload + OCR a single PDF on the backend, return its session id.
-  // Null means the backend path failed — caller should fall back to the
-  // client-side autoMatch() function for that PDF.
-  const uploadPdf = useCallback(async (pdf: File): Promise<string | null> => {
+  // If the original upload was a Word document, the backend's converted
+  // PDF is swapped into the queue in place of the original so the viewer
+  // can render it. Null means the backend path failed — caller should
+  // fall back to the client-side autoMatch() function for that PDF.
+  const uploadPdf = useCallback(async (pdf: File, idx: number): Promise<string | null> => {
     try {
-      setProgress({ label: 'Uploading PDF & running OCR', done: 0, total: 1 });
+      setProgress({ label: 'Uploading document & running OCR', done: 0, total: 1 });
       const processed = await processFile(pdf, '', (step, detail) => {
-        setProgress({ label: detail || 'Processing PDF', done: step, total: 3 });
+        setProgress({ label: detail || 'Processing document', done: step, total: 3 });
       });
+      if (processed.convertedPdf) {
+        const converted = processed.convertedPdf;
+        setPdfFiles(prev => prev.map((f, i) => (i === idx ? converted : f)));
+      }
       return processed.session_id;
     } catch (err) {
       console.warn('[auto-map] backend upload failed, will match client-side:', err);
@@ -126,7 +132,7 @@ export default function AutoMap() {
       //    canonical fields one at a time via the dropdown, which fires
       //    a per-header match via onFieldRemap().
       setActivePdfIdx(0);
-      const sid = await uploadPdf(pdfFiles[0]);
+      const sid = await uploadPdf(pdfFiles[0], 0);
       setSessionId(sid);
 
       const fieldMaps = buildInitialMappings(src.headers);
@@ -337,7 +343,7 @@ export default function AutoMap() {
       setTargetRow0(r => r + 1);
 
       const pdf = pdfFiles[nextIdx];
-      const sid = await uploadPdf(pdf);
+      const sid = await uploadPdf(pdf, nextIdx);
       setSessionId(sid);
 
       // Preserve existing header→field mapping AND the user's include
