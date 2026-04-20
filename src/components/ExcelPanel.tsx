@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { X, Download, RefreshCw, Pencil, CheckCircle2, ArrowUpDown, ArrowUp, ArrowDown } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
@@ -172,26 +172,41 @@ export default function ExcelPanel({
     return { groups: groupList, fieldColumns: fieldOrder };
   }, [data]);
 
-  // ── Build display rows: one row per page (first value if multi) ───────
-  // Each page produces exactly one display row. If a field has multiple
-  // values on the same page, the first is used (rare, but handled).
+  // ── Build display rows: explode multi-value pages into N rows ─────────
+  // If a page has the same field extracted multiple times (e.g. two credit
+  // subtotals on one statement page), we emit one DisplayRow per slot so
+  // the user sees every highlighted value in the panel. The first sub-row
+  // of a page carries all other fields; subsequent sub-rows leave non-
+  // multi fields null to avoid visual duplication.
   const displayGroups = useMemo(() => {
     return groups.map(g => {
-      const displayRows: DisplayRow[] = g.pageRows.map(pr => {
-        const cells: Record<string, ExtractedRow | null> = {};
-        for (const f of fieldColumns) {
-          const arr = pr.cellsMulti[f] ?? [];
-          cells[f] = arr.length > 0 ? arr[0] : null;
+      const displayRows: DisplayRow[] = [];
+      for (const pr of g.pageRows) {
+        const maxCount = Math.max(
+          1,
+          ...fieldColumns.map(f => (pr.cellsMulti[f] ?? []).length),
+        );
+        for (let i = 0; i < maxCount; i++) {
+          const cells: Record<string, ExtractedRow | null> = {};
+          for (const f of fieldColumns) {
+            const arr = pr.cellsMulti[f] ?? [];
+            // First sub-row: show the i-th value if it exists; for single-
+            // value fields that's just the only value.
+            // Subsequent sub-rows (i >= 1): only show the i-th value when
+            // the field actually has that many occurrences — single-value
+            // fields get null so they don't repeat.
+            cells[f] = arr[i] ?? null;
+          }
+          displayRows.push({
+            sessionId:     pr.sessionId,
+            filename:      pr.filename,
+            page:          pr.page,
+            subIndex:      i,
+            isFirstOfPage: i === 0,
+            cells,
+          });
         }
-        return {
-          sessionId: pr.sessionId,
-          filename: pr.filename,
-          page: pr.page,
-          subIndex: 0,
-          isFirstOfPage: true,
-          cells,
-        };
-      });
+      }
       return { sessionId: g.sessionId, filename: g.filename, rows: displayRows };
     });
   }, [groups, fieldColumns]);
@@ -301,6 +316,42 @@ export default function ExcelPanel({
   const extracted = data.filter(r => r.value).length;
   const nullCount = data.filter(r => !r.value).length;
   const totalRows = sortedGroups.reduce((s, g) => s + g.rows.length, 0);
+
+  // Per-PDF sums for bank-statement credit/debit fields. This number is
+  // what the exporter writes into the `Deposits` / `Withdrawals` cells —
+  // shown in the panel so the user can see the sum without opening Excel.
+  const parseMoney = (s: string | null | undefined): number => {
+    if (!s) return 0;
+    const n = parseFloat(String(s).replace(/[$,\s]/g, ''));
+    return isNaN(n) ? 0 : n;
+  };
+  const perPdfSums = useMemo(() => {
+    const byKey = new Map<string, { credit: number; debit: number; creditCount: number; debitCount: number }>();
+    for (const r of data) {
+      if (!r.value) continue;
+      const key = r.sessionId || r.filename || 'unknown';
+      if (!byKey.has(key)) byKey.set(key, { credit: 0, debit: 0, creditCount: 0, debitCount: 0 });
+      const entry = byKey.get(key)!;
+      if (r.field === 'total_credits') { entry.credit += parseMoney(r.value); entry.creditCount++; }
+      if (r.field === 'total_debits')  { entry.debit  += parseMoney(r.value); entry.debitCount++; }
+    }
+    return byKey;
+  }, [data]);
+  // Diagnostic: log the raw data shape so we can see whether multi-value
+  // rows are reaching the panel. Open DevTools console and look for the
+  // '[ExcelPanel]' line.
+  useEffect(() => {
+    if (data.length === 0) return;
+    const perPageField: Record<string, Record<string, number>> = {};
+    for (const r of data) {
+      const pdfKey = (r.sessionId || r.filename || 'unknown') + '#p' + r.page;
+      if (!perPageField[pdfKey]) perPageField[pdfKey] = {};
+      perPageField[pdfKey][r.field] = (perPageField[pdfKey][r.field] || 0) + 1;
+    }
+    console.log('[ExcelPanel] data rows:', data.length,
+      '· display rows:', totalRows,
+      '· per (pdf+page) field counts:', perPageField);
+  }, [data, totalRows]);
 
   return (
     <div className="h-full flex flex-col bg-background">
@@ -498,6 +549,33 @@ export default function ExcelPanel({
                       </tr>
                     );
                   })}
+                  {/* Per-PDF credit/debit sum banner — shown when either
+                      field has multiple extracted values on this PDF, so the
+                      user can eyeball the sum without opening Excel. */}
+                  {(() => {
+                    const sums = perPdfSums.get(g.sessionId);
+                    if (!sums || (sums.creditCount <= 1 && sums.debitCount <= 1)) return null;
+                    const totalCols = (multiFile ? 1 : 0) + 1 + fieldColumns.length;
+                    return (
+                      <tr className="bg-primary/5 text-[11px]">
+                        <td colSpan={totalCols} className="px-3 py-1.5 text-primary font-medium border-b border-primary/20">
+                          Σ this PDF →
+                          {sums.creditCount > 0 && (
+                            <span className="ml-2">
+                              Deposits: <b>${sums.credit.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</b>
+                              <span className="text-muted-foreground"> ({sums.creditCount} value{sums.creditCount !== 1 ? 's' : ''})</span>
+                            </span>
+                          )}
+                          {sums.debitCount > 0 && (
+                            <span className="ml-4">
+                              Withdrawals: <b>${sums.debit.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</b>
+                              <span className="text-muted-foreground"> ({sums.debitCount} value{sums.debitCount !== 1 ? 's' : ''})</span>
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })()}
                 </React.Fragment>
               ))}
             </tbody>
