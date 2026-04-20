@@ -9,6 +9,8 @@ import type { MappingState } from './MappingReview';
 
 pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
 
+export interface ResizedBox { page: number; x: number; y: number; width: number; height: number }
+
 interface Props {
   file: File;
   mappings: MappingState[];
@@ -17,11 +19,29 @@ interface Props {
   onRejectHeader:  (header: string) => void;
   onEditHeader:    (header: string, value: string) => void;
   onApplyToPageAll:    (page: number, status: 'confirmed' | 'rejected') => void;
+  // Word/Paint-style resize: user released a corner/edge handle after
+  // dragging — parent should call extract-regions with the new box and
+  // update the mapping's value.
+  onResizeBox?: (excelHeader: string, newBox: ResizedBox) => void;
 }
+
+// 8 resize-handle edges for a highlight rectangle.
+type Edge = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw';
+const EDGE_CURSOR: Record<Edge, string> = {
+  n:  'ns-resize',
+  s:  'ns-resize',
+  e:  'ew-resize',
+  w:  'ew-resize',
+  ne: 'nesw-resize',
+  sw: 'nesw-resize',
+  nw: 'nwse-resize',
+  se: 'nwse-resize',
+};
 
 export default function AutoHighlightViewer({
   file, mappings, activeHeader,
   onConfirmHeader, onRejectHeader, onEditHeader, onApplyToPageAll,
+  onResizeBox,
 }: Props) {
   const [fileUrl, setFileUrl] = useState<string | null>(null);
   const [numPages, setNumPages] = useState<number>(0);
@@ -45,6 +65,18 @@ export default function AutoHighlightViewer({
   const [activeHitIdx, setActiveHitIdx]   = useState(-1);
   // Fine rotation — matches the main viewer's feature for nudging pages.
   const [rotation, setRotation]           = useState(0);  // degrees
+
+  // Word/Paint-style resize state. While the user drags a handle we keep
+  // the preview box in local state; on mouseup we commit via onResizeBox
+  // so the parent can re-extract and update the mapping.
+  const [resize, setResize] = useState<{
+    excelHeader: string;
+    page: number;
+    edge: Edge;
+    box: { x: number; y: number; width: number; height: number };     // current (fractions)
+    startBox: { x: number; y: number; width: number; height: number }; // before drag
+    startMouse: { x: number; y: number };                              // page-local fractions
+  } | null>(null);
 
   // Compute fit-width zoom on first page load so 66-column landscape PDFs
   // aren't tiny or overflowing.
@@ -145,6 +177,100 @@ export default function AutoHighlightViewer({
     const timers = [120, 420, 900].map(d => setTimeout(annotate, d));
     return () => { cancelled = true; timers.forEach(clearTimeout); };
   }, [mappings, pdfLoaded, numPages, scale, textLayerTick, activeHeader]);
+
+  // ── Resize drag tracking ──────────────────────────────────────────────
+  // While a handle is being dragged, listen on window so tracking works
+  // even when the pointer leaves the page element briefly.
+  useEffect(() => {
+    if (!resize) return;
+
+    const pageEl = pageRefs.current[resize.page];
+    if (!pageEl) return;
+
+    const onMove = (e: MouseEvent) => {
+      const rect = pageEl.getBoundingClientRect();
+      const mx = (e.clientX - rect.left) / rect.width;
+      const my = (e.clientY - rect.top)  / rect.height;
+      setResize(prev => {
+        if (!prev) return prev;
+        const s = prev.startBox;
+        let { x, y, width, height } = s;
+
+        // Left edge variants: new-x follows the mouse, width shrinks.
+        if (prev.edge.includes('w')) {
+          const newX = Math.max(0, Math.min(mx, s.x + s.width - 0.002));
+          width = s.x + s.width - newX;
+          x = newX;
+        }
+        // Right edge variants: width = mouseX − box.x.
+        if (prev.edge.includes('e')) {
+          width = Math.max(0.002, Math.min(1 - s.x, mx - s.x));
+        }
+        // Top edge: new-y follows the mouse, height shrinks.
+        if (prev.edge.includes('n')) {
+          const newY = Math.max(0, Math.min(my, s.y + s.height - 0.002));
+          height = s.y + s.height - newY;
+          y = newY;
+        }
+        // Bottom edge.
+        if (prev.edge.includes('s')) {
+          height = Math.max(0.002, Math.min(1 - s.y, my - s.y));
+        }
+        return { ...prev, box: { x, y, width, height } };
+      });
+    };
+
+    const onUp = () => {
+      setResize(prev => {
+        if (!prev) return null;
+        // Only fire the re-extract callback if the box actually changed.
+        const s = prev.startBox;
+        const b = prev.box;
+        const moved =
+          Math.abs(s.x - b.x) > 0.001 ||
+          Math.abs(s.y - b.y) > 0.001 ||
+          Math.abs(s.width  - b.width)  > 0.001 ||
+          Math.abs(s.height - b.height) > 0.001;
+        if (moved && onResizeBox) {
+          onResizeBox(prev.excelHeader, { page: prev.page, ...b });
+        }
+        return null;
+      });
+    };
+
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, [resize, onResizeBox]);
+
+  // Helper to start a resize drag from a handle's mousedown.
+  const beginResize = useCallback((
+    e: React.MouseEvent,
+    excelHeader: string,
+    page: number,
+    edge: Edge,
+    box: { x: number; y: number; width: number; height: number },
+  ) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const pageEl = pageRefs.current[page];
+    if (!pageEl) return;
+    const rect = pageEl.getBoundingClientRect();
+    setResize({
+      excelHeader,
+      page,
+      edge,
+      box: { ...box },
+      startBox: { ...box },
+      startMouse: {
+        x: (e.clientX - rect.left) / rect.width,
+        y: (e.clientY - rect.top)  / rect.height,
+      },
+    });
+  }, []);
 
   // Track the currently visible page so the per-page Confirm/Reject bulk
   // buttons target whichever page the user is looking at.
@@ -437,9 +563,15 @@ export default function AutoHighlightViewer({
                       loading={<div className="w-[600px] h-[800px] bg-white/5 animate-pulse rounded" />}
                     />
                     {pageMappings.map(m => {
-                      const b = (m.chosenBox ?? m.match.box)!;
+                      const original = (m.chosenBox ?? m.match.box)!;
                       const isActive = m.mapping.excelHeader === activeHeader;
-                      const value = m.override ?? b.value;
+                      // While the user drags a handle, prefer the live
+                      // preview box so the rectangle follows the mouse.
+                      const isResizing = resize?.excelHeader === m.mapping.excelHeader;
+                      const b = isResizing && resize
+                        ? { ...original, ...resize.box }
+                        : original;
+                      const value = m.override ?? original.value;
 
                       // Match the main viewer's highlight style: field-
                       // specific color from FIELD_LABELS when the mapping
@@ -489,6 +621,46 @@ export default function AutoHighlightViewer({
                               zIndex: 9,
                             }}
                           />
+                          {/* Resize handles — 8 grabbable squares around the
+                              box perimeter, Word/Paint style. Only rendered
+                              on the active highlight so non-selected ones
+                              aren't busy. Hover shows the resize cursor. */}
+                          {isActive && onResizeBox && (() => {
+                            // Render each handle positioned relative to the
+                            // current (possibly live-previewed) box.
+                            const handleSize = 10; // px
+                            const halfPct = (axis: 'x' | 'y') => 50;     // visual offset via translate
+                            const handleDef: Array<{ edge: Edge; left: string; top: string }> = [
+                              { edge: 'nw', left: `${b.x * 100}%`,                       top: `${b.y * 100}%` },
+                              { edge: 'n',  left: `${(b.x + b.width / 2) * 100}%`,        top: `${b.y * 100}%` },
+                              { edge: 'ne', left: `${(b.x + b.width) * 100}%`,            top: `${b.y * 100}%` },
+                              { edge: 'e',  left: `${(b.x + b.width) * 100}%`,            top: `${(b.y + b.height / 2) * 100}%` },
+                              { edge: 'se', left: `${(b.x + b.width) * 100}%`,            top: `${(b.y + b.height) * 100}%` },
+                              { edge: 's',  left: `${(b.x + b.width / 2) * 100}%`,        top: `${(b.y + b.height) * 100}%` },
+                              { edge: 'sw', left: `${b.x * 100}%`,                       top: `${(b.y + b.height) * 100}%` },
+                              { edge: 'w',  left: `${b.x * 100}%`,                       top: `${(b.y + b.height / 2) * 100}%` },
+                            ];
+                            return handleDef.map(h => (
+                              <div
+                                key={h.edge}
+                                className="absolute rounded-sm bg-white shadow"
+                                style={{
+                                  left: h.left,
+                                  top: h.top,
+                                  width:  handleSize,
+                                  height: handleSize,
+                                  transform: `translate(-${halfPct('x')}%, -${halfPct('y')}%)`,
+                                  border: `2px solid ${rect.border}`,
+                                  cursor: EDGE_CURSOR[h.edge],
+                                  zIndex: 10,
+                                }}
+                                onMouseDown={ev =>
+                                  beginResize(ev, m.mapping.excelHeader, pageNum, h.edge, original)
+                                }
+                              />
+                            ));
+                          })()}
+
                           {/* Value pill above the box — label + extracted text. */}
                           <div
                             className="absolute text-[11px] font-semibold px-2 py-0.5 rounded-md shadow whitespace-nowrap pointer-events-none"

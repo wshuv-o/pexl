@@ -13,8 +13,9 @@ import { autoMatch, type HeaderMatch } from '@/lib/automap/auto-match';
 import { matchHeadersBackend } from '@/lib/automap/api';
 import { writeValuesToWorkbook, workbookToBlob, downloadBlob } from '@/lib/automap/excel-writer';
 import { buildInitialMappings } from '@/lib/automap/header-mapping';
-import { processFile } from '@/lib/api';
-import type { FieldLabel, DocumentType } from '@/types/utilscraper';
+import { processFile, extractRegions } from '@/lib/api';
+import type { FieldLabel, DocumentType, Highlight } from '@/types/utilscraper';
+import type { ResizedBox } from '@/components/automap/AutoHighlightViewer';
 
 // ───────────────────────────────────────────────────────────────────────────
 // Auto-map page: Source PDF + Source output Excel → read headers → rule-based
@@ -326,6 +327,55 @@ export default function AutoMap() {
     setActiveHeader(excelHeader);
   }, [activePdf, sessionId, mappings, matchOneHeader]);
 
+  // User dragged a corner/edge handle on a highlight. Re-extract from the
+  // new rectangle via /api/utility/extract-regions, then update the
+  // mapping's box + value so the pill and the confirm bar show the new text.
+  const onBoxResize = useCallback(async (excelHeader: string, newBox: ResizedBox) => {
+    if (!activePdf) return;
+    const m = mappings.find(x => x.mapping.excelHeader === excelHeader);
+    if (!m) return;
+    const highlight: Highlight = {
+      id:     `resize-${Date.now()}`,
+      page:   newBox.page,
+      field:  (m.mapping.fieldKey as string) || excelHeader,
+      x:      newBox.x,
+      y:      newBox.y,
+      width:  newBox.width,
+      height: newBox.height,
+    };
+    try {
+      const rows = await extractRegions(sessionId ?? 'local-resize', [highlight], activePdf);
+      const r = rows[0];
+      const newValue = r?.value ?? '';
+      setMappings(prev => prev.map(x => {
+        if (x.mapping.excelHeader !== excelHeader) return x;
+        return {
+          ...x,
+          match: {
+            header: x.match.header,
+            box: {
+              page:   newBox.page,
+              x:      newBox.x,
+              y:      newBox.y,
+              width:  newBox.width,
+              height: newBox.height,
+              value:  newValue,
+              label:  x.match.box?.label ?? '',
+              score:  x.match.box?.score ?? 1,
+            },
+            alternatives: x.match.alternatives,
+          },
+          override:  undefined,
+          chosenBox: undefined,
+          status:    'pending' as const,
+        };
+      }));
+    } catch (err) {
+      console.warn('[auto-map] resize re-extract failed:', err);
+      toast.error('Couldn\u2019t re-extract the resized region.');
+    }
+  }, [activePdf, sessionId, mappings]);
+
   // Re-run the PDF match for every header that has a non-empty search
   // phrase. Useful after switching PDFs or when the user wants to force
   // a refresh.
@@ -549,6 +599,7 @@ export default function AutoMap() {
               onRejectHeader={onRejectHeader}
               onEditHeader={onEditHeader}
               onApplyToPageAll={onApplyToPageAll}
+              onResizeBox={onBoxResize}
             />
           ) : (
             <EmptyCenter />
