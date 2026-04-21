@@ -77,6 +77,11 @@ export default function AutoHighlightViewer({
     startBox: { x: number; y: number; width: number; height: number }; // before drag
     startMouse: { x: number; y: number };                              // page-local fractions
   } | null>(null);
+  // Ref-mirror of `resize` so the mousemove/mouseup listeners — which are
+  // bound ONCE per drag (not re-bound on every setResize) — can read the
+  // latest state without stale-closure bugs.
+  const resizeRef = useRef(resize);
+  useEffect(() => { resizeRef.current = resize; }, [resize]);
 
   // Compute fit-width zoom on first page load so 66-column landscape PDFs
   // aren't tiny or overflowing.
@@ -179,40 +184,40 @@ export default function AutoHighlightViewer({
   }, [mappings, pdfLoaded, numPages, scale, textLayerTick, activeHeader]);
 
   // ── Resize drag tracking ──────────────────────────────────────────────
-  // While a handle is being dragged, listen on window so tracking works
-  // even when the pointer leaves the page element briefly.
+  // Listeners bind ONCE per drag (when `resize` goes null → non-null) and
+  // read live state through `resizeRef` so we don't tear down + re-bind on
+  // every mousemove (which was eating events on some browsers).
+  const dragActive = resize !== null;
   useEffect(() => {
-    if (!resize) return;
-
-    const pageEl = pageRefs.current[resize.page];
-    if (!pageEl) return;
+    if (!dragActive) return;
 
     const onMove = (e: MouseEvent) => {
+      const curr = resizeRef.current;
+      if (!curr) return;
+      const pageEl = pageRefs.current[curr.page];
+      if (!pageEl) return;
       const rect = pageEl.getBoundingClientRect();
       const mx = (e.clientX - rect.left) / rect.width;
       const my = (e.clientY - rect.top)  / rect.height;
+
       setResize(prev => {
         if (!prev) return prev;
         const s = prev.startBox;
         let { x, y, width, height } = s;
 
-        // Left edge variants: new-x follows the mouse, width shrinks.
         if (prev.edge.includes('w')) {
           const newX = Math.max(0, Math.min(mx, s.x + s.width - 0.002));
           width = s.x + s.width - newX;
           x = newX;
         }
-        // Right edge variants: width = mouseX − box.x.
         if (prev.edge.includes('e')) {
           width = Math.max(0.002, Math.min(1 - s.x, mx - s.x));
         }
-        // Top edge: new-y follows the mouse, height shrinks.
         if (prev.edge.includes('n')) {
           const newY = Math.max(0, Math.min(my, s.y + s.height - 0.002));
           height = s.y + s.height - newY;
           y = newY;
         }
-        // Bottom edge.
         if (prev.edge.includes('s')) {
           height = Math.max(0.002, Math.min(1 - s.y, my - s.y));
         }
@@ -221,21 +226,19 @@ export default function AutoHighlightViewer({
     };
 
     const onUp = () => {
-      setResize(prev => {
-        if (!prev) return null;
-        // Only fire the re-extract callback if the box actually changed.
-        const s = prev.startBox;
-        const b = prev.box;
-        const moved =
-          Math.abs(s.x - b.x) > 0.001 ||
-          Math.abs(s.y - b.y) > 0.001 ||
-          Math.abs(s.width  - b.width)  > 0.001 ||
-          Math.abs(s.height - b.height) > 0.001;
-        if (moved && onResizeBox) {
-          onResizeBox(prev.excelHeader, { page: prev.page, ...b });
-        }
-        return null;
-      });
+      const curr = resizeRef.current;
+      setResize(null);                // end the drag
+      if (!curr) return;
+      const s = curr.startBox;
+      const b = curr.box;
+      const moved =
+        Math.abs(s.x - b.x) > 0.001 ||
+        Math.abs(s.y - b.y) > 0.001 ||
+        Math.abs(s.width  - b.width)  > 0.001 ||
+        Math.abs(s.height - b.height) > 0.001;
+      if (moved && onResizeBox) {
+        onResizeBox(curr.excelHeader, { page: curr.page, ...b });
+      }
     };
 
     window.addEventListener('mousemove', onMove);
@@ -244,7 +247,7 @@ export default function AutoHighlightViewer({
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
     };
-  }, [resize, onResizeBox]);
+  }, [dragActive, onResizeBox]);
 
   // Helper to start a resize drag from a handle's mousedown.
   const beginResize = useCallback((
@@ -589,9 +592,11 @@ export default function AutoHighlightViewer({
                       return (
                         <div key={m.mapping.excelHeader}>
                           {/* Solid field-colored rectangle — same style the
-                              main PDF viewer uses in HighlightOverlay. */}
+                              main PDF viewer uses in HighlightOverlay. No
+                              transition on size so resize drags track the
+                              mouse without CSS lag. */}
                           <div
-                            className="absolute pointer-events-none rounded-sm transition-all"
+                            className="absolute pointer-events-none rounded-sm"
                             style={{
                               left:   `${b.x * 100}%`,
                               top:    `${b.y * 100}%`,
@@ -621,44 +626,111 @@ export default function AutoHighlightViewer({
                               zIndex: 9,
                             }}
                           />
-                          {/* Resize handles — 8 grabbable squares around the
-                              box perimeter, Word/Paint style. Only rendered
-                              on the active highlight so non-selected ones
-                              aren't busy. Hover shows the resize cursor. */}
+                          {/* Resize — full-edge strips + corner squares.
+                              Hovering anywhere on an edge gives the two-
+                              sided resize arrow; corners allow diagonal
+                              resize. zIndex 50 + explicit pointer-events
+                              beat the text layer's span-based selection. */}
                           {isActive && onResizeBox && (() => {
-                            // Render each handle positioned relative to the
-                            // current (possibly live-previewed) box.
-                            const handleSize = 10; // px
-                            const halfPct = (axis: 'x' | 'y') => 50;     // visual offset via translate
-                            const handleDef: Array<{ edge: Edge; left: string; top: string }> = [
-                              { edge: 'nw', left: `${b.x * 100}%`,                       top: `${b.y * 100}%` },
-                              { edge: 'n',  left: `${(b.x + b.width / 2) * 100}%`,        top: `${b.y * 100}%` },
-                              { edge: 'ne', left: `${(b.x + b.width) * 100}%`,            top: `${b.y * 100}%` },
-                              { edge: 'e',  left: `${(b.x + b.width) * 100}%`,            top: `${(b.y + b.height / 2) * 100}%` },
-                              { edge: 'se', left: `${(b.x + b.width) * 100}%`,            top: `${(b.y + b.height) * 100}%` },
-                              { edge: 's',  left: `${(b.x + b.width / 2) * 100}%`,        top: `${(b.y + b.height) * 100}%` },
-                              { edge: 'sw', left: `${b.x * 100}%`,                       top: `${(b.y + b.height) * 100}%` },
-                              { edge: 'w',  left: `${b.x * 100}%`,                       top: `${(b.y + b.height / 2) * 100}%` },
+                            const cornerSize = 12;                           // px
+                            const edgeThick  = 10;                           // px — hit-strip thickness
+                            const commonStyle: React.CSSProperties = {
+                              zIndex: 50,
+                              pointerEvents: 'auto',
+                              userSelect: 'none',
+                              touchAction: 'none',
+                            };
+                            const onDown = (edge: Edge) => (ev: React.MouseEvent) => {
+                              ev.stopPropagation();
+                              beginResize(ev, m.mapping.excelHeader, pageNum, edge, original);
+                            };
+
+                            // Full-edge interactive strips. Thin, semi-
+                            // transparent overlay centred on each edge —
+                            // invisible on the box itself but catches the
+                            // hover/drag anywhere along the edge.
+                            const edgeStrips: Array<{ edge: Edge; style: React.CSSProperties }> = [
+                              // Top edge
+                              { edge: 'n', style: {
+                                left:   `${b.x * 100}%`,
+                                width:  `${b.width * 100}%`,
+                                top:    `calc(${b.y * 100}% - ${edgeThick / 2}px)`,
+                                height: edgeThick,
+                              } },
+                              // Bottom edge
+                              { edge: 's', style: {
+                                left:   `${b.x * 100}%`,
+                                width:  `${b.width * 100}%`,
+                                top:    `calc(${(b.y + b.height) * 100}% - ${edgeThick / 2}px)`,
+                                height: edgeThick,
+                              } },
+                              // Left edge
+                              { edge: 'w', style: {
+                                top:    `${b.y * 100}%`,
+                                height: `${b.height * 100}%`,
+                                left:   `calc(${b.x * 100}% - ${edgeThick / 2}px)`,
+                                width:  edgeThick,
+                              } },
+                              // Right edge
+                              { edge: 'e', style: {
+                                top:    `${b.y * 100}%`,
+                                height: `${b.height * 100}%`,
+                                left:   `calc(${(b.x + b.width) * 100}% - ${edgeThick / 2}px)`,
+                                width:  edgeThick,
+                              } },
                             ];
-                            return handleDef.map(h => (
-                              <div
-                                key={h.edge}
-                                className="absolute rounded-sm bg-white shadow"
-                                style={{
-                                  left: h.left,
-                                  top: h.top,
-                                  width:  handleSize,
-                                  height: handleSize,
-                                  transform: `translate(-${halfPct('x')}%, -${halfPct('y')}%)`,
-                                  border: `2px solid ${rect.border}`,
-                                  cursor: EDGE_CURSOR[h.edge],
-                                  zIndex: 10,
-                                }}
-                                onMouseDown={ev =>
-                                  beginResize(ev, m.mapping.excelHeader, pageNum, h.edge, original)
-                                }
-                              />
-                            ));
+
+                            // Corner squares — small visible grabs for
+                            // diagonal resize.
+                            const corners: Array<{ edge: Edge; left: string; top: string }> = [
+                              { edge: 'nw', left: `${b.x * 100}%`,             top: `${b.y * 100}%` },
+                              { edge: 'ne', left: `${(b.x + b.width) * 100}%`, top: `${b.y * 100}%` },
+                              { edge: 'se', left: `${(b.x + b.width) * 100}%`, top: `${(b.y + b.height) * 100}%` },
+                              { edge: 'sw', left: `${b.x * 100}%`,             top: `${(b.y + b.height) * 100}%` },
+                            ];
+
+                            return (
+                              <>
+                                {/* Edge hit-strips — invisible to the eye
+                                    but carry the two-sided arrow cursor
+                                    along the entire length of the edge. */}
+                                {edgeStrips.map(s => (
+                                  <div
+                                    key={s.edge}
+                                    className="absolute"
+                                    style={{
+                                      ...s.style,
+                                      cursor: EDGE_CURSOR[s.edge],
+                                      ...commonStyle,
+                                      // Debug-able: switch to a faint tint
+                                      // by changing background below.
+                                      background: 'transparent',
+                                    }}
+                                    onMouseDown={onDown(s.edge)}
+                                  />
+                                ))}
+                                {/* Corner squares — small, visible, white
+                                    with field-coloured border. Diagonal
+                                    resize on click+drag. */}
+                                {corners.map(c => (
+                                  <div
+                                    key={c.edge}
+                                    className="absolute rounded-sm bg-white shadow-md hover:scale-125 transition-transform"
+                                    style={{
+                                      left: c.left,
+                                      top:  c.top,
+                                      width:  cornerSize,
+                                      height: cornerSize,
+                                      transform: 'translate(-50%, -50%)',
+                                      border: `2px solid ${rect.border}`,
+                                      cursor: EDGE_CURSOR[c.edge],
+                                      ...commonStyle,
+                                    }}
+                                    onMouseDown={onDown(c.edge)}
+                                  />
+                                ))}
+                              </>
+                            );
                           })()}
 
                           {/* Value pill above the box — label + extracted text. */}

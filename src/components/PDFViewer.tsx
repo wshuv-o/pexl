@@ -399,6 +399,28 @@ export default function PDFViewer({
     [session.highlights, updateHighlights],
   );
 
+  // Word-style resize commit — update the highlight's bounds and clear
+  // its extraction so the user knows to click Re-extract (or it happens
+  // automatically the next time the batch Extract runs).
+  const handleResizeHighlight = useCallback(
+    (id: string, pageNum: number, bounds: { x: number; y: number; width: number; height: number }) => {
+      const hls = session.highlights[pageNum] ?? [];
+      const updated = hls.map(h =>
+        h.id === id
+          ? {
+              ...h,
+              x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height,
+              extractedValue: undefined, confidence: undefined, wasOcr: undefined,
+            }
+          : h,
+      );
+      updateHighlights(pageNum, updated);
+      // Kick off a single-highlight re-extract via the existing flow.
+      onReExtract(id);
+    },
+    [session.highlights, updateHighlights, onReExtract],
+  );
+
   const handleEraseAll = useCallback(
     () => updateHighlights(currentPage, []),
     [currentPage, updateHighlights],
@@ -909,6 +931,7 @@ export default function PDFViewer({
                     onDelete={id => handleDeleteHighlight(id, pageNum)}
                     onReExtract={onReExtract}
                     onMove={(id, x, y) => handleMoveHighlight(id, pageNum, x, y)}
+                    onResize={(id, bounds) => handleResizeHighlight(id, pageNum, bounds)}
                     onSelectToggle={(id, additive) => {
                       setSelectedIds(prev => {
                         const next = new Set(prev);

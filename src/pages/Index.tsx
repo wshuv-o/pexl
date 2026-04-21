@@ -254,16 +254,25 @@ export default function Index() {
 
   const handleReExtractHighlight = useCallback(async (highlightId: string) => {
     if (!activeSession?.file) return;
-    const newHighlights = { ...activeSession.highlights };
+    // Read the highlight's bounds from the LATEST session state (not the stale
+    // closure) — this matters right after a resize, where `handleResizeHighlight`
+    // has just scheduled a geometry update that hasn't committed yet.
     let found: Highlight | null = null;
-    for (const [pageNum, pageHls] of Object.entries(newHighlights)) {
-      newHighlights[Number(pageNum)] = pageHls.map(h => {
-        if (h.id === highlightId) { found = { ...h, extractedValue: undefined, confidence: undefined }; return found; }
-        return h;
-      });
-    }
+    setSessions(prev => prev.map(s => {
+      if (s.id !== activeSession.id) return s;
+      const hls: Record<number, Highlight[]> = {};
+      for (const [pageNum, pageHls] of Object.entries(s.highlights)) {
+        hls[Number(pageNum)] = pageHls.map(h => {
+          if (h.id === highlightId) {
+            found = { ...h, extractedValue: undefined, confidence: undefined };
+            return found!;
+          }
+          return h;
+        });
+      }
+      return { ...s, highlights: hls };
+    }));
     if (!found) return;
-    setSessions(prev => prev.map(s => s.id === activeSession.id ? { ...s, highlights: newHighlights } : s));
     setExtracting(true);
     try {
       const results = await extractRegions(activeSession.id, [found], activeSession.file);

@@ -3,6 +3,14 @@ import { X } from 'lucide-react';
 import type { Highlight, ViewerTool } from '@/types/utilscraper';
 import { getFieldConfig } from '@/types/utilscraper';
 
+type Edge = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw';
+const EDGE_CURSOR: Record<Edge, string> = {
+  n:  'ns-resize', s:  'ns-resize',
+  e:  'ew-resize', w:  'ew-resize',
+  ne: 'nesw-resize', sw: 'nesw-resize',
+  nw: 'nwse-resize', se: 'nwse-resize',
+};
+
 interface Props {
   highlights: Highlight[];
   drawing: { x: number; y: number; w: number; h: number } | null;
@@ -11,6 +19,9 @@ interface Props {
   onDelete: (id: string) => void;
   onReExtract: (id: string) => void;
   onMove?: (id: string, newX: number, newY: number) => void;
+  // Fires on release after a Word/Paint-style edge/corner drag — caller
+  // should update the highlight geometry and re-extract its value.
+  onResize?: (id: string, bounds: { x: number; y: number; width: number; height: number }) => void;
   onSelectToggle?: (id: string, additive: boolean) => void;
   tool: ViewerTool;
 }
@@ -22,7 +33,7 @@ const CONFIDENCE_PCT: Record<string, number> = {
 };
 
 export default function HighlightOverlay({
-  highlights, drawing, selectionBox, selectedIds, onDelete, onMove, onSelectToggle, tool,
+  highlights, drawing, selectionBox, selectedIds, onDelete, onMove, onResize, onSelectToggle, tool,
 }: Props) {
   // Track which highlight is being dragged, plus preview position and pointer offset
   const [dragging, setDragging] = useState<{
@@ -36,6 +47,88 @@ export default function HighlightOverlay({
   } | null>(null);
 
   const overlayRef = useRef<HTMLDivElement>(null);
+
+  // ── Word-style resize state ───────────────────────────────────────────
+  // Track which highlight's handle is being dragged + the live preview
+  // bounds. Listeners bind ONCE per drag (null → non-null), read live
+  // values through `resizeRef` so we don't re-bind on every mousemove.
+  const [resize, setResize] = useState<{
+    id: string;
+    edge: Edge;
+    startBox: { x: number; y: number; width: number; height: number };
+    box:      { x: number; y: number; width: number; height: number };
+  } | null>(null);
+  const resizeRef = useRef(resize);
+  useEffect(() => { resizeRef.current = resize; }, [resize]);
+
+  const resizingId = resize?.id ?? null;
+
+  useEffect(() => {
+    if (!resizingId) return;
+
+    const onMove = (e: MouseEvent) => {
+      const curr = resizeRef.current;
+      const overlay = overlayRef.current;
+      if (!curr || !overlay) return;
+      const rect = overlay.getBoundingClientRect();
+      const mx = (e.clientX - rect.left) / rect.width;
+      const my = (e.clientY - rect.top)  / rect.height;
+      setResize(prev => {
+        if (!prev) return prev;
+        const s = prev.startBox;
+        let { x, y, width, height } = s;
+        if (prev.edge.includes('w')) {
+          const newX = Math.max(0, Math.min(mx, s.x + s.width - 0.002));
+          width = s.x + s.width - newX;
+          x = newX;
+        }
+        if (prev.edge.includes('e')) {
+          width = Math.max(0.002, Math.min(1 - s.x, mx - s.x));
+        }
+        if (prev.edge.includes('n')) {
+          const newY = Math.max(0, Math.min(my, s.y + s.height - 0.002));
+          height = s.y + s.height - newY;
+          y = newY;
+        }
+        if (prev.edge.includes('s')) {
+          height = Math.max(0.002, Math.min(1 - s.y, my - s.y));
+        }
+        return { ...prev, box: { x, y, width, height } };
+      });
+    };
+
+    const onUp = () => {
+      const curr = resizeRef.current;
+      setResize(null);
+      if (!curr) return;
+      const s = curr.startBox;
+      const b = curr.box;
+      const moved =
+        Math.abs(s.x - b.x) > 0.001 ||
+        Math.abs(s.y - b.y) > 0.001 ||
+        Math.abs(s.width  - b.width)  > 0.001 ||
+        Math.abs(s.height - b.height) > 0.001;
+      if (moved && onResize) onResize(curr.id, b);
+    };
+
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, [resizingId, onResize]);
+
+  const beginResize = (e: React.MouseEvent, h: Highlight, edge: Edge) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setResize({
+      id: h.id,
+      edge,
+      startBox: { x: h.x, y: h.y, width: h.width, height: h.height },
+      box:      { x: h.x, y: h.y, width: h.width, height: h.height },
+    });
+  };
 
   // Window-level listeners so dragging works even if cursor leaves the highlight
   useEffect(() => {
@@ -127,12 +220,15 @@ export default function HighlightOverlay({
 
         // Use live drag position when this highlight is being dragged
         const isDragging = dragging?.id === h.id;
+        const isResizing = resize?.id === h.id;
         const isSelected = selectedIds?.has(h.id) ?? false;
 
         // If the group is being dragged together, apply the live delta to
         // every selected highlight for visual feedback.
         let posX = h.x;
         let posY = h.y;
+        let posW = h.width;
+        let posH = h.height;
         if (isDragging) {
           posX = dragging.previewX;
           posY = dragging.previewY;
@@ -141,6 +237,12 @@ export default function HighlightOverlay({
           const deltaY = dragging.previewY - dragging.startY;
           posX = Math.max(0, Math.min(1 - h.width,  h.x + deltaX));
           posY = Math.max(0, Math.min(1 - h.height, h.y + deltaY));
+        }
+        if (isResizing && resize) {
+          posX = resize.box.x;
+          posY = resize.box.y;
+          posW = resize.box.width;
+          posH = resize.box.height;
         }
 
         const showSelectedRing = isSelected && !isDragging;
@@ -152,8 +254,8 @@ export default function HighlightOverlay({
             style={{
               left:            `${posX * 100}%`,
               top:             `${posY * 100}%`,
-              width:           `${h.width * 100}%`,
-              height:          `${h.height * 100}%`,
+              width:           `${posW * 100}%`,
+              height:          `${posH * 100}%`,
               backgroundColor: cfg.bgColor,
               border:          `2px ${h.isAutoExtracted && h.wasOcr ? 'dashed' : 'solid'} ${cfg.color}`,
               borderRadius:    3,
@@ -196,6 +298,55 @@ export default function HighlightOverlay({
                 {statusIcon}
               </span>
             )}
+
+            {/* ── Resize handles ────────────────────────────────────
+                Word/Paint style. Full-edge strips carry the two-sided
+                cursor; 4 corner squares allow diagonal resize. Only
+                rendered when the cursor tool is active, the handler is
+                wired up, and the highlight is selected (to avoid a
+                messy UI when many are on-screen). */}
+            {tool === 'cursor' && onResize && (isSelected || isResizing) && (() => {
+              const cornerSize = 10;
+              const edgeThick  = 8;
+              const common: React.CSSProperties = {
+                position: 'absolute', zIndex: 50, pointerEvents: 'auto',
+                userSelect: 'none', touchAction: 'none',
+              };
+              const onDown = (edge: Edge) => (e: React.MouseEvent) => beginResize(e, h, edge);
+              return (
+                <>
+                  {/* Full-edge hit strips (transparent, cursor only) */}
+                  <div style={{ ...common, left: 0, right: 0, top: -edgeThick / 2, height: edgeThick, cursor: EDGE_CURSOR.n }} onMouseDown={onDown('n')} />
+                  <div style={{ ...common, left: 0, right: 0, bottom: -edgeThick / 2, height: edgeThick, cursor: EDGE_CURSOR.s }} onMouseDown={onDown('s')} />
+                  <div style={{ ...common, top: 0, bottom: 0, left: -edgeThick / 2, width: edgeThick, cursor: EDGE_CURSOR.w }} onMouseDown={onDown('w')} />
+                  <div style={{ ...common, top: 0, bottom: 0, right: -edgeThick / 2, width: edgeThick, cursor: EDGE_CURSOR.e }} onMouseDown={onDown('e')} />
+                  {/* Corner squares */}
+                  {([
+                    ['nw', { top: 0,       left: 0 }],
+                    ['ne', { top: 0,       right: 0 }],
+                    ['sw', { bottom: 0,    left: 0 }],
+                    ['se', { bottom: 0,    right: 0 }],
+                  ] as Array<[Edge, React.CSSProperties]>).map(([edge, pos]) => (
+                    <div
+                      key={edge}
+                      style={{
+                        ...common,
+                        ...pos,
+                        width:  cornerSize,
+                        height: cornerSize,
+                        transform: `translate(${edge.includes('w') ? '-50%' : '50%'}, ${edge.includes('n') ? '-50%' : '50%'})`,
+                        background: '#ffffff',
+                        border: `2px solid ${cfg.color}`,
+                        borderRadius: 2,
+                        cursor: EDGE_CURSOR[edge],
+                        boxShadow: '0 1px 2px rgba(0,0,0,0.2)',
+                      }}
+                      onMouseDown={onDown(edge)}
+                    />
+                  ))}
+                </>
+              );
+            })()}
 
             {/* Hover action button — Delete only */}
             {tool === 'cursor' && (
