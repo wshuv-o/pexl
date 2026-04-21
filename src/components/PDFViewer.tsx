@@ -55,13 +55,8 @@ export default function PDFViewer({
     page: number;
   } | null>(null);
 
-  // Rubber-band selection + multi-select
+  // Multi-select (click + shift/ctrl on boxes)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [selectionBox, setSelectionBox] = useState<{
-    page: number;
-    startX: number; startY: number;
-    x: number; y: number; w: number; h: number;
-  } | null>(null);
 
   const [showFirstHint, setShowFirstHint] = useState(true);
   const [numPages, setNumPages]         = useState<number | null>(null);
@@ -220,26 +215,16 @@ export default function PDFViewer({
     const pos = getRelativePos(e.clientX, e.clientY, el);
     if (!pos) return;
 
-    if (tool === 'highlight') {
-      e.preventDefault();
-      setDrawingPage(pageNum);
-      setDrawing({ startX: pos.x, startY: pos.y, x: pos.x, y: pos.y, w: 0, h: 0 });
-      setPickerPos(null);
-      return;
-    }
-
-    // Cursor mode — start rubber-band selection on empty space.
-    // Clicks on highlight boxes are stopped by HighlightOverlay, so this only
-    // fires when clicking empty PDF area.
+    // Cursor mode is the merged tool: clicks on existing highlight boxes are
+    // handled by HighlightOverlay (pointer-events-auto + stopPropagation), so
+    // this path only fires on empty PDF space — start drawing a new highlight.
     if (tool === 'cursor') {
       e.preventDefault();
       // Clear prior selection unless user holds shift/ctrl
       if (!e.shiftKey && !e.ctrlKey && !e.metaKey) setSelectedIds(new Set());
-      setSelectionBox({
-        page: pageNum,
-        startX: pos.x, startY: pos.y,
-        x: pos.x, y: pos.y, w: 0, h: 0,
-      });
+      setDrawingPage(pageNum);
+      setDrawing({ startX: pos.x, startY: pos.y, x: pos.x, y: pos.y, w: 0, h: 0 });
+      setPickerPos(null);
     }
   }, [tool, getRelativePos]);
 
@@ -257,24 +242,8 @@ export default function PDFViewer({
         w: Math.abs(pos.x - drawing.startX),
         h: Math.abs(pos.y - drawing.startY),
       });
-      return;
     }
-
-    // Rubber-band selection
-    if (selectionBox) {
-      const el = pageRefs.current[selectionBox.page];
-      if (!el) return;
-      const pos = getRelativePos(e.clientX, e.clientY, el);
-      if (!pos) return;
-      setSelectionBox({
-        ...selectionBox,
-        x: Math.min(selectionBox.startX, pos.x),
-        y: Math.min(selectionBox.startY, pos.y),
-        w: Math.abs(pos.x - selectionBox.startX),
-        h: Math.abs(pos.y - selectionBox.startY),
-      });
-    }
-  }, [drawing, drawingPage, selectionBox, getRelativePos]);
+  }, [drawing, drawingPage, getRelativePos]);
 
   const handleMouseUp = useCallback((e: React.MouseEvent) => {
     // Finish highlight drawing
@@ -296,34 +265,8 @@ export default function PDFViewer({
       });
       setDrawing(null);
       setDrawingPage(null);
-      return;
     }
-
-    // Finish rubber-band selection — find intersecting highlights
-    if (selectionBox) {
-      const tooSmall = selectionBox.w < 0.005 && selectionBox.h < 0.005;
-      if (!tooSmall) {
-        const pageHls = session.highlights[selectionBox.page] ?? [];
-        const sx1 = selectionBox.x;
-        const sy1 = selectionBox.y;
-        const sx2 = selectionBox.x + selectionBox.w;
-        const sy2 = selectionBox.y + selectionBox.h;
-        const hit = pageHls.filter(h => {
-          const hx1 = h.x, hy1 = h.y;
-          const hx2 = h.x + h.width, hy2 = h.y + h.height;
-          // Intersection test
-          return hx1 < sx2 && hx2 > sx1 && hy1 < sy2 && hy2 > sy1;
-        }).map(h => h.id);
-
-        setSelectedIds(prev => {
-          const next = new Set(prev);
-          for (const id of hit) next.add(id);
-          return next;
-        });
-      }
-      setSelectionBox(null);
-    }
-  }, [drawing, drawingPage, selectionBox, session.highlights, getRelativePos]);
+  }, [drawing, drawingPage, getRelativePos]);
 
   // -----------------------------------------------------------------------
   // Label selection — uses pickerPos.page
@@ -436,7 +379,6 @@ export default function PDFViewer({
       }
       setPickerPos(null);
       setSelectedIds(new Set());
-      setSelectionBox(null);
     },
     [handleEraseAll],
   );
@@ -849,7 +791,7 @@ export default function PDFViewer({
         }}
       >
         {/* First-use hint overlay */}
-        {showFirstHint && tool === 'highlight' && allHighlights.length === 0 && (
+        {showFirstHint && tool === 'cursor' && allHighlights.length === 0 && (
           <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none">
             <div className="bg-black/70 text-white px-4 py-2 rounded-lg text-sm font-medium backdrop-blur-sm">
               Draw boxes over the values you want to extract
@@ -901,7 +843,7 @@ export default function PDFViewer({
                   style={{
                     display:    'inline-block',
                     lineHeight: 0,
-                    cursor:     tool === 'highlight' ? 'crosshair' : tool === 'text-select' ? 'text' : 'default',
+                    cursor:     tool === 'cursor' ? 'crosshair' : tool === 'text-select' ? 'text' : 'default',
                     transform:  fineRotation !== 0 ? `rotate(${fineRotation}deg)` : undefined,
                     transition: 'transform 0.3s ease',
                     opacity:    isCover ? 0.5 : 1,
@@ -924,9 +866,7 @@ export default function PDFViewer({
                     drawing={drawingPage === pageNum && drawing
                       ? { x: drawing.x, y: drawing.y, w: drawing.w, h: drawing.h }
                       : null}
-                    selectionBox={selectionBox && selectionBox.page === pageNum
-                      ? { x: selectionBox.x, y: selectionBox.y, w: selectionBox.w, h: selectionBox.h }
-                      : null}
+                    selectionBox={null}
                     selectedIds={selectedIds}
                     onDelete={id => handleDeleteHighlight(id, pageNum)}
                     onReExtract={onReExtract}

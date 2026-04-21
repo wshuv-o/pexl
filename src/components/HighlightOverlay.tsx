@@ -301,20 +301,27 @@ export default function HighlightOverlay({
 
             {/* ── Resize handles ────────────────────────────────────
                 Word/Paint style. Full-edge strips carry the two-sided
-                cursor; 4 corner squares allow diagonal resize. Only
-                rendered when the cursor tool is active, the handler is
-                wired up, and the highlight is selected (to avoid a
-                messy UI when many are on-screen). */}
-            {tool === 'cursor' && onResize && (isSelected || isResizing) && (() => {
+                cursor; 4 corner squares allow diagonal resize. Revealed
+                via group-hover (parent has `group`) and kept visible
+                while a resize drag is in progress. */}
+            {tool === 'cursor' && onResize && (() => {
               const cornerSize = 10;
               const edgeThick  = 8;
+              // Handles inherit pointer-events from the wrapper, so they're
+              // only interactive when the wrapper is visible (hover / resize).
               const common: React.CSSProperties = {
-                position: 'absolute', zIndex: 50, pointerEvents: 'auto',
+                position: 'absolute', zIndex: 50,
                 userSelect: 'none', touchAction: 'none',
               };
               const onDown = (edge: Edge) => (e: React.MouseEvent) => beginResize(e, h, edge);
               return (
-                <>
+                <div
+                  className={`absolute inset-0 transition-opacity duration-150 ${
+                    isResizing
+                      ? 'opacity-100 pointer-events-auto'
+                      : 'opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto'
+                  }`}
+                >
                   {/* Full-edge hit strips (transparent, cursor only) */}
                   <div style={{ ...common, left: 0, right: 0, top: -edgeThick / 2, height: edgeThick, cursor: EDGE_CURSOR.n }} onMouseDown={onDown('n')} />
                   <div style={{ ...common, left: 0, right: 0, bottom: -edgeThick / 2, height: edgeThick, cursor: EDGE_CURSOR.s }} onMouseDown={onDown('s')} />
@@ -344,7 +351,7 @@ export default function HighlightOverlay({
                       onMouseDown={onDown(edge)}
                     />
                   ))}
-                </>
+                </div>
               );
             })()}
 
