@@ -249,6 +249,43 @@ export async function fetchConvertedPdf(sessionId: string, originalName: string)
   }
 }
 
+// Download the OCR'd / searchable version of the session's PDF.
+// Tries the OCR-specific endpoint first, falls back to the stored session PDF.
+export async function downloadOcrPdf(sessionId: string, originalName: string): Promise<void> {
+  const stem = originalName.replace(/\.(docx?|pdf)$/i, '') || sessionId;
+  const outName = `${stem}_ocr.pdf`;
+
+  // Try endpoints in order — backend returns OCR'd PDF with text layer
+  const endpoints = [
+    `${BACKEND_URL}/api/utility/session/${sessionId}/ocr-pdf`,
+    `${BACKEND_URL}/api/utility/session/${sessionId}/searchable-pdf`,
+    `${BACKEND_URL}/api/utility/session/${sessionId}/pdf`,
+  ];
+
+  let blob: Blob | null = null;
+  for (const url of endpoints) {
+    try {
+      const res = await fetch(url);
+      if (res.ok) {
+        const b = await res.blob();
+        if (b.size > 0 && b.type.includes('pdf')) { blob = b; break; }
+      }
+    } catch { /* try next */ }
+  }
+
+  if (!blob) throw new Error('OCR PDF not available from backend');
+
+  // Trigger browser download
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = outName;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 // Map backend conversion-error details to friendly user-facing messages.
 const friendlyConversionError = (detail: string): string | null => {
   const d = (detail || '').toLowerCase();

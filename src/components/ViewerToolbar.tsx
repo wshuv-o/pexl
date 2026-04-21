@@ -3,7 +3,7 @@ import {
   ChevronLeft, ChevronRight, ZoomIn, ZoomOut,
   MousePointer2, Eraser, Loader2, TextCursor,
   CopyPlus, Files, Trash2, ListChecks, ChevronDown, Search,
-  SlidersHorizontal,
+  SlidersHorizontal, Download, MousePointerClick,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -37,6 +37,9 @@ interface ViewerToolbarProps {
   onFineRotationChange: (deg: number) => void;
   // Start page
   onStartPageChange: (startPage: number) => void;
+  // OCR download
+  onDownloadOcr: () => void;
+  downloadingOcr: boolean;
 }
 
 const ZOOM_OPTIONS = [
@@ -57,6 +60,7 @@ export default function ViewerToolbar({
   searchOpen, onSearchToggle,
   fineRotation, onFineRotationChange,
   onStartPageChange,
+  onDownloadOcr, downloadingOcr,
 }: ViewerToolbarProps) {
   // Relative page numbering when startPage > 1 (cover pages skipped)
   const hasOffset    = startPage > 1;
@@ -337,9 +341,10 @@ export default function ViewerToolbar({
 
       {/* Drawing tools */}
       <div className="flex items-center gap-0.5 shrink-0">
-        {toolBtn('cursor',      <MousePointer2 className="w-4 h-4" />, 'Cursor — drag to highlight, click boxes to edit')}
-        {toolBtn('text-select', <TextCursor    className="w-4 h-4" />, 'Select text — copy from PDF')}
-        {toolBtn('eraser',      <Eraser        className="w-4 h-4" />, 'Erase all on this page')}
+        {toolBtn('cursor',      <MousePointer2     className="w-4 h-4" />, 'Cursor — drag to highlight, click boxes to edit')}
+        {toolBtn('select',      <MousePointerClick className="w-4 h-4" />, 'Select — click boxes or marquee-select, drag to move')}
+        {toolBtn('text-select', <TextCursor        className="w-4 h-4" />, 'Select text — copy from PDF')}
+        {toolBtn('eraser',      <Eraser            className="w-4 h-4" />, 'Erase all on this page')}
       </div>
 
       {/* Separator */}
@@ -413,6 +418,26 @@ export default function ViewerToolbar({
           Native Text
         </span>
       )}
+
+      {/* Download OCR'd PDF */}
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            className="p-1.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted
+                       disabled:opacity-30 disabled:cursor-not-allowed transition-colors shrink-0"
+            onClick={onDownloadOcr}
+            disabled={downloadingOcr}
+            aria-label="Download OCR'd PDF"
+          >
+            {downloadingOcr
+              ? <Loader2 className="w-4 h-4 animate-spin" />
+              : <Download className="w-4 h-4" />}
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="bottom" className="max-w-[200px] text-xs">
+          Download OCR'd PDF
+        </TooltipContent>
+      </Tooltip>
 
       {/* Extract */}
       <Button

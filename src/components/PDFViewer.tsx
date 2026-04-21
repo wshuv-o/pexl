@@ -6,6 +6,8 @@ import ViewerToolbar from './ViewerToolbar';
 import HighlightOverlay from './HighlightOverlay';
 import FieldLabelPicker from './FieldLabelPicker';
 import HighlightLegend from './HighlightLegend';
+import { downloadOcrPdf } from '@/lib/api';
+import { toast } from 'sonner';
 
 // Set worker unconditionally — pdf-extract.ts also sets this
 // so pdfjs works both in viewer and in api.ts calls
@@ -68,6 +70,20 @@ export default function PDFViewer({
   // -1 means "no match focused yet"; Enter in the search box advances this.
   const [activeMatchIdx, setActiveMatchIdx] = useState<number>(-1);
   const [pdfLoaded, setPdfLoaded]       = useState(false);
+  const [downloadingOcr, setDownloadingOcr] = useState(false);
+
+  // Download the OCR'd / searchable version of this PDF from the backend
+  const handleDownloadOcr = useCallback(async () => {
+    setDownloadingOcr(true);
+    try {
+      await downloadOcrPdf(session.id, session.filename);
+      toast.success('OCR\'d PDF downloaded');
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Download failed';
+      toast.error(msg);
+    }
+    setDownloadingOcr(false);
+  }, [session.id, session.filename]);
 
   const pageRefs  = useRef<Record<number, HTMLDivElement | null>>({});
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -215,10 +231,10 @@ export default function PDFViewer({
     const pos = getRelativePos(e.clientX, e.clientY, el);
     if (!pos) return;
 
-    // Cursor mode is the merged tool: clicks on existing highlight boxes are
-    // handled by HighlightOverlay (pointer-events-auto + stopPropagation), so
-    // this path only fires on empty PDF space — start drawing a new highlight.
-    if (tool === 'cursor') {
+    // Cursor mode: drag on empty space draws a new highlight.
+    // Select mode: drag on empty space draws a marquee selection rectangle.
+    // Both share the same `drawing` state — behavior diverges on mouseUp.
+    if (tool === 'cursor' || tool === 'select') {
       e.preventDefault();
       // Clear prior selection unless user holds shift/ctrl
       if (!e.shiftKey && !e.ctrlKey && !e.metaKey) setSelectedIds(new Set());
@@ -246,7 +262,33 @@ export default function PDFViewer({
   }, [drawing, drawingPage, getRelativePos]);
 
   const handleMouseUp = useCallback((e: React.MouseEvent) => {
-    // Finish highlight drawing
+    // Select mode: finish marquee — select all highlights whose center lies inside
+    if (drawing && drawingPage !== null && tool === 'select') {
+      const r = { x: drawing.x, y: drawing.y, w: drawing.w, h: drawing.h };
+      if (r.w > 0.002 && r.h > 0.002) {
+        const pageHls = session.highlights[drawingPage] ?? [];
+        const hitIds = new Set<string>();
+        for (const h of pageHls) {
+          const cx = h.x + h.width  / 2;
+          const cy = h.y + h.height / 2;
+          if (cx >= r.x && cx <= r.x + r.w && cy >= r.y && cy <= r.y + r.h) {
+            hitIds.add(h.id);
+          }
+        }
+        setSelectedIds(prev => {
+          if (e.shiftKey || e.ctrlKey || e.metaKey) {
+            const next = new Set(prev);
+            hitIds.forEach(id => next.add(id));
+            return next;
+          }
+          return hitIds;
+        });
+      }
+      setDrawing(null); setDrawingPage(null);
+      return;
+    }
+
+    // Cursor mode: finish highlight drawing — open label picker
     if (drawing && drawingPage !== null) {
       if (drawing.w < 0.01 || drawing.h < 0.005) {
         setDrawing(null); setDrawingPage(null);
@@ -266,7 +308,7 @@ export default function PDFViewer({
       setDrawing(null);
       setDrawingPage(null);
     }
-  }, [drawing, drawingPage, getRelativePos]);
+  }, [drawing, drawingPage, tool, session.highlights, getRelativePos]);
 
   // -----------------------------------------------------------------------
   // Label selection — uses pickerPos.page
@@ -729,6 +771,8 @@ export default function PDFViewer({
         fineRotation={fineRotation}
         onFineRotationChange={setFineRotation}
         onStartPageChange={(sp) => onStartPageChange(session.id, sp)}
+        onDownloadOcr={handleDownloadOcr}
+        downloadingOcr={downloadingOcr}
       />
 
       {/* Search bar */}
@@ -863,10 +907,12 @@ export default function PDFViewer({
                   {/* Highlights for this page */}
                   <HighlightOverlay
                     highlights={pgHls}
-                    drawing={drawingPage === pageNum && drawing
+                    drawing={drawingPage === pageNum && drawing && tool !== 'select'
                       ? { x: drawing.x, y: drawing.y, w: drawing.w, h: drawing.h }
                       : null}
-                    selectionBox={null}
+                    selectionBox={drawingPage === pageNum && drawing && tool === 'select'
+                      ? { x: drawing.x, y: drawing.y, w: drawing.w, h: drawing.h }
+                      : null}
                     selectedIds={selectedIds}
                     onDelete={id => handleDeleteHighlight(id, pageNum)}
                     onReExtract={onReExtract}

@@ -35,6 +35,8 @@ const CONFIDENCE_PCT: Record<string, number> = {
 export default function HighlightOverlay({
   highlights, drawing, selectionBox, selectedIds, onDelete, onMove, onResize, onSelectToggle, tool,
 }: Props) {
+  // Boxes are interactive (clickable / movable / resizable) in both cursor and select modes
+  const canInteract = tool === 'cursor' || tool === 'select';
   // Track which highlight is being dragged, plus preview position and pointer offset
   const [dragging, setDragging] = useState<{
     id: string;
@@ -170,7 +172,7 @@ export default function HighlightOverlay({
   }, [dragging, onMove]);
 
   const handleBoxMouseDown = (e: React.MouseEvent, h: Highlight) => {
-    if (tool !== 'cursor' || !onMove) return;
+    if (!canInteract || !onMove) return;
     // Don't start drag when clicking a button inside
     if ((e.target as HTMLElement).closest('button')) return;
     e.stopPropagation();
@@ -250,7 +252,7 @@ export default function HighlightOverlay({
         return (
           <div
             key={h.id}
-            className={`absolute group ${tool === 'cursor' ? 'pointer-events-auto' : 'pointer-events-none'}`}
+            className={`absolute group ${canInteract ? 'pointer-events-auto' : 'pointer-events-none'}`}
             style={{
               left:            `${posX * 100}%`,
               top:             `${posY * 100}%`,
@@ -261,7 +263,7 @@ export default function HighlightOverlay({
               borderRadius:    3,
               zIndex:          isDragging ? 40 : isSelected ? 15 : 10,
               opacity:         h.isAutoExtracted && h.wasOcr ? 0.75 : 1,
-              cursor:          tool === 'cursor' && onMove ? (isDragging ? 'grabbing' : 'move') : 'default',
+              cursor:          canInteract && onMove ? (isDragging ? 'grabbing' : 'move') : 'default',
               transition:      isDragging ? 'none' : 'box-shadow 0.15s ease',
               boxShadow:       isDragging
                 ? `0 0 0 2px ${cfg.color}, 0 4px 12px rgba(0,0,0,0.2)`
@@ -304,7 +306,7 @@ export default function HighlightOverlay({
                 cursor; 4 corner squares allow diagonal resize. Revealed
                 via group-hover (parent has `group`) and kept visible
                 while a resize drag is in progress. */}
-            {tool === 'cursor' && onResize && (() => {
+            {canInteract && onResize && (() => {
               const cornerSize = 10;
               const edgeThick  = 8;
               // Handles inherit pointer-events from the wrapper, so they're
@@ -356,7 +358,7 @@ export default function HighlightOverlay({
             })()}
 
             {/* Hover action button — Delete only */}
-            {tool === 'cursor' && (
+            {canInteract && (
               <div
                 className="absolute right-0 flex gap-0.5
                            opacity-0 group-hover:opacity-100 transition-all duration-200 z-30"
