@@ -249,41 +249,89 @@ export async function fetchConvertedPdf(sessionId: string, originalName: string)
   }
 }
 
-// Download the OCR'd / searchable version of the session's PDF.
-// Tries the OCR-specific endpoint first, falls back to the stored session PDF.
-export async function downloadOcrPdf(sessionId: string, originalName: string): Promise<void> {
-  const stem = originalName.replace(/\.(docx?|pdf)$/i, '') || sessionId;
-  const outName = `${stem}_ocr.pdf`;
-
-  // Try endpoints in order — backend returns OCR'd PDF with text layer
+// Fetch the OCR'd PDF blob for a session (tries multiple endpoints).
+// Returns null if the backend has no OCR PDF for this session.
+export async function fetchOcrPdfBlob(sessionId: string): Promise<Blob | null> {
   const endpoints = [
     `${BACKEND_URL}/api/utility/session/${sessionId}/ocr-pdf`,
     `${BACKEND_URL}/api/utility/session/${sessionId}/searchable-pdf`,
     `${BACKEND_URL}/api/utility/session/${sessionId}/pdf`,
   ];
-
-  let blob: Blob | null = null;
   for (const url of endpoints) {
     try {
       const res = await fetch(url);
       if (res.ok) {
         const b = await res.blob();
-        if (b.size > 0 && b.type.includes('pdf')) { blob = b; break; }
+        if (b.size > 0 && b.type.includes('pdf')) return b;
       }
     } catch { /* try next */ }
   }
+  return null;
+}
 
-  if (!blob) throw new Error('OCR PDF not available from backend');
-
-  // Trigger browser download
+function triggerDownload(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = outName;
+  a.download = filename;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
+}
+
+// Download the OCR'd / searchable version of the session's PDF.
+export async function downloadOcrPdf(sessionId: string, originalName: string): Promise<void> {
+  const blob = await fetchOcrPdfBlob(sessionId);
+  if (!blob) throw new Error('OCR PDF not available from backend');
+  const stem = originalName.replace(/\.(docx?|pdf)$/i, '') || sessionId;
+  triggerDownload(blob, `${stem}_ocr.pdf`);
+}
+
+// Batch download all OCR'd PDFs as a single zip file.
+// `sessions` should be the list of sessions to include; returns the number
+// of PDFs successfully added to the zip (may be less than input if backend
+// lacks some OCR PDFs).
+export async function downloadAllOcrPdfsAsZip(
+  sessions: { id: string; filename: string }[],
+): Promise<{ added: number; missing: string[] }> {
+  if (sessions.length === 0) return { added: 0, missing: [] };
+
+  // Dynamic import keeps jszip out of the initial bundle
+  const JSZip = (await import('jszip')).default;
+  const zip = new JSZip();
+  const missing: string[] = [];
+  let added = 0;
+  const usedNames = new Set<string>();
+
+  // De-duplicate filenames (two uploads of the same name)
+  const uniqueName = (stem: string): string => {
+    let name = `${stem}_ocr.pdf`;
+    let i = 2;
+    while (usedNames.has(name)) name = `${stem}_ocr (${i++}).pdf`;
+    usedNames.add(name);
+    return name;
+  };
+
+  // Fetch in parallel for speed
+  const results = await Promise.all(sessions.map(async s => {
+    const blob = await fetchOcrPdfBlob(s.id);
+    return { session: s, blob };
+  }));
+
+  for (const { session, blob } of results) {
+    if (!blob) { missing.push(session.filename); continue; }
+    const stem = session.filename.replace(/\.(docx?|pdf)$/i, '') || session.id;
+    zip.file(uniqueName(stem), blob);
+    added++;
+  }
+
+  if (added === 0) throw new Error('No OCR PDFs available to download');
+
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-');
+  const zipBlob = await zip.generateAsync({ type: 'blob' });
+  triggerDownload(zipBlob, `Pexl_OCR_PDFs_${stamp}.zip`);
+  return { added, missing };
 }
 
 // Map backend conversion-error details to friendly user-facing messages.

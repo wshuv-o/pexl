@@ -4,7 +4,7 @@ import { toast } from 'sonner';
 import {
   Upload, ChevronLeft, ChevronRight,
   AlertTriangle, FileSearch, X, ShieldCheck, LogOut, Landmark,
-  RotateCw, Eraser,
+  RotateCw, Eraser, DownloadCloud, Loader2,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import UploadZone from '@/components/UploadZone';
@@ -20,7 +20,7 @@ import { readSourceExcel, type SourceExcel } from '@/lib/automap/excel-reader';
 import { buildInitialMappings, type HeaderToField } from '@/lib/automap/header-mapping';
 import { fillAndDownloadSourceExcel } from '@/lib/automap/excel-writer';
 import { DOCUMENT_TYPES } from '@/types/utilscraper';
-import { processFile, extractRegions } from '@/lib/api';
+import { processFile, extractRegions, downloadAllOcrPdfsAsZip } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
 
 export default function Index() {
@@ -40,6 +40,7 @@ export default function Index() {
   const [showExcel, setShowExcel]               = useState(false);
   const [excelWidth, setExcelWidth]             = useState(480); // px, draggable
   const [backendDown, setBackendDown]           = useState(false);
+  const [zippingOcr, setZippingOcr]             = useState(false);
   const [navCollapsed, setNavCollapsed]         = useState(false);
   const [pendingDocType, setPendingDocType]     = useState<DocumentType>('utility_bill');
   const [dragTabId, setDragTabId]               = useState<string | null>(null);
@@ -567,6 +568,33 @@ export default function Index() {
             </div>
           )}
           <div className="ml-auto flex items-center gap-2">
+            <button
+              onClick={async () => {
+                const ready = sessions.filter(s => s.status === 'ready' || s.status === 'extracted');
+                if (ready.length === 0) { toast('No PDFs ready to download yet', { icon: 'ℹ️' }); return; }
+                setZippingOcr(true);
+                try {
+                  const { added, missing } = await downloadAllOcrPdfsAsZip(
+                    ready.map(s => ({ id: s.id, filename: s.filename }))
+                  );
+                  toast.success(`Downloaded ${added} OCR'd PDF${added !== 1 ? 's' : ''} as zip`);
+                  if (missing.length > 0) toast.warning(`${missing.length} PDF${missing.length !== 1 ? 's' : ''} missing from backend`);
+                } catch (err: any) {
+                  toast.error(err?.message || 'Zip download failed');
+                }
+                setZippingOcr(false);
+              }}
+              disabled={zippingOcr || sessions.length === 0}
+              className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground
+                         transition-all duration-200 px-2 py-1.5 rounded-lg hover:bg-muted
+                         disabled:opacity-40 disabled:cursor-not-allowed"
+              title="Download all OCR'd PDFs as a zip"
+            >
+              {zippingOcr
+                ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                : <DownloadCloud className="w-3.5 h-3.5" />}
+              <span className="hidden sm:inline">Download OCR</span>
+            </button>
             <button
               onClick={() => {
                 if (sessions.length === 0) return;
