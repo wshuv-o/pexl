@@ -374,21 +374,24 @@ export async function processFile(
       if (res.ok) {
         const data = await res.json();
 
-        // For Word uploads the browser holds only the .docx/.doc blob,
-        // which react-pdf can't render. Pull the converted PDF bytes
-        // back from the backend so the viewer has something to show.
+        // Always pull the backend's OCR'd / unlocked PDF back so the viewer
+        // renders the version with the text layer AND without copy restrictions.
+        // For Word uploads this is the only viewable copy; for regular PDFs it
+        // replaces the original (which may have owner-restricted copying).
         let convertedPdf: File | undefined;
-        if (wordDoc) {
-          onProgress(2, 'Fetching converted PDF...');
-          const pdf = await fetchConvertedPdf(data.session_id, file.name);
-          if (pdf) convertedPdf = pdf;
-          else {
-            throw new Error(
-              'Backend accepted the Word document but did not expose the converted PDF. '
-              + 'Ask ops to implement GET /api/utility/session/{session_id}/pdf.',
-            );
-          }
+        onProgress(2, wordDoc ? 'Fetching converted PDF...' : 'Fetching OCR’d PDF...');
+        const pdf = await fetchConvertedPdf(data.session_id, file.name);
+        if (pdf) {
+          convertedPdf = pdf;
+        } else if (wordDoc) {
+          // Word docs have no browser-renderable fallback — this must succeed.
+          throw new Error(
+            'Backend accepted the Word document but did not expose the converted PDF. '
+            + 'Ask ops to implement GET /api/utility/session/{session_id}/pdf.',
+          );
         }
+        // For regular PDFs we just keep the original when the backend doesn't
+        // expose the endpoint — the viewer still works, just without unlock.
 
         onProgress(3, `Ready — ${data.ocr_pages_count ?? 0} pages OCR'd`);
         return {
