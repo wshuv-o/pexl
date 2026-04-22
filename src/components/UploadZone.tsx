@@ -59,7 +59,17 @@ export default function UploadZone({
       if (entry.isFile) {
         const fileEntry = entry as FileSystemFileEntry;
         return new Promise<File[]>(resolve => {
-          fileEntry.file(f => resolve(isSupportedDoc(f) ? [f] : []), () => resolve([]));
+          fileEntry.file(f => {
+            if (!isSupportedDoc(f)) { resolve([]); return; }
+            // Attach the full relative path ("/TopFolder/sub/file.pdf" → "TopFolder/sub/file.pdf")
+            // so the session can show a multi-segment folder path in the Folder column.
+            // File.webkitRelativePath is read-only, so we use a custom property.
+            const rel = entry.fullPath.replace(/^\//, '');
+            try {
+              Object.defineProperty(f, '__relativePath', { value: rel, configurable: true });
+            } catch { /* ignore — fall back to filename only */ }
+            resolve([f]);
+          }, () => resolve([]));
         });
       }
       if (entry.isDirectory) {

@@ -117,11 +117,19 @@ export default function Index() {
     for (let i = 0; i < pendingFiles.length; i++) {
       const file = pendingFiles[i];
       const tempId = `temp-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-      // webkitRelativePath is set when the user uploads a folder — format is
-      // "TopFolder/subdir/file.pdf". Take the first segment as the folder name.
-      const relPath = (file as File & { webkitRelativePath?: string }).webkitRelativePath;
+      // Browsers don't expose absolute filesystem paths (e.g. "C:\Users\...")
+      // for security. The fullest path available is relative to whatever the
+      // user selected:
+      //   - folder picker → file.webkitRelativePath = "TopFolder/sub/file.pdf"
+      //   - folder drag-drop → file.__relativePath = "TopFolder/sub/file.pdf"
+      //     (set by UploadZone during the directory walk)
+      // We join all segments except the filename with backslashes so it reads
+      // like a Windows path, e.g. "Statement 2\4.9.2026".
+      const relPath =
+        (file as File & { __relativePath?: string }).__relativePath
+        || (file as File & { webkitRelativePath?: string }).webkitRelativePath;
       const folderName = relPath && relPath.includes('/')
-        ? relPath.split('/')[0]
+        ? relPath.split('/').slice(0, -1).join('\\')
         : undefined;
       setSessions(prev => [...prev, {
         id: tempId, filename: file.name, file, folderName,
