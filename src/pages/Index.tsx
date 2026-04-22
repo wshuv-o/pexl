@@ -117,8 +117,14 @@ export default function Index() {
     for (let i = 0; i < pendingFiles.length; i++) {
       const file = pendingFiles[i];
       const tempId = `temp-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      // webkitRelativePath is set when the user uploads a folder — format is
+      // "TopFolder/subdir/file.pdf". Take the first segment as the folder name.
+      const relPath = (file as File & { webkitRelativePath?: string }).webkitRelativePath;
+      const folderName = relPath && relPath.includes('/')
+        ? relPath.split('/')[0]
+        : undefined;
       setSessions(prev => [...prev, {
-        id: tempId, filename: file.name, file,
+        id: tempId, filename: file.name, file, folderName,
         docType: pendingDocType,
         total_pages: 0, pages: [], status: 'processing',
         highlights: {}, extractedData: [],
@@ -231,7 +237,7 @@ export default function Index() {
           .map(h => ({
             page: h.page, field: h.field, value: h.extractedValue ?? null,
             confidence: h.confidence ?? 'low', wasOcr: h.wasOcr ?? false,
-            filename: sess.filename, sessionId: sess.id,
+            filename: sess.filename, folderName: sess.folderName, sessionId: sess.id,
           }));
 
         setSessions(prev => prev.map(s => s.id === sess.id
@@ -287,7 +293,11 @@ export default function Index() {
             ? { ...h, extractedValue: result.value, confidence: result.confidence, wasOcr: result.wasOcr } : h);
         const allResults: ExtractedRow[] = Object.values(hls).flat()
           .filter(h => h.extractedValue !== undefined)
-          .map(h => ({ page: h.page, field: h.field, value: h.extractedValue ?? null, confidence: h.confidence ?? 'low', wasOcr: h.wasOcr ?? false }));
+          .map(h => ({
+            page: h.page, field: h.field, value: h.extractedValue ?? null,
+            confidence: h.confidence ?? 'low', wasOcr: h.wasOcr ?? false,
+            filename: s.filename, folderName: s.folderName, sessionId: s.id,
+          }));
         return { ...s, highlights: hls, extractedData: allResults };
       }));
       if (result.value) toast.success(`Re-extracted: ${result.value}`);

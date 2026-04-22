@@ -18,6 +18,7 @@ export interface PDFSession {
   id: string;
   filename: string;
   file: File | undefined;   // undefined when session is restored without original File object
+  folderName?: string;      // top-level folder name when uploaded via folder picker
   docType: DocumentType;
   total_pages: number;
   pages: PageInfo[];
@@ -154,6 +155,7 @@ export interface ExtractedRow {
   wasOcr: boolean;
   edited?: boolean;
   filename?: string;     // set when combining data from multiple PDFs
+  folderName?: string;   // top-level folder name from the upload (if uploaded via folder picker)
   sessionId?: string;    // which session this row belongs to
 }
 

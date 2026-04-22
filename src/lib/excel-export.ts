@@ -329,20 +329,24 @@ function buildLeaseSheet(fileMap: Map<string, ExtractedRow[]>): XLSX.WorkSheet {
 }
 
 // ---------------------------------------------------------------------------
-// Build a stacked-tables sheet — one table per PDF on a single sheet.
-// Used for appraisal exports.
+// Build the appraisal sheet — single unified table, one row per PDF.
+//
+// Layout:
+//   PDF # | Folder | File Name | Field1 | Field2 | … | [extras]
+//
+// Rules:
+//   - One row per PDF (all pages merged; first non-empty value wins)
+//   - Columns where every row is empty are hidden
+//   - No property_name grouping / no stacked tables
 // ---------------------------------------------------------------------------
-function buildStackedTablesSheet(
-  fileMap: Map<string, ExtractedRow[]>,
-  docType: DocumentType,
-  fileLabelBg: string,
-): XLSX.WorkSheet {
+function buildAppraisalSheet(fileMap: Map<string, ExtractedRow[]>): XLSX.WorkSheet {
+  const docType: DocumentType = 'appraisal';
   const headerColor = HEADER_COLORS[docType];
 
-  // Field columns for this doc type (excluding 'custom')
+  // Declared appraisal fields (in order), excluding 'custom'
   const fieldDefs = getFieldLabelsForType(docType).filter(f => f.value !== 'custom');
 
-  // Collect any custom fields used across all files
+  // Collect any custom fields used across files, preserving first-appearance order
   const knownFields = new Set(fieldDefs.map(f => f.value as string));
   const customFields: string[] = [];
   for (const rows of fileMap.values()) {
@@ -353,10 +357,41 @@ function buildStackedTablesSheet(
     }
   }
 
-  const allColumns = [
+  const fieldColumns = [
     ...fieldDefs.map(f => ({ key: f.value, label: f.label })),
     ...customFields.map(f => ({ key: f, label: f })),
   ];
+
+  // Flatten each PDF into a single value-per-field map (first non-empty wins)
+  type PdfRow = {
+    pdfNum: number;
+    folder: string;
+    fileName: string;
+    values: Record<string, string>;
+  };
+  const pdfRows: PdfRow[] = [];
+  let pdfNum = 0;
+  for (const [filename, rows] of fileMap.entries()) {
+    pdfNum++;
+    const values: Record<string, string> = {};
+    let folder = '';
+    for (const row of rows) {
+      if (row.folderName && !folder) folder = row.folderName;
+      if (!row.value) continue;
+      if (!values[row.field]) values[row.field] = row.value;
+    }
+    pdfRows.push({
+      pdfNum,
+      folder,
+      fileName: filename.replace(/\.(pdf|docx?)$/i, ''),
+      values,
+    });
+  }
+
+  // Hide field columns that are entirely empty across all PDFs
+  const visibleColumns = fieldColumns.filter(col =>
+    pdfRows.some(r => r.values[col.key] && r.values[col.key].trim() !== '')
+  );
 
   const wsData: any[][] = [];
   const styles: { row: number; col: number; style: any }[] = [];
@@ -364,79 +399,46 @@ function buildStackedTablesSheet(
   const push = (cells: any[]) => { wsData.push(cells); return ri++; };
   const sc = (r: number, c: number, s: any) => styles.push({ row: r, col: c, style: s });
 
-  const totalCols = 2 + allColumns.length; // file_name + page + fields
+  // Header row
+  const headerCells = ['PDF #', 'Folder', 'File Name', ...visibleColumns.map(c => c.label)];
+  const r0 = push(headerCells);
+  for (let c = 0; c < headerCells.length; c++) {
+    sc(r0, c, hdr(headerColor.bg, headerColor.font));
+  }
 
-  let first = true;
-  for (const [filename, rows] of fileMap.entries()) {
-    if (!first) {
-      // Three blank separator rows between tables
-      wsData.push([]);
-      wsData.push([]);
-      wsData.push([]);
-      ri += 3;
-    }
-    first = false;
-
-    const cleanName = filename.replace(/\.(pdf|docx?)$/i, '');
-
-    // ── File header row (light tinted color) ──────────────────────────────
-    const fileRow = [`File: ${cleanName}`, ...Array(totalCols - 1).fill('')];
-    const fr = push(fileRow);
-    for (let c = 0; c < totalCols; c++) {
-      sc(fr, c, cell(fileLabelBg, true, 'left', 10));
-    }
-
-    // ── Column header row (dark colored) ──────────────────────────────────
-    const headerCells = ['file_name', 'page', ...allColumns.map(c => c.key)];
-    const hr = push(headerCells);
-    for (let c = 0; c < totalCols; c++) {
-      sc(hr, c, hdr(headerColor.bg, headerColor.font));
-    }
-
-    // ── Group rows by page (preserving first-appearance order) ────────────
-    const byPage = new Map<number, Record<string, string[]>>();
-    const pageOrder: number[] = [];
-    for (const row of rows) {
-      if (!row.value) continue;
-      if (!byPage.has(row.page)) {
-        byPage.set(row.page, {});
-        pageOrder.push(row.page);
-      }
-      const pageMap = byPage.get(row.page)!;
-      if (!pageMap[row.field]) pageMap[row.field] = [];
-      pageMap[row.field].push(row.value);
-    }
-
-    // ── Data rows: one per page ───────────────────────────────────────────
-    for (const page of pageOrder) {
-      const pageMap = byPage.get(page)!;
-      const rowCells: any[] = [
-        cleanName,
-        page,
-        ...allColumns.map(col => {
-          const arr = pageMap[col.key] ?? [];
-          return arr.length > 0 ? arr[0] : '';
-        }),
-      ];
-      const r = push(rowCells);
-      sc(r, 0, cell(C.whiteBg, true, 'left',   10));
-      sc(r, 1, cell(C.whiteBg, true, 'center', 10));
-      for (let c = 2; c < totalCols; c++) {
-        sc(r, c, cell(C.whiteBg, false, 'left', 10));
-      }
+  // Data rows — one per PDF
+  for (const pr of pdfRows) {
+    const rowCells: any[] = [
+      pr.pdfNum,
+      pr.folder,
+      pr.fileName,
+      ...visibleColumns.map(col => pr.values[col.key] ?? ''),
+    ];
+    const r = push(rowCells);
+    sc(r, 0, cell(C.whiteBg, true,  'center', 10));  // PDF #
+    sc(r, 1, cell(C.whiteBg, false, 'left',   10));  // Folder
+    sc(r, 2, cell(C.whiteBg, true,  'left',   10));  // File Name
+    for (let c = 3; c < rowCells.length; c++) {
+      sc(r, c, cell(C.whiteBg, false, 'left', 10));
     }
   }
 
   const ws = XLSX.utils.aoa_to_sheet(wsData);
   applyStyles(ws, wsData, styles);
-  ws['!cols'] = [{ wch: 30 }, { wch: 8 }, ...allColumns.map(() => ({ wch: 22 }))];
+  ws['!cols'] = [
+    { wch: 7 },    // PDF #
+    { wch: 20 },   // Folder
+    { wch: 30 },   // File Name
+    ...visibleColumns.map(() => ({ wch: 22 })),
+  ];
+  ws['!freeze'] = { xSplit: 3, ySplit: 1 };
   return ws;
 }
 
 // ---------------------------------------------------------------------------
 // Main export
-//   - bank_statement → single combined sheet, file_name as first column
-//   - appraisal      → stacked tables, one per PDF
+//   - bank_statement → single combined sheet (see bank-excel-export.ts)
+//   - appraisal      → single unified table (PDF # | Folder | File Name | fields)
 //   - lease_contract → fixed "Lease" template (right-aligned), extras on left
 //   - other types    → one sheet per PDF
 // ---------------------------------------------------------------------------
@@ -470,8 +472,9 @@ export function exportToExcel(
     });
     return;
   } else if (overallType === 'appraisal') {
-    // One sheet, one table per PDF stacked vertically
-    const ws = buildStackedTablesSheet(fileMap, 'appraisal', 'E5D6F0'); // light purple
+    // Single unified table — one row per PDF, with PDF # / Folder / File Name
+    // as leading columns. Empty field columns are hidden.
+    const ws = buildAppraisalSheet(fileMap);
     XLSX.utils.book_append_sheet(wb, ws, 'Appraisals');
   } else if (overallType === 'lease_contract') {
     // Fixed "Lease" template — 10 core columns on the right, extras on
