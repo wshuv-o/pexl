@@ -1,10 +1,11 @@
-export type DocumentType = 'utility_bill' | 'bank_statement' | 'appraisal' | 'lease_contract';
+export type DocumentType = 'utility_bill' | 'bank_statement' | 'appraisal' | 'lease_contract' | 'tax';
 
 export const DOCUMENT_TYPES: { value: DocumentType; label: string; color: string }[] = [
   { value: 'utility_bill',   label: 'Utility Bill',    color: '#16a34a' },
   { value: 'bank_statement', label: 'Bank Statement',  color: '#2563eb' },
   { value: 'appraisal',       label: 'Appraisal',       color: '#9333ea' },
   { value: 'lease_contract',  label: 'Lease Contract',  color: '#d97706' },
+  { value: 'tax',             label: 'Tax',             color: '#dc2626' },
 ];
 
 export interface PageInfo {
@@ -81,6 +82,13 @@ export type FieldLabel =
   | 'monthly_discount'
   | 'other_discount'
   | 'other_discount_comment'
+  // Tax fields
+  | 'tax_year'
+  | 'tax_bill_date'
+  | 'tax_due_date'
+  | 'tax_authority'
+  | 'assessed_value'
+  | 'total_tax_due'
   | 'custom';
 
 export interface FieldLabelOption {
@@ -94,9 +102,9 @@ export interface FieldLabelOption {
 export const FIELD_LABELS: FieldLabelOption[] = [
   // ── Utility bill fields ───────────────────────────────────────────
   { value: 'provider_name',         label: 'Provider Name',       color: '#1d4ed8', bgColor: 'rgba(29,78,216,0.18)',   docTypes: ['utility_bill'] },
-  { value: 'property_name',         label: 'Property Name',       color: '#2563eb', bgColor: 'rgba(37,99,235,0.18)',   docTypes: ['utility_bill', 'bank_statement', 'appraisal'] },
-  { value: 'account_number',        label: 'Account Number',      color: '#0891b2', bgColor: 'rgba(8,145,178,0.18)',   docTypes: ['utility_bill', 'bank_statement'] },
-  { value: 'address',               label: 'Address',             color: '#0284c7', bgColor: 'rgba(2,132,199,0.18)',   docTypes: ['utility_bill', 'bank_statement'] },
+  { value: 'property_name',         label: 'Property Name',       color: '#2563eb', bgColor: 'rgba(37,99,235,0.18)',   docTypes: ['utility_bill', 'bank_statement', 'appraisal', 'tax'] },
+  { value: 'account_number',        label: 'Account Number',      color: '#0891b2', bgColor: 'rgba(8,145,178,0.18)',   docTypes: ['utility_bill', 'bank_statement', 'tax'] },
+  { value: 'address',               label: 'Address',             color: '#0284c7', bgColor: 'rgba(2,132,199,0.18)',   docTypes: ['utility_bill', 'bank_statement', 'tax'] },
   { value: 'billing_date',          label: 'Billing Date',        color: '#7c3aed', bgColor: 'rgba(124,58,237,0.18)',  docTypes: ['utility_bill'] },
   { value: 'total_gas_bill',        label: 'Total Gas',           color: '#dc2626', bgColor: 'rgba(220,38,38,0.18)',   docTypes: ['utility_bill'] },
   { value: 'total_electricity_bill',label: 'Total Electricity',   color: '#d97706', bgColor: 'rgba(217,119,6,0.18)',   docTypes: ['utility_bill'] },
@@ -131,8 +139,15 @@ export const FIELD_LABELS: FieldLabelOption[] = [
   { value: 'monthly_discount',          label: 'Monthly Discount $',       color: '#0ea5e9', bgColor: 'rgba(14,165,233,0.18)',  docTypes: ['lease_contract'] },
   { value: 'other_discount',            label: 'Other Discount $',         color: '#0d9488', bgColor: 'rgba(13,148,136,0.18)',  docTypes: ['lease_contract'] },
   { value: 'other_discount_comment',    label: 'Other Discount Comment',   color: '#65a30d', bgColor: 'rgba(101,163,13,0.18)', docTypes: ['lease_contract'] },
+  // ── Tax fields ────────────────────────────────────────────────────
+  { value: 'tax_year',        label: 'Tax Year',            color: '#7c3aed', bgColor: 'rgba(124,58,237,0.18)', docTypes: ['tax'] },
+  { value: 'tax_bill_date',   label: 'Tax Bill Date',       color: '#0ea5e9', bgColor: 'rgba(14,165,233,0.18)', docTypes: ['tax'] },
+  { value: 'tax_due_date',    label: 'Tax Due Date',        color: '#f97316', bgColor: 'rgba(249,115,22,0.18)', docTypes: ['tax'] },
+  { value: 'tax_authority',   label: 'Tax Authority',       color: '#1d4ed8', bgColor: 'rgba(29,78,216,0.18)',  docTypes: ['tax'] },
+  { value: 'assessed_value',  label: 'Assessed Value',      color: '#16a34a', bgColor: 'rgba(22,163,74,0.18)',  docTypes: ['tax'] },
+  { value: 'total_tax_due',   label: 'Total Tax Due',       color: '#dc2626', bgColor: 'rgba(220,38,38,0.18)',  docTypes: ['tax'] },
   // ── Fallback ──────────────────────────────────────────────────────
-  { value: 'custom',                label: 'Custom',              color: '#64748b', bgColor: 'rgba(100,116,139,0.18)', docTypes: ['utility_bill', 'bank_statement', 'appraisal', 'lease_contract'] },
+  { value: 'custom',                label: 'Custom',              color: '#64748b', bgColor: 'rgba(100,116,139,0.18)', docTypes: ['utility_bill', 'bank_statement', 'appraisal', 'lease_contract', 'tax'] },
 ];
 
 // Returns only the field labels relevant to a document type

@@ -36,7 +36,7 @@ export default function PDFCardList({ sessions, expandedId, onToggle, onStartPag
 
   return (
     <div className="space-y-1.5">
-      {sessions.map(s => {
+      {sessions.map((s, idx) => {
         const expanded  = expandedId === s.id;
         const isLoading = s.status === 'uploading' || s.status === 'processing';
 
@@ -62,7 +62,10 @@ export default function PDFCardList({ sessions, expandedId, onToggle, onStartPag
               </div>
 
               <div className="flex-1 min-w-0">
-                <p className="text-xs font-semibold truncate text-foreground">{s.filename}</p>
+                <p className="text-xs font-semibold truncate text-foreground">
+                  <span className="text-muted-foreground font-normal mr-1">{idx + 1}.</span>
+                  {s.filename}
+                </p>
                 <div className="mt-0.5 flex items-center gap-1.5 flex-wrap">
                   {(() => {
                     const dt = DOCUMENT_TYPES.find(d => d.value === s.docType);

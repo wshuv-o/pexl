@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { useState, useCallback, useEffect, useMemo } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { toast } from 'sonner';
 import {
   Upload, ChevronLeft, ChevronRight,
@@ -190,9 +190,145 @@ export default function Index() {
     setPendingFiles([]); setProcessing(false);
   }, [pendingFiles, pendingDocType, activeTabId]);
 
-  const handleHighlightsChange = useCallback((sessionId: string, highlights: Record<number, Highlight[]>) => {
-    setSessions(prev => prev.map(s => s.id === sessionId ? { ...s, highlights } : s));
+  // ── Undo / Redo / Cut-Paste for highlights ──────────────────────────────
+  // Per-session stacks of highlight-map snapshots. Max 10 entries each.
+  // Stored in refs so pushing doesn't cause a re-render (we only re-render
+  // when highlights actually get restored via setSessions).
+  const undoStacks = useRef<Record<string, Record<number, Highlight[]>[]>>({});
+  const redoStacks = useRef<Record<string, Record<number, Highlight[]>[]>>({});
+  const clipboard  = useRef<Highlight[] | null>(null);
+  // PDFViewer updates this with its currently-selected highlight IDs so
+  // Ctrl+X can cut them from the session.
+  const selectedHighlightIdsRef = useRef<Set<string>>(new Set());
+  const MAX_HISTORY = 10;
+
+  const cloneHighlights = (src: Record<number, Highlight[]>): Record<number, Highlight[]> => {
+    const out: Record<number, Highlight[]> = {};
+    for (const [k, v] of Object.entries(src)) out[Number(k)] = v.map(h => ({ ...h }));
+    return out;
+  };
+
+  const pushUndoSnapshot = useCallback((sessionId: string, prevHighlights: Record<number, Highlight[]>) => {
+    const stack = undoStacks.current[sessionId] ?? [];
+    stack.push(cloneHighlights(prevHighlights));
+    while (stack.length > MAX_HISTORY) stack.shift();
+    undoStacks.current[sessionId] = stack;
+    // Any new change invalidates the redo stack
+    redoStacks.current[sessionId] = [];
   }, []);
+
+  const handleHighlightsChange = useCallback((sessionId: string, highlights: Record<number, Highlight[]>) => {
+    setSessions(prev => {
+      const s = prev.find(ss => ss.id === sessionId);
+      if (s) pushUndoSnapshot(sessionId, s.highlights);
+      return prev.map(ss => ss.id === sessionId ? { ...ss, highlights } : ss);
+    });
+  }, [pushUndoSnapshot]);
+
+  const performUndo = useCallback(() => {
+    if (!activeTabId) return;
+    const stack = undoStacks.current[activeTabId] ?? [];
+    if (stack.length === 0) return;
+    const prevSnapshot = stack.pop()!;
+    setSessions(prev => prev.map(s => {
+      if (s.id !== activeTabId) return s;
+      // Push current state onto redo stack before replacing
+      const redo = redoStacks.current[activeTabId] ?? [];
+      redo.push(cloneHighlights(s.highlights));
+      while (redo.length > MAX_HISTORY) redo.shift();
+      redoStacks.current[activeTabId] = redo;
+      return { ...s, highlights: prevSnapshot };
+    }));
+  }, [activeTabId]);
+
+  const performRedo = useCallback(() => {
+    if (!activeTabId) return;
+    const stack = redoStacks.current[activeTabId] ?? [];
+    if (stack.length === 0) return;
+    const nextSnapshot = stack.pop()!;
+    setSessions(prev => prev.map(s => {
+      if (s.id !== activeTabId) return s;
+      const undo = undoStacks.current[activeTabId] ?? [];
+      undo.push(cloneHighlights(s.highlights));
+      while (undo.length > MAX_HISTORY) undo.shift();
+      undoStacks.current[activeTabId] = undo;
+      return { ...s, highlights: nextSnapshot };
+    }));
+  }, [activeTabId]);
+
+  // Ctrl+X — cut the highlights currently selected in the active PDFViewer.
+  // Removes them from the session and copies them to the in-memory clipboard.
+  // Does nothing if no highlights are selected.
+  const performCut = useCallback(() => {
+    if (!activeTabId) return;
+    const selected = selectedHighlightIdsRef.current;
+    if (selected.size === 0) return;
+    setSessions(prev => prev.map(s => {
+      if (s.id !== activeTabId) return s;
+      const cut: Highlight[] = [];
+      const remaining: Record<number, Highlight[]> = {};
+      for (const [pageStr, pageHls] of Object.entries(s.highlights)) {
+        const page = Number(pageStr);
+        const keep: Highlight[] = [];
+        for (const h of pageHls) {
+          if (selected.has(h.id)) cut.push({ ...h });
+          else keep.push(h);
+        }
+        if (keep.length > 0) remaining[page] = keep;
+      }
+      if (cut.length === 0) return s;
+      pushUndoSnapshot(s.id, s.highlights);
+      clipboard.current = cut;
+      return { ...s, highlights: remaining };
+    }));
+    toast.success(`Cut ${selected.size} highlight${selected.size !== 1 ? 's' : ''}`);
+  }, [activeTabId, pushUndoSnapshot]);
+
+  // Ctrl+V — paste the clipboard highlights onto the active session, keeping
+  // their original page numbers. New IDs are generated so re-paste creates
+  // new copies. Extracted values are cleared so they'll re-extract.
+  const performPaste = useCallback(() => {
+    if (!activeTabId || !clipboard.current || clipboard.current.length === 0) return;
+    setSessions(prev => prev.map(s => {
+      if (s.id !== activeTabId) return s;
+      pushUndoSnapshot(s.id, s.highlights);
+      const next = cloneHighlights(s.highlights);
+      for (const h of clipboard.current!) {
+        const page = h.page;
+        if (!next[page]) next[page] = [];
+        next[page].push({
+          ...h,
+          id: `hl-${Date.now()}-${page}-${Math.random().toString(36).slice(2, 6)}`,
+          extractedValue: undefined,
+          confidence: undefined,
+        });
+      }
+      return { ...s, highlights: next };
+    }));
+  }, [activeTabId, pushUndoSnapshot]);
+
+  // Global Ctrl+Z / Ctrl+Y / Ctrl+X / Ctrl+V keybinds. Skipped while user is
+  // typing in an input or contenteditable so built-in browser undo/cut/paste
+  // for form fields still works.
+  useEffect(() => {
+    const isEditable = (el: EventTarget | null): boolean => {
+      if (!(el instanceof HTMLElement)) return false;
+      const tag = el.tagName;
+      return tag === 'INPUT' || tag === 'TEXTAREA' || el.isContentEditable;
+    };
+    const handler = (e: KeyboardEvent) => {
+      const ctrl = e.ctrlKey || e.metaKey;
+      if (!ctrl) return;
+      if (isEditable(e.target)) return;
+      const key = e.key.toLowerCase();
+      if (key === 'z' && !e.shiftKey) { e.preventDefault(); performUndo(); }
+      else if (key === 'y' || (key === 'z' && e.shiftKey)) { e.preventDefault(); performRedo(); }
+      else if (key === 'x') { e.preventDefault(); performCut(); }
+      else if (key === 'v') { e.preventDefault(); performPaste(); }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [performUndo, performRedo, performCut, performPaste]);
 
   const handleStartPageChange = useCallback((sessionId: string, startPage: number) => {
     setSessions(prev => prev.map(s => s.id === sessionId ? { ...s, startPage } : s));
@@ -483,6 +619,7 @@ export default function Index() {
                     compact={hasUploaded || !!sourceExcel}
                     onFilesSelected={handleFilesSelected}
                     pendingFiles={pendingFiles}
+                    onFileRemove={(idx) => setPendingFiles(prev => prev.filter((_, i) => i !== idx))}
                     docType={pendingDocType}
                     onDocTypeChange={setPendingDocType}
                     onProcess={handleProcess}
@@ -752,6 +889,7 @@ export default function Index() {
                   scrollToPageTrigger={pageJump && pageJump.sessionId === activeSession.id ? pageJump : null}
                   customFields={customFields}
                   onCustomFieldAdd={handleAddCustomField}
+                  onSelectionChange={ids => { selectedHighlightIdsRef.current = ids; }}
                 />
               </div>
 

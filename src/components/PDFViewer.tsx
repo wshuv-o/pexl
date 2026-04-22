@@ -28,6 +28,9 @@ interface PDFViewerProps {
   // switches and shows up in every PDF's label picker).
   customFields: string[];
   onCustomFieldAdd: (name: string) => void;
+  // Reports which highlight IDs are currently selected so Index can act on
+  // them (Ctrl+X cut, etc.). Passing a Set — the parent stores it in a ref.
+  onSelectionChange?: (ids: Set<string>) => void;
 }
 
 export default function PDFViewer({
@@ -41,6 +44,7 @@ export default function PDFViewer({
   scrollToPageTrigger,
   customFields,
   onCustomFieldAdd,
+  onSelectionChange,
 }: PDFViewerProps) {
   const [currentPage, setCurrentPage]   = useState(session.startPage || 1);
   const [zoom, setZoom]                 = useState<number | null>(null);
@@ -59,6 +63,11 @@ export default function PDFViewer({
 
   // Multi-select (click + shift/ctrl on boxes)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+
+  // Report selection upward so the parent (Index) can use it for Ctrl+X cut etc.
+  useEffect(() => {
+    onSelectionChange?.(selectedIds);
+  }, [selectedIds, onSelectionChange]);
 
   const [showFirstHint, setShowFirstHint] = useState(true);
   const [numPages, setNumPages]         = useState<number | null>(null);

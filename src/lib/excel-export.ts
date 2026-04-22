@@ -18,6 +18,7 @@ const HEADER_COLORS: Record<DocumentType, { bg: string; font: string }> = {
   bank_statement: { bg: '1F497D', font: 'FFFFFF' },  // dark navy blue
   appraisal:      { bg: '4B1F7D', font: 'FFFFFF' },  // dark purple
   lease_contract: { bg: '7D4B1F', font: 'FFFFFF' },  // dark orange/brown
+  tax:            { bg: '7D1F1F', font: 'FFFFFF' },  // dark red
 };
 
 function hdr(bg: string, font: string, bold = true, sz = 10): any {
@@ -125,11 +126,15 @@ function buildSheetForFile(
     ...customFields.map(f => ({ key: f, label: f })),
   ];
 
-  // Group rows by page, keeping ALL values per field (no merging)
+  // Group rows by page, keeping ALL values per field (no merging).
   // Preserve first-appearance order so caller-side sorting carries through.
+  // Also track which fields the user highlighted anywhere in this PDF so we
+  // can show their column even when extraction returned empty.
   const byPage = new Map<number, Record<string, string[]>>();
   const pageOrder: number[] = [];
+  const highlightedFields = new Set<string>();
   for (const row of rows) {
+    highlightedFields.add(row.field);
     if (!row.value) continue;
     if (!byPage.has(row.page)) {
       byPage.set(row.page, {});
@@ -142,14 +147,19 @@ function buildSheetForFile(
 
   const sortedPages = pageOrder;
 
+  // Show columns for fields the user highlighted anywhere in this PDF.
+  // Fields defined for the doc type but never highlighted are hidden —
+  // a highlighted field keeps its column even if extraction returned empty.
+  const visibleColumns = allColumns.filter(col => highlightedFields.has(col.key));
+
   const wsData: any[][] = [];
   const styles: { row: number; col: number; style: any }[] = [];
   let ri = 0;
   const push = (cells: any[]) => { wsData.push(cells); return ri++; };
   const sc = (r: number, c: number, s: any) => styles.push({ row: r, col: c, style: s });
 
-  // Header row: page | field keys
-  const headerCells = ['page', ...allColumns.map(c => c.key)];
+  // Header row: page | field keys (only visible columns)
+  const headerCells = ['page', ...visibleColumns.map(c => c.key)];
   const r0 = push(headerCells);
   for (let c = 0; c < headerCells.length; c++) {
     sc(r0, c, hdr(headerColor.bg, headerColor.font));
@@ -160,7 +170,7 @@ function buildSheetForFile(
     const pageMap = byPage.get(page)!;
     const rowCells: any[] = [
       page,
-      ...allColumns.map(col => {
+      ...visibleColumns.map(col => {
         const arr = pageMap[col.key] ?? [];
         return arr.length > 0 ? arr[0] : '';
       }),
@@ -174,7 +184,7 @@ function buildSheetForFile(
 
   const ws = XLSX.utils.aoa_to_sheet(wsData);
   applyStyles(ws, wsData, styles);
-  ws['!cols'] = [{ wch: 8 }, ...allColumns.map(() => ({ wch: 22 }))];
+  ws['!cols'] = [{ wch: 8 }, ...visibleColumns.map(() => ({ wch: 22 }))];
   ws['!freeze'] = { xSplit: 1, ySplit: 1 };
   return ws;
 }
@@ -233,11 +243,17 @@ function buildLeaseSheet(fileMap: Map<string, ExtractedRow[]>): XLSX.WorkSheet {
       formula: (r, L) => `IFERROR(${L.monthly_rent}${r}*${L.lease_term}${r}*12,0)` },
   ];
 
-  // Any field key not in `core` is treated as an "extra" and goes left of the template.
+  // Any field key not in `core` is treated as an "extra" and goes left of
+  // the template. Any non-core field that the user highlighted in at least
+  // one PDF gets a column — even if every extraction returned empty, the
+  // column still appears (it was explicitly selected by the user).
   const coreFields = new Set(core.map(c => c.field).filter((f): f is string => !!f));
   const extras = new Set<string>();
   for (const rows of fileMap.values()) {
-    for (const row of rows) if (!coreFields.has(row.field)) extras.add(row.field);
+    for (const row of rows) {
+      if (coreFields.has(row.field)) continue;
+      extras.add(row.field);
+    }
   }
   const extraFields = Array.from(extras);
 
@@ -329,18 +345,20 @@ function buildLeaseSheet(fileMap: Map<string, ExtractedRow[]>): XLSX.WorkSheet {
 }
 
 // ---------------------------------------------------------------------------
-// Build the appraisal sheet — single unified table, one row per PDF.
+// Build a unified single-table sheet — one row per PDF.
 //
 // Layout:
-//   PDF # | Folder | File Name | Field1 | Field2 | … | [extras]
+//   PDF # | Folder | File Name | Field1 | Field2 | … | [custom fields]
 //
 // Rules:
 //   - One row per PDF (all pages merged; first non-empty value wins)
 //   - Columns where every row is empty are hidden
 //   - No property_name grouping / no stacked tables
+//
+// Used for appraisal and tax. Can be used for any doc type that wants this
+// flat layout.
 // ---------------------------------------------------------------------------
-function buildAppraisalSheet(fileMap: Map<string, ExtractedRow[]>): XLSX.WorkSheet {
-  const docType: DocumentType = 'appraisal';
+function buildUnifiedSheet(fileMap: Map<string, ExtractedRow[]>, docType: DocumentType): XLSX.WorkSheet {
   const headerColor = HEADER_COLORS[docType];
 
   // Declared appraisal fields (in order), excluding 'custom'
@@ -363,6 +381,7 @@ function buildAppraisalSheet(fileMap: Map<string, ExtractedRow[]>): XLSX.WorkShe
   ];
 
   // Flatten each PDF into a single value-per-field map (first non-empty wins)
+  // and track which fields the user highlighted (regardless of extracted value).
   type PdfRow = {
     pdfNum: number;
     folder: string;
@@ -370,12 +389,14 @@ function buildAppraisalSheet(fileMap: Map<string, ExtractedRow[]>): XLSX.WorkShe
     values: Record<string, string>;
   };
   const pdfRows: PdfRow[] = [];
+  const highlightedFields = new Set<string>();  // fields that were highlighted in at least one PDF
   let pdfNum = 0;
   for (const [filename, rows] of fileMap.entries()) {
     pdfNum++;
     const values: Record<string, string> = {};
     let folder = '';
     for (const row of rows) {
+      highlightedFields.add(row.field);  // presence in rows → user highlighted this field
       if (row.folderName && !folder) folder = row.folderName;
       if (!row.value) continue;
       if (!values[row.field]) values[row.field] = row.value;
@@ -388,10 +409,10 @@ function buildAppraisalSheet(fileMap: Map<string, ExtractedRow[]>): XLSX.WorkShe
     });
   }
 
-  // Hide field columns that are entirely empty across all PDFs
-  const visibleColumns = fieldColumns.filter(col =>
-    pdfRows.some(r => r.values[col.key] && r.values[col.key].trim() !== '')
-  );
+  // Show columns for fields the user highlighted in at least one PDF.
+  // Fields defined for the doc type but never highlighted are hidden —
+  // even if the extraction returned empty, a highlighted field keeps its column.
+  const visibleColumns = fieldColumns.filter(col => highlightedFields.has(col.key));
 
   const wsData: any[][] = [];
   const styles: { row: number; col: number; style: any }[] = [];
@@ -474,8 +495,12 @@ export function exportToExcel(
   } else if (overallType === 'appraisal') {
     // Single unified table — one row per PDF, with PDF # / Folder / File Name
     // as leading columns. Empty field columns are hidden.
-    const ws = buildAppraisalSheet(fileMap);
+    const ws = buildUnifiedSheet(fileMap, 'appraisal');
     XLSX.utils.book_append_sheet(wb, ws, 'Appraisals');
+  } else if (overallType === 'tax') {
+    // Same unified layout as appraisal — one row per PDF, empty columns hidden.
+    const ws = buildUnifiedSheet(fileMap, 'tax');
+    XLSX.utils.book_append_sheet(wb, ws, 'Tax');
   } else if (overallType === 'lease_contract') {
     // Fixed "Lease" template — 10 core columns on the right, extras on
     // the left, computed Lease Term / Lease Value columns.

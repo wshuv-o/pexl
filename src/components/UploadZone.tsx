@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Upload, FileText, FolderOpen, ChevronDown } from 'lucide-react';
+import { Upload, FileText, FolderOpen, ChevronDown, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { DOCUMENT_TYPES, type DocumentType } from '@/types/utilscraper';
 
@@ -7,6 +7,7 @@ interface UploadZoneProps {
   compact: boolean;
   onFilesSelected: (files: File[]) => void;
   pendingFiles: File[];
+  onFileRemove: (index: number) => void;
   docType: DocumentType;
   onDocTypeChange: (t: DocumentType) => void;
   onProcess: () => void;
@@ -14,7 +15,7 @@ interface UploadZoneProps {
 }
 
 export default function UploadZone({
-  compact, onFilesSelected, pendingFiles, docType, onDocTypeChange, onProcess, processing,
+  compact, onFilesSelected, pendingFiles, onFileRemove, docType, onDocTypeChange, onProcess, processing,
 }: UploadZoneProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
@@ -199,9 +200,17 @@ export default function UploadZone({
           <>
             <ul className="space-y-1">
               {pendingFiles.map((file, i) => (
-                <li key={i} className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <li key={i} className="group flex items-center gap-1.5 text-xs text-muted-foreground">
                   <FileText className="w-3 h-3 shrink-0 text-primary" />
-                  <span className="truncate">{file.name}</span>
+                  <span className="truncate flex-1">{file.name}</span>
+                  <button
+                    className="p-0.5 rounded opacity-0 group-hover:opacity-100 hover:bg-destructive/10 hover:text-destructive transition-all duration-150 shrink-0"
+                    onClick={() => onFileRemove(i)}
+                    title="Remove from queue"
+                    aria-label={`Remove ${file.name}`}
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
                 </li>
               ))}
             </ul>
@@ -272,9 +281,17 @@ export default function UploadZone({
         <>
           <ul className="space-y-1">
             {pendingFiles.map((file, i) => (
-              <li key={i} className="flex items-center gap-1.5 text-xs text-muted-foreground bg-muted/50 rounded px-2 py-1">
+              <li key={i} className="group flex items-center gap-1.5 text-xs text-muted-foreground bg-muted/50 rounded px-2 py-1">
                 <FileText className="w-3 h-3 shrink-0 text-primary" />
-                <span className="truncate">{file.name}</span>
+                <span className="truncate flex-1">{file.name}</span>
+                <button
+                  className="p-0.5 rounded opacity-0 group-hover:opacity-100 hover:bg-destructive/10 hover:text-destructive transition-all duration-150 shrink-0"
+                  onClick={() => onFileRemove(i)}
+                  title="Remove from queue"
+                  aria-label={`Remove ${file.name}`}
+                >
+                  <X className="w-3 h-3" />
+                </button>
               </li>
             ))}
           </ul>
