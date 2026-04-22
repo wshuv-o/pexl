@@ -251,22 +251,92 @@ export async function fetchConvertedPdf(sessionId: string, originalName: string)
 
 // Fetch the OCR'd PDF blob for a session (tries multiple endpoints).
 // Returns null if the backend has no OCR PDF for this session.
+// Classify the reason fetchOcrPdfBlob failed so callers can show a useful
+// message (e.g. "backend unreachable" vs "session expired").
+export type OcrFetchReason = 'ok' | 'server-error' | 'not-found' | 'network' | 'not-pdf' | 'unknown';
+
+export interface OcrFetchResult {
+  blob: Blob | null;
+  reason: OcrFetchReason;
+  status?: number;   // last HTTP status we saw
+}
+
+// HTTP codes that tend to be transient (gateway timeout, bad gateway, service
+// unavailable, worker restart). Worth a short retry before giving up.
+const TRANSIENT_STATUSES = new Set([502, 503, 504, 522, 524]);
+
 export async function fetchOcrPdfBlob(sessionId: string): Promise<Blob | null> {
+  const result = await fetchOcrPdfBlobWithReason(sessionId);
+  return result.blob;
+}
+
+export async function fetchOcrPdfBlobWithReason(sessionId: string): Promise<OcrFetchResult> {
   const endpoints = [
     `${BACKEND_URL}/api/utility/session/${sessionId}/ocr-pdf`,
     `${BACKEND_URL}/api/utility/session/${sessionId}/searchable-pdf`,
     `${BACKEND_URL}/api/utility/session/${sessionId}/pdf`,
   ];
+
+  let lastStatus: number | undefined;
+  let lastReason: OcrFetchReason = 'unknown';
+
   for (const url of endpoints) {
-    try {
-      const res = await fetch(url);
-      if (res.ok) {
-        const b = await res.blob();
-        if (b.size > 0 && b.type.includes('pdf')) return b;
+    // Retry each endpoint up to 2 times on transient failures (502/503/504).
+    // Backoff: immediate → 600ms → (move to next endpoint)
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const res = await fetch(url, { signal: AbortSignal.timeout(60_000) });
+        lastStatus = res.status;
+        if (res.ok) {
+          const b = await res.blob();
+          if (b.size > 0 && b.type.includes('pdf')) {
+            return { blob: b, reason: 'ok', status: res.status };
+          }
+          lastReason = 'not-pdf';
+          break; // bad body, move to next endpoint
+        }
+        // Non-OK: retry on transient statuses, otherwise move on
+        if (TRANSIENT_STATUSES.has(res.status) && attempt === 0) {
+          lastReason = 'server-error';
+          await new Promise(r => setTimeout(r, 600));
+          continue;
+        }
+        if (res.status === 404) { lastReason = 'not-found'; break; }
+        if (res.status >= 500) { lastReason = 'server-error'; break; }
+        lastReason = 'unknown';
+        break;
+      } catch (err: unknown) {
+        // Network/CORS/abort (AbortSignal timeout).
+        lastReason = 'network';
+        lastStatus = undefined;
+        // Network failures can also be transient — retry once, then move on
+        if (attempt === 0) {
+          await new Promise(r => setTimeout(r, 600));
+          continue;
+        }
+        break;
       }
-    } catch { /* try next */ }
+    }
   }
-  return null;
+
+  return { blob: null, reason: lastReason, status: lastStatus };
+}
+
+// Turn a reason + status into a message the user can act on.
+export function ocrFetchErrorMessage(result: OcrFetchResult, filename?: string): string {
+  const name = filename ? ` for ${filename}` : '';
+  switch (result.reason) {
+    case 'server-error':
+      return `Backend error${result.status ? ` (${result.status})` : ''}${name} — the server couldn't build the OCR'd PDF. Try again in a moment.`;
+    case 'not-found':
+      return `Session expired${name} — please re-upload the PDF and try again.`;
+    case 'network':
+      return `Network error${name} — check your connection or the backend may be offline.`;
+    case 'not-pdf':
+      return `Backend returned an unexpected response${name}. The OCR endpoint may not be deployed yet.`;
+    default:
+      return `OCR PDF not available${name}.`;
+  }
 }
 
 function triggerDownload(blob: Blob, filename: string) {
@@ -282,10 +352,10 @@ function triggerDownload(blob: Blob, filename: string) {
 
 // Download the OCR'd / searchable version of the session's PDF.
 export async function downloadOcrPdf(sessionId: string, originalName: string): Promise<void> {
-  const blob = await fetchOcrPdfBlob(sessionId);
-  if (!blob) throw new Error('OCR PDF not available from backend');
+  const result = await fetchOcrPdfBlobWithReason(sessionId);
+  if (!result.blob) throw new Error(ocrFetchErrorMessage(result, originalName));
   const stem = originalName.replace(/\.(docx?|pdf)$/i, '') || sessionId;
-  triggerDownload(blob, `${stem}_ocr.pdf`);
+  triggerDownload(result.blob, `${stem}_ocr.pdf`);
 }
 
 // Batch download all OCR'd PDFs as a single zip file.
@@ -313,20 +383,33 @@ export async function downloadAllOcrPdfsAsZip(
     return name;
   };
 
-  // Fetch in parallel for speed
+  // Fetch in parallel for speed. Capture the per-file reason so we can
+  // report a useful aggregate error if the whole batch fails.
   const results = await Promise.all(sessions.map(async s => {
-    const blob = await fetchOcrPdfBlob(s.id);
-    return { session: s, blob };
+    const r = await fetchOcrPdfBlobWithReason(s.id);
+    return { session: s, ...r };
   }));
 
-  for (const { session, blob } of results) {
-    if (!blob) { missing.push(session.filename); continue; }
-    const stem = session.filename.replace(/\.(docx?|pdf)$/i, '') || session.id;
-    zip.file(uniqueName(stem), blob);
+  // Tally failure reasons so we can show a specific message when nothing
+  // came back (e.g. all 502s → "backend is down", not just "missing").
+  const reasonCounts: Record<OcrFetchReason, number> = {
+    ok: 0, 'server-error': 0, 'not-found': 0, network: 0, 'not-pdf': 0, unknown: 0,
+  };
+
+  for (const r of results) {
+    reasonCounts[r.reason]++;
+    if (!r.blob) { missing.push(r.session.filename); continue; }
+    const stem = r.session.filename.replace(/\.(docx?|pdf)$/i, '') || r.session.id;
+    zip.file(uniqueName(stem), r.blob);
     added++;
   }
 
-  if (added === 0) throw new Error('No OCR PDFs available to download');
+  if (added === 0) {
+    // Pick the most common non-ok reason to surface
+    const dominant = (['server-error', 'not-found', 'network', 'not-pdf', 'unknown'] as OcrFetchReason[])
+      .find(r => reasonCounts[r] > 0) ?? 'unknown';
+    throw new Error(ocrFetchErrorMessage({ blob: null, reason: dominant }));
+  }
 
   const stamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-');
   const zipBlob = await zip.generateAsync({ type: 'blob' });
