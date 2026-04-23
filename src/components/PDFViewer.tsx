@@ -31,6 +31,10 @@ interface PDFViewerProps {
   // Reports which highlight IDs are currently selected so Index can act on
   // them (Ctrl+X cut, etc.). Passing a Set — the parent stores it in a ref.
   onSelectionChange?: (ids: Set<string>) => void;
+  // Fired when the backend assigned a new session id (e.g. after a silent
+  // re-upload because the previous session expired). Index should update
+  // its session list so later calls don't hit 404 again.
+  onSessionRenewed?: (oldId: string, newId: string) => void;
 }
 
 export default function PDFViewer({
@@ -45,6 +49,7 @@ export default function PDFViewer({
   customFields,
   onCustomFieldAdd,
   onSelectionChange,
+  onSessionRenewed,
 }: PDFViewerProps) {
   const [currentPage, setCurrentPage]   = useState(session.startPage || 1);
   const [zoom, setZoom]                 = useState<number | null>(null);
@@ -81,18 +86,25 @@ export default function PDFViewer({
   const [pdfLoaded, setPdfLoaded]       = useState(false);
   const [downloadingOcr, setDownloadingOcr] = useState(false);
 
-  // Download the OCR'd / searchable version of this PDF from the backend
+  // Download the OCR'd / searchable version of this PDF from the backend.
+  // Pass the local File so api.ts can silently re-upload on 404 ("session
+  // expired") and retry without bothering the user. If a new session id was
+  // assigned during recovery, notify the parent so it can update its state
+  // — otherwise later actions would also 404 against the stale id.
   const handleDownloadOcr = useCallback(async () => {
     setDownloadingOcr(true);
     try {
-      await downloadOcrPdf(session.id, session.filename);
+      const { newSessionId } = await downloadOcrPdf(session.id, session.filename, session.file);
+      if (newSessionId && newSessionId !== session.id) {
+        onSessionRenewed?.(session.id, newSessionId);
+      }
       toast.success('OCR\'d PDF downloaded');
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Download failed';
       toast.error(msg);
     }
     setDownloadingOcr(false);
-  }, [session.id, session.filename]);
+  }, [session.id, session.filename, session.file, onSessionRenewed]);
 
   const pageRefs  = useRef<Record<number, HTMLDivElement | null>>({});
   const scrollRef = useRef<HTMLDivElement>(null);

@@ -279,9 +279,15 @@ export async function fetchOcrPdfBlobWithReason(sessionId: string): Promise<OcrF
 
   let lastStatus: number | undefined;
   let lastReason: OcrFetchReason = 'unknown';
+  // If the first endpoint returns a server-error or network failure, the
+  // rest live on the same host — skipping them avoids pounding a dead
+  // backend with a full 3×2 grid of failed requests.
+  let skipRemainingEndpoints = false;
 
   for (const url of endpoints) {
-    // Retry each endpoint up to 2 times on transient failures (502/503/504).
+    if (skipRemainingEndpoints) break;
+
+    // Retry each endpoint once on transient failures (502/503/504).
     // Backoff: immediate → 600ms → (move to next endpoint)
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
@@ -295,31 +301,71 @@ export async function fetchOcrPdfBlobWithReason(sessionId: string): Promise<OcrF
           lastReason = 'not-pdf';
           break; // bad body, move to next endpoint
         }
-        // Non-OK: retry on transient statuses, otherwise move on
+        // Non-OK: retry on transient statuses, otherwise move on.
         if (TRANSIENT_STATUSES.has(res.status) && attempt === 0) {
           lastReason = 'server-error';
           await new Promise(r => setTimeout(r, 600));
           continue;
         }
         if (res.status === 404) { lastReason = 'not-found'; break; }
-        if (res.status >= 500) { lastReason = 'server-error'; break; }
+        if (res.status >= 500) {
+          // Gateway/server dead — all three endpoints are on the same host
+          // so trying the others is pointless noise.
+          lastReason = 'server-error';
+          skipRemainingEndpoints = true;
+          break;
+        }
         lastReason = 'unknown';
         break;
       } catch (err: unknown) {
-        // Network/CORS/abort (AbortSignal timeout).
+        void err;
+        // Network/CORS/abort (AbortSignal timeout). Retry once, then bail
+        // from all remaining endpoints for the same reason as above.
         lastReason = 'network';
         lastStatus = undefined;
-        // Network failures can also be transient — retry once, then move on
         if (attempt === 0) {
           await new Promise(r => setTimeout(r, 600));
           continue;
         }
+        skipRemainingEndpoints = true;
         break;
       }
     }
   }
 
   return { blob: null, reason: lastReason, status: lastStatus };
+}
+
+// Fetch with automatic session-expired recovery: on 404 ("not-found") the
+// backend has forgotten the session (restart, TTL, eviction). If we still
+// have the original File locally, re-upload to get a new session and retry
+// the download. The new session_id is returned so callers can update their
+// state, avoiding another round-trip on subsequent actions.
+export async function fetchOcrPdfBlobWithRecovery(
+  sessionId: string,
+  file: File | undefined,
+): Promise<OcrFetchResult & { newSessionId?: string }> {
+  const first = await fetchOcrPdfBlobWithReason(sessionId);
+  if (first.blob || first.reason !== 'not-found' || !file) return first;
+
+  try {
+    const form = new FormData();
+    form.append('file', file);
+    form.append('provider', '');
+    const res = await fetch(`${BACKEND_URL}/api/utility/process`, {
+      method: 'POST',
+      body: form,
+    });
+    if (!res.ok) return first;
+    const data = await res.json();
+    const newId: string | undefined = data?.session_id;
+    if (!newId) return first;
+
+    const retry = await fetchOcrPdfBlobWithReason(newId);
+    return { ...retry, newSessionId: newId };
+  } catch {
+    return first;
+  }
 }
 
 // Turn a reason + status into a message the user can act on.
@@ -351,26 +397,37 @@ function triggerDownload(blob: Blob, filename: string) {
 }
 
 // Download the OCR'd / searchable version of the session's PDF.
-export async function downloadOcrPdf(sessionId: string, originalName: string): Promise<void> {
-  const result = await fetchOcrPdfBlobWithReason(sessionId);
+// If `file` is provided, we'll silently re-upload on 404 (session expired)
+// and retry the download. Returns a new session id when recovery happened,
+// so the caller can update its stored session id.
+export async function downloadOcrPdf(
+  sessionId: string,
+  originalName: string,
+  file?: File,
+): Promise<{ newSessionId?: string }> {
+  const result = await fetchOcrPdfBlobWithRecovery(sessionId, file);
   if (!result.blob) throw new Error(ocrFetchErrorMessage(result, originalName));
   const stem = originalName.replace(/\.(docx?|pdf)$/i, '') || sessionId;
   triggerDownload(result.blob, `${stem}_ocr.pdf`);
+  return { newSessionId: result.newSessionId };
 }
 
 // Batch download all OCR'd PDFs as a single zip file.
 // `sessions` should be the list of sessions to include; returns the number
 // of PDFs successfully added to the zip (may be less than input if backend
-// lacks some OCR PDFs).
+// lacks some OCR PDFs). If a session has an associated File, we auto-re-
+// upload on 404 and retry — `renewed` reports any new session ids so the
+// caller can update its state.
 export async function downloadAllOcrPdfsAsZip(
-  sessions: { id: string; filename: string }[],
-): Promise<{ added: number; missing: string[] }> {
-  if (sessions.length === 0) return { added: 0, missing: [] };
+  sessions: { id: string; filename: string; file?: File }[],
+): Promise<{ added: number; missing: string[]; renewed: { oldId: string; newId: string }[] }> {
+  if (sessions.length === 0) return { added: 0, missing: [], renewed: [] };
 
   // Dynamic import keeps jszip out of the initial bundle
   const JSZip = (await import('jszip')).default;
   const zip = new JSZip();
   const missing: string[] = [];
+  const renewed: { oldId: string; newId: string }[] = [];
   let added = 0;
   const usedNames = new Set<string>();
 
@@ -383,10 +440,11 @@ export async function downloadAllOcrPdfsAsZip(
     return name;
   };
 
-  // Fetch in parallel for speed. Capture the per-file reason so we can
-  // report a useful aggregate error if the whole batch fails.
+  // Fetch in parallel for speed. Use the recovery helper so sessions that
+  // the backend has forgotten get silently re-uploaded and retried — the
+  // user doesn't see a "session expired" error unless the File is also gone.
   const results = await Promise.all(sessions.map(async s => {
-    const r = await fetchOcrPdfBlobWithReason(s.id);
+    const r = await fetchOcrPdfBlobWithRecovery(s.id, s.file);
     return { session: s, ...r };
   }));
 
@@ -398,6 +456,9 @@ export async function downloadAllOcrPdfsAsZip(
 
   for (const r of results) {
     reasonCounts[r.reason]++;
+    if (r.newSessionId && r.newSessionId !== r.session.id) {
+      renewed.push({ oldId: r.session.id, newId: r.newSessionId });
+    }
     if (!r.blob) { missing.push(r.session.filename); continue; }
     const stem = r.session.filename.replace(/\.(docx?|pdf)$/i, '') || r.session.id;
     zip.file(uniqueName(stem), r.blob);
@@ -414,7 +475,7 @@ export async function downloadAllOcrPdfsAsZip(
   const stamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-');
   const zipBlob = await zip.generateAsync({ type: 'blob' });
   triggerDownload(zipBlob, `Pexl_OCR_PDFs_${stamp}.zip`);
-  return { added, missing };
+  return { added, missing, renewed };
 }
 
 // Map backend conversion-error details to friendly user-facing messages.

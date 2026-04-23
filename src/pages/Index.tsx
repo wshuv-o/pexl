@@ -729,9 +729,21 @@ export default function Index() {
                 if (ready.length === 0) { toast('No PDFs ready to download yet', { icon: 'ℹ️' }); return; }
                 setZippingOcr(true);
                 try {
-                  const { added, missing } = await downloadAllOcrPdfsAsZip(
-                    ready.map(s => ({ id: s.id, filename: s.filename }))
+                  const { added, missing, renewed } = await downloadAllOcrPdfsAsZip(
+                    // Pass each session's local File so the backend can be
+                    // transparently re-uploaded if the session has expired.
+                    ready.map(s => ({ id: s.id, filename: s.filename, file: s.file }))
                   );
+                  // Adopt any new session IDs the backend handed back so
+                  // subsequent actions (Extract, etc.) don't also 404.
+                  if (renewed.length > 0) {
+                    setSessions(prev => prev.map(s => {
+                      const swap = renewed.find(r => r.oldId === s.id);
+                      return swap ? { ...s, id: swap.newId } : s;
+                    }));
+                    setOpenTabs(prev => prev.map(t => renewed.find(r => r.oldId === t)?.newId ?? t));
+                    setActiveTabId(prev => (prev && renewed.find(r => r.oldId === prev)?.newId) ?? prev);
+                  }
                   toast.success(`Downloaded ${added} OCR'd PDF${added !== 1 ? 's' : ''} as zip`);
                   if (missing.length > 0) toast.warning(`${missing.length} PDF${missing.length !== 1 ? 's' : ''} missing from backend`);
                 } catch (err: any) {
@@ -890,6 +902,14 @@ export default function Index() {
                   customFields={customFields}
                   onCustomFieldAdd={handleAddCustomField}
                   onSelectionChange={ids => { selectedHighlightIdsRef.current = ids; }}
+                  onSessionRenewed={(oldId, newId) => {
+                    // Backend forgot this session and we silently re-uploaded.
+                    // Swap the id everywhere it's referenced so subsequent
+                    // actions (Extract, etc.) don't also hit 404.
+                    setSessions(prev => prev.map(s => s.id === oldId ? { ...s, id: newId } : s));
+                    setOpenTabs(prev => prev.map(t => t === oldId ? newId : t));
+                    setActiveTabId(prev => prev === oldId ? newId : prev);
+                  }}
                 />
               </div>
 
