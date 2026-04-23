@@ -7,6 +7,8 @@ import HighlightOverlay from './HighlightOverlay';
 import FieldLabelPicker from './FieldLabelPicker';
 import HighlightLegend from './HighlightLegend';
 import { downloadOcrPdf } from '@/lib/api';
+import { autoSearchFieldValues } from '@/lib/pdf-extract';
+import { getFieldLabelsForType } from '@/types/utilscraper';
 import { toast } from 'sonner';
 
 // Set worker unconditionally — pdf-extract.ts also sets this
@@ -85,6 +87,45 @@ export default function PDFViewer({
   const [activeMatchIdx, setActiveMatchIdx] = useState<number>(-1);
   const [pdfLoaded, setPdfLoaded]       = useState(false);
   const [downloadingOcr, setDownloadingOcr] = useState(false);
+  const [autoSearching,  setAutoSearching]  = useState(false);
+
+  // Auto-search: scan the PDF for each doc-type field's label and create
+  // highlights over the adjacent value text. Merges with existing highlights
+  // (doesn't overwrite user's manual work); skips fields that the user has
+  // already placed on the same page.
+  const handleAutoSearch = useCallback(async () => {
+    if (!session.file) { toast.error('PDF file not loaded'); return; }
+    setAutoSearching(true);
+    try {
+      const labels = getFieldLabelsForType(session.docType)
+        .filter(f => f.value !== 'custom')
+        .map(f => ({ fieldKey: f.value as string, label: f.label }));
+
+      const found = await autoSearchFieldValues(session.file, labels);
+      let addedCount = 0;
+
+      const merged: Record<number, Highlight[]> = { ...session.highlights };
+      for (const [pageStr, pageHls] of Object.entries(found)) {
+        const page = Number(pageStr);
+        const existing = merged[page] ?? [];
+        const existingFields = new Set(existing.map(h => h.field));
+        const fresh = pageHls.filter(h => !existingFields.has(h.field));
+        if (fresh.length === 0) continue;
+        merged[page] = [...existing, ...fresh];
+        addedCount += fresh.length;
+      }
+
+      if (addedCount === 0) {
+        toast('No new fields found to auto-highlight.', { icon: 'ℹ️' });
+      } else {
+        onHighlightsChange(session.id, merged);
+        toast.success(`Auto-highlighted ${addedCount} field${addedCount !== 1 ? 's' : ''}`);
+      }
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : 'Auto-search failed');
+    }
+    setAutoSearching(false);
+  }, [session.file, session.docType, session.id, session.highlights, onHighlightsChange]);
 
   // Download the OCR'd / searchable version of this PDF from the backend.
   // Pass the local File so api.ts can silently re-upload on 404 ("session
@@ -252,12 +293,12 @@ export default function PDFViewer({
     const pos = getRelativePos(e.clientX, e.clientY, el);
     if (!pos) return;
 
-    // Cursor mode: drag on empty space draws a new highlight.
-    // Select mode: drag on empty space draws a marquee selection rectangle.
-    // Both share the same `drawing` state — behavior diverges on mouseUp.
-    if (tool === 'cursor' || tool === 'select') {
+    // Cursor mode:      drag draws a new highlight (raw rect).
+    // Select mode:      drag draws a marquee selection rectangle.
+    // Text-select mode: drag draws a highlight that will snap to text bounds on mouseUp.
+    // All share the same `drawing` state — behavior diverges on mouseUp.
+    if (tool === 'cursor' || tool === 'select' || tool === 'text-select') {
       e.preventDefault();
-      // Clear prior selection unless user holds shift/ctrl
       if (!e.shiftKey && !e.ctrlKey && !e.metaKey) setSelectedIds(new Set());
       setDrawingPage(pageNum);
       setDrawing({ startX: pos.x, startY: pos.y, x: pos.x, y: pos.y, w: 0, h: 0 });
@@ -282,7 +323,66 @@ export default function PDFViewer({
     }
   }, [drawing, drawingPage, getRelativePos]);
 
-  const handleMouseUp = useCallback((e: React.MouseEvent) => {
+  // Shrink a normalized (0-1) rectangle to the tight bounding box of all
+  // pdfjs text items whose center falls within it. Returns the original
+  // rect if no items match or the PDF hasn't loaded yet.
+  const snapRectToText = useCallback(async (
+    page: number,
+    r: { x: number; y: number; w: number; h: number },
+  ): Promise<{ x: number; y: number; w: number; h: number }> => {
+    const doc = pdfDocRef.current;
+    if (!doc) return r;
+    try {
+      const p = await doc.getPage(page);
+      const content = await p.getTextContent();
+      const vp = p.getViewport({ scale: 1 });
+      const pageWidth = vp.width, pageHeight = vp.height;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const items = content.items as any[];
+
+      const rLeft   = r.x * pageWidth;
+      const rRight  = (r.x + r.w) * pageWidth;
+      const rTop    = r.y * pageHeight;
+      const rBottom = (r.y + r.h) * pageHeight;
+
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      let matches = 0;
+      for (const item of items) {
+        if (!item.str || !item.transform) continue;
+        const str = item.str as string;
+        if (!str.trim()) continue;
+        const itemX = item.transform[4];
+        const itemH = item.height || Math.abs(item.transform[3]) || 12;
+        const itemW = item.width || str.length * 6;
+        const itemTop = pageHeight - item.transform[5];
+        const itemBottom = itemTop + itemH;
+        const itemRight = itemX + itemW;
+        const cx = (itemX + itemRight) / 2;
+        const cy = (itemTop + itemBottom) / 2;
+        if (cx < rLeft || cx > rRight || cy < rTop || cy > rBottom) continue;
+        matches++;
+        if (itemX      < minX) minX = itemX;
+        if (itemTop    < minY) minY = itemTop;
+        if (itemRight  > maxX) maxX = itemRight;
+        if (itemBottom > maxY) maxY = itemBottom;
+      }
+
+      if (matches === 0) return r;
+      const pad = 2;
+      const tightX = Math.max(0, minX - pad);
+      const tightY = Math.max(0, minY - pad);
+      const tightR = Math.min(pageWidth,  maxX + pad);
+      const tightB = Math.min(pageHeight, maxY + pad);
+      return {
+        x: tightX / pageWidth,
+        y: tightY / pageHeight,
+        w: (tightR - tightX) / pageWidth,
+        h: (tightB - tightY) / pageHeight,
+      };
+    } catch { return r; }
+  }, []);
+
+  const handleMouseUp = useCallback(async (e: React.MouseEvent) => {
     // Select mode: finish marquee — select all highlights whose center lies inside
     if (drawing && drawingPage !== null && tool === 'select') {
       const r = { x: drawing.x, y: drawing.y, w: drawing.w, h: drawing.h };
@@ -309,7 +409,9 @@ export default function PDFViewer({
       return;
     }
 
-    // Cursor mode: finish highlight drawing — open label picker
+    // Cursor + text-select mode: finish highlight drawing — open label picker.
+    // In text-select mode we snap the box to the tight bounding box of text
+    // items contained within it, so the highlight hugs the text exactly.
     if (drawing && drawingPage !== null) {
       if (drawing.w < 0.01 || drawing.h < 0.005) {
         setDrawing(null); setDrawingPage(null);
@@ -320,16 +422,22 @@ export default function PDFViewer({
       const pos = getRelativePos(e.clientX, e.clientY, el);
       const px  = pos?.px ?? e.clientX;
       const py  = pos?.py ?? e.clientY;
+
+      let rect = { x: drawing.x, y: drawing.y, w: drawing.w, h: drawing.h };
+      if (tool === 'text-select') {
+        rect = await snapRectToText(drawingPage, rect);
+      }
+
       setPickerPos({
         x:    Math.min(px, (el.offsetWidth  ?? 600) - 160),
         y:    Math.min(py, (el.offsetHeight ?? 800) - 200),
-        rect: { x: drawing.x, y: drawing.y, w: drawing.w, h: drawing.h },
+        rect,
         page: drawingPage,
       });
       setDrawing(null);
       setDrawingPage(null);
     }
-  }, [drawing, drawingPage, tool, session.highlights, getRelativePos]);
+  }, [drawing, drawingPage, tool, session.highlights, getRelativePos, snapRectToText]);
 
   // -----------------------------------------------------------------------
   // Label selection — uses pickerPos.page
@@ -804,6 +912,8 @@ export default function PDFViewer({
         onStartPageChange={(sp) => onStartPageChange(session.id, sp)}
         onDownloadOcr={handleDownloadOcr}
         downloadingOcr={downloadingOcr}
+        onAutoSearch={handleAutoSearch}
+        autoSearching={autoSearching}
       />
 
       {/* Search bar */}
@@ -928,7 +1038,7 @@ export default function PDFViewer({
                   <Page
                     pageNumber={pageNum}
                     scale={zoom ?? 1}
-                    renderTextLayer={tool === 'text-select'}
+                    renderTextLayer={false}
                     renderAnnotationLayer={false}
                     loading={
                       <div className="w-[600px] h-[800px] bg-white/5 animate-pulse rounded" />

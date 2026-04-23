@@ -16,6 +16,7 @@ import ThemeToggle from '@/components/ThemeToggle';
 import type { PDFSession, Highlight, ExtractedRow, DocumentType } from '@/types/utilscraper';
 import { DOCUMENT_TYPES } from '@/types/utilscraper';
 import { processFile, extractRegions, downloadAllOcrPdfsAsZip } from '@/lib/api';
+import { findTextPositionInPdf, getTextAtRect } from '@/lib/pdf-extract';
 import { useAuth } from '@/contexts/AuthContext';
 
 export default function Index() {
@@ -437,38 +438,106 @@ export default function Index() {
     setExtracting(false);
   }, [activeSession]);
 
-  // Mirror the active session's highlights to all other PDFs, mapping via startPage offsets.
-  // Source page 3 with startPage=2 → relative page 1 → target page = target.startPage + 1 - 1
-  const handleApplyToAllPdfs = useCallback((sourceHighlights: Record<number, Highlight[]>) => {
+  // Mirror the active session's highlights to all other PDFs. The highlight
+  // BOXES on target PDFs are repositioned by searching the target text for
+  // whatever text the source highlight was sitting on — so the boxes end up
+  // over the correct text even when the target's layout differs. Falls back
+  // to raw coords if the text can't be located (scanned page, no match).
+  const handleApplyToAllPdfs = useCallback(async (sourceHighlights: Record<number, Highlight[]>) => {
     const sourceSession = sessions.find(s => s.id === activeTabId);
-    if (!sourceSession) return;
+    if (!sourceSession?.file) return;
+    const srcFile  = sourceSession.file;
     const srcStart = sourceSession.startPage || 1;
 
-    setSessions(prev => prev.map(s => {
-      if (s.id === activeTabId) return s; // skip the source session
-      if (s.status !== 'ready' && s.status !== 'extracted') return s;
-      const tgtStart = s.startPage || 1;
-      const totalPgs = s.total_pages || s.pages.length;
+    // 1. Pre-compute the source text for every highlight (one lookup per hl).
+    //    If the highlight was already extracted, use that — it's the canonical
+    //    text and saves a pdfjs read.
+    const srcTextById = new Map<string, string>();
+    const srcHlList: { h: Highlight; srcPage: number }[] = [];
+    for (const [pageStr, pageHls] of Object.entries(sourceHighlights)) {
+      const srcPage = Number(pageStr);
+      for (const h of pageHls) srcHlList.push({ h, srcPage });
+    }
+    await Promise.all(srcHlList.map(async ({ h, srcPage }) => {
+      const cached = h.extractedValue;
+      if (cached && cached.trim()) {
+        srcTextById.set(h.id, cached.trim());
+        return;
+      }
+      try {
+        const txt = await getTextAtRect(srcFile, srcPage, {
+          x: h.x, y: h.y, width: h.width, height: h.height,
+        });
+        srcTextById.set(h.id, txt);
+      } catch {
+        srcTextById.set(h.id, '');
+      }
+    }));
+
+    const targets = sessions.filter(s =>
+      s.id !== activeTabId
+      && (s.status === 'ready' || s.status === 'extracted')
+      && !!s.file,
+    );
+
+    // 2. For each target session, build repositioned highlights page-by-page.
+    //    Text lookup is async (pdfjs) so we resolve all per-target edits first,
+    //    then apply them in a single setSessions call.
+    const perTargetUpdates = await Promise.all(targets.map(async target => {
+      const tgtStart = target.startPage || 1;
+      const totalPgs = target.total_pages || target.pages.length;
       const next: Record<number, Highlight[]> = {};
+      let snappedCount = 0;
 
       for (const [pageStr, pageHls] of Object.entries(sourceHighlights)) {
         const srcPage = Number(pageStr);
-        // Map: source relative → target actual
-        const relPage = srcPage - srcStart;           // 0-based content page index
-        const tgtPage = tgtStart + relPage;           // target actual page
+        const tgtPage = tgtStart + (srcPage - srcStart);
         if (tgtPage < 1 || tgtPage > totalPgs) continue;
 
-        next[tgtPage] = pageHls.map(h => ({
-          ...h,
-          id: `hl-${Date.now()}-${s.id.slice(-4)}-${tgtPage}-${Math.random().toString(36).slice(2, 6)}`,
-          page: tgtPage,
-          extractedValue: undefined,
-          confidence: undefined,
+        const clones = await Promise.all(pageHls.map(async h => {
+          const srcText = srcTextById.get(h.id) ?? '';
+          let x = h.x, y = h.y, width = h.width, height = h.height;
+
+          if (srcText) {
+            const bbox = await findTextPositionInPdf(target.file!, tgtPage, srcText);
+            if (bbox) {
+              x = bbox.x; y = bbox.y; width = bbox.width; height = bbox.height;
+              snappedCount++;
+            }
+          }
+
+          return {
+            ...h,
+            id: `hl-${Date.now()}-${target.id.slice(-4)}-${tgtPage}-${Math.random().toString(36).slice(2, 6)}`,
+            page: tgtPage,
+            x, y, width, height,
+            extractedValue: undefined,
+            confidence: undefined,
+          };
         }));
+        next[tgtPage] = clones;
       }
-      return { ...s, highlights: next, extractedData: [], status: 'ready' as const };
+
+      return { id: target.id, next, snappedCount };
     }));
-    toast.success('Highlights mirrored to all open PDFs (offset-mapped)');
+
+    // 3. Commit all target updates in one setState.
+    setSessions(prev => prev.map(s => {
+      const update = perTargetUpdates.find(u => u.id === s.id);
+      if (!update) return s;
+      return { ...s, highlights: update.next, extractedData: [], status: 'ready' as const };
+    }));
+
+    const totalSnapped = perTargetUpdates.reduce((sum, u) => sum + u.snappedCount, 0);
+    const totalApplied = perTargetUpdates.reduce((sum, u) => sum + Object.values(u.next).flat().length, 0);
+    if (totalApplied === 0) {
+      toast('No matching target PDFs were updated.', { icon: 'ℹ️' });
+    } else {
+      toast.success(
+        `Mirrored to ${perTargetUpdates.length} PDF${perTargetUpdates.length !== 1 ? 's' : ''}` +
+        (totalSnapped > 0 ? ` — ${totalSnapped}/${totalApplied} snapped to matching text` : ''),
+      );
+    }
   }, [activeTabId, sessions]);
 
   // Excel panel row click → switch to that PDF's tab (if needed) and scroll its

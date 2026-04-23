@@ -3,7 +3,7 @@ import {
   ChevronLeft, ChevronRight, ZoomIn, ZoomOut,
   MousePointer2, Eraser, Loader2, TextCursor,
   CopyPlus, Files, Trash2, ListChecks, ChevronDown, Search,
-  SlidersHorizontal, Download, MousePointerClick,
+  SlidersHorizontal, Download, MousePointerClick, Wand2,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -40,6 +40,10 @@ interface ViewerToolbarProps {
   // OCR download
   onDownloadOcr: () => void;
   downloadingOcr: boolean;
+  // Auto-search: find field labels in the PDF and auto-create highlights
+  // over their adjacent values. Available for all doc types.
+  onAutoSearch: () => void;
+  autoSearching: boolean;
 }
 
 const ZOOM_OPTIONS = [
@@ -61,6 +65,7 @@ export default function ViewerToolbar({
   fineRotation, onFineRotationChange,
   onStartPageChange,
   onDownloadOcr, downloadingOcr,
+  onAutoSearch, autoSearching,
 }: ViewerToolbarProps) {
   // Relative page numbering when startPage > 1 (cover pages skipped)
   const hasOffset    = startPage > 1;
@@ -418,6 +423,29 @@ export default function ViewerToolbar({
           Native Text
         </span>
       )}
+
+      {/* Auto-search: find each field's label in the PDF and create
+          highlights over the adjacent value text. Users can then review /
+          tweak before extracting. */}
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            className="p-1.5 rounded text-primary/70 hover:text-primary hover:bg-primary/10
+                       disabled:opacity-30 disabled:cursor-not-allowed transition-colors shrink-0"
+            onClick={onAutoSearch}
+            disabled={autoSearching}
+            aria-label="Auto-search field values"
+          >
+            {autoSearching
+              ? <Loader2 className="w-4 h-4 animate-spin" />
+              : <Wand2 className="w-4 h-4" />}
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="bottom" className="max-w-[240px] text-xs">
+          Auto-search — find each field's label in the PDF and highlight the
+          adjacent value. You can tweak or delete anything wrong before extracting.
+        </TooltipContent>
+      </Tooltip>
 
       {/* Download OCR'd PDF */}
       <Tooltip>

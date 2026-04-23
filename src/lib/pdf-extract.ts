@@ -543,6 +543,206 @@ export async function findTextPositionInPdf(
 }
 
 // ---------------------------------------------------------------------------
+// Read the text inside a highlight rect (normalized 0-1 coords). Used when
+// cloning highlights to other PDFs — we need to know what text the source
+// highlight was sitting on so we can find the same text in each target.
+// Returns empty string for scanned pages.
+// ---------------------------------------------------------------------------
+export async function getTextAtRect(
+  file: File,
+  pageNumber: number,
+  rect: { x: number; y: number; width: number; height: number },
+): Promise<string> {
+  pdfjs.GlobalWorkerOptions.workerSrc =
+    `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
+
+  try {
+    const arrayBuffer = await file.arrayBuffer();
+    const pdf  = await pdfjs.getDocument({ data: arrayBuffer }).promise;
+    if (pageNumber < 1 || pageNumber > pdf.numPages) return '';
+    const page = await pdf.getPage(pageNumber);
+    const content = await page.getTextContent();
+    const vp = page.getViewport({ scale: 1 });
+    const items = content.items as any[];
+    if (isScannedPage(items)) return '';
+
+    const rLeft   = rect.x * vp.width;
+    const rRight  = (rect.x + rect.width) * vp.width;
+    const rTop    = rect.y * vp.height;
+    const rBottom = (rect.y + rect.height) * vp.height;
+
+    type Hit = { x: number; y: number; str: string };
+    const hits: Hit[] = [];
+    for (const item of items) {
+      if (!item.str || !item.transform) continue;
+      const str = (item.str as string).trim();
+      if (!str) continue;
+      const itemX = item.transform[4];
+      const itemH = item.height || Math.abs(item.transform[3]) || 12;
+      const itemW = item.width || str.length * 6;
+      const itemTop = vp.height - item.transform[5];
+      const itemBottom = itemTop + itemH;
+      const itemCenterY = (itemTop + itemBottom) / 2;
+      const xOverlap = Math.min(itemX + itemW, rRight) - Math.max(itemX, rLeft);
+      if (itemCenterY < rTop || itemCenterY > rBottom) continue;
+      if (itemW <= 0 || xOverlap / itemW < 0.4) continue;
+      hits.push({ x: itemX, y: itemTop, str });
+    }
+    hits.sort((a, b) => {
+      if (Math.abs(a.y - b.y) > 6) return a.y - b.y;
+      return a.x - b.x;
+    });
+    return hits.map(h => h.str).join(' ').replace(/\s+/g, ' ').trim();
+  } catch {
+    return '';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Auto-search: for each given field label, find the label text in the PDF
+// and locate the nearest "value" text item (to the right on the same line,
+// else on the next line below). Returns highlights keyed by page. Used by
+// the toolbar's "Auto-search" button so users don't have to manually draw
+// boxes for every obvious label-value pair.
+//
+// Scanned pages (no text layer) are silently skipped.
+// ---------------------------------------------------------------------------
+export async function autoSearchFieldValues(
+  file: File,
+  fieldLabels: { fieldKey: string; label: string }[],
+): Promise<Record<number, Highlight[]>> {
+  pdfjs.GlobalWorkerOptions.workerSrc =
+    `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
+
+  const out: Record<number, Highlight[]> = {};
+  if (fieldLabels.length === 0) return out;
+
+  try {
+    const arrayBuffer = await file.arrayBuffer();
+    const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
+
+    for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+      const page = await pdf.getPage(pageNum);
+      const content = await page.getTextContent();
+      const items = content.items as any[];
+      if (isScannedPage(items)) continue;
+      const vp = page.getViewport({ scale: 1 });
+      const pageWidth = vp.width, pageHeight = vp.height;
+
+      // Convert to a richer representation we can do spatial queries on.
+      type Item = { str: string; x: number; y: number; w: number; h: number; cy: number };
+      const enriched: Item[] = [];
+      for (const it of items) {
+        if (!it.str || !it.transform) continue;
+        const s = String(it.str);
+        if (!s.trim()) continue;
+        const x = it.transform[4];
+        const h = it.height || Math.abs(it.transform[3]) || 12;
+        const w = it.width  || s.length * 6;
+        const top = pageHeight - it.transform[5];
+        enriched.push({ str: s, x, y: top, w, h, cy: top + h / 2 });
+      }
+
+      const pageHls: Highlight[] = [];
+      const usedFields = new Set<string>();
+
+      for (const { fieldKey, label } of fieldLabels) {
+        if (usedFields.has(fieldKey)) continue;
+        const needle = label.toLowerCase();
+
+        // Find an item whose string contains the label, preferring longer matches
+        // (so "Total Tax Due" beats a bare "Total"). We combine adjacent items on
+        // the same line so labels split across text fragments still match.
+        //
+        // First, group items by line (items within 4px Y of each other).
+        // pdfjs often splits labels into multiple items, so we join adjacent
+        // items and search the joined text.
+        // For simplicity: join every 4 consecutive items and check each join.
+        let hit: Item | null = null;
+        for (let i = 0; i < enriched.length; i++) {
+          const it = enriched[i];
+          if (it.str.toLowerCase().includes(needle)) {
+            hit = it;
+            break;
+          }
+          // Try joining 2-4 items on the same line
+          for (let n = 2; n <= 4 && i + n <= enriched.length; n++) {
+            const joined = enriched.slice(i, i + n);
+            const sameLine = joined.every(j => Math.abs(j.cy - joined[0].cy) < 4);
+            if (!sameLine) continue;
+            const combined = joined.map(j => j.str).join(' ').toLowerCase().replace(/\s+/g, ' ');
+            if (combined.includes(needle)) {
+              hit = joined[joined.length - 1];     // anchor on the LAST item so we look to its right
+              break;
+            }
+          }
+          if (hit) break;
+        }
+        if (!hit) continue;
+
+        // Now find the value item: prefer items to the RIGHT on the same line,
+        // else the nearest item on the NEXT line directly below.
+        const labelRight = hit.x + hit.w;
+        const sameLine = enriched
+          .filter(it => it !== hit && Math.abs(it.cy - hit.cy) < 6 && it.x >= labelRight - 1)
+          .sort((a, b) => a.x - b.x);
+
+        let value: Item | null = sameLine[0] ?? null;
+        if (!value) {
+          // Look below — first line that has an item under the label's horizontal span
+          const below = enriched
+            .filter(it => it.y > hit.y + hit.h - 1 && it.y < hit.y + hit.h + 60)
+            .sort((a, b) => a.y - b.y || Math.abs(a.x - hit.x) - Math.abs(b.x - hit.x));
+          value = below[0] ?? null;
+        }
+        if (!value) continue;
+
+        // Build a highlight around the value item(s). If there are more items
+        // on the same line immediately right of `value`, merge them — dollar
+        // amounts, dates etc. often get split ("$" + "226.77").
+        const sameLineAll = enriched
+          .filter(it => Math.abs(it.cy - value!.cy) < 4 && it.x >= value!.x - 1)
+          .sort((a, b) => a.x - b.x);
+        const chain: Item[] = [];
+        for (const it of sameLineAll) {
+          if (chain.length === 0) { chain.push(it); continue; }
+          const last = chain[chain.length - 1];
+          const gap = it.x - (last.x + last.w);
+          if (gap > 20) break;                 // too far — different value
+          chain.push(it);
+          if (chain.length >= 5) break;        // cap
+        }
+        const minX = Math.min(...chain.map(c => c.x));
+        const maxX = Math.max(...chain.map(c => c.x + c.w));
+        const minY = Math.min(...chain.map(c => c.y));
+        const maxY = Math.max(...chain.map(c => c.y + c.h));
+        const pad = 2;
+
+        pageHls.push({
+          id: `auto-${Date.now()}-${pageNum}-${fieldKey}-${Math.random().toString(36).slice(2, 5)}`,
+          page: pageNum,
+          field: fieldKey,
+          x:      Math.max(0, minX - pad) / pageWidth,
+          y:      Math.max(0, minY - pad) / pageHeight,
+          width:  (Math.min(pageWidth,  maxX + pad) - Math.max(0, minX - pad)) / pageWidth,
+          height: (Math.min(pageHeight, maxY + pad) - Math.max(0, minY - pad)) / pageHeight,
+          extractedValue: chain.map(c => c.str).join(' ').replace(/\s+/g, ' ').trim(),
+          confidence: 'medium',
+          wasOcr: false,
+          isAutoExtracted: true,
+        });
+        usedFields.add(fieldKey);              // don't double-match the same field on this page
+      }
+
+      if (pageHls.length > 0) out[pageNum] = pageHls;
+    }
+  } catch (err) {
+    console.warn('[autoSearchFieldValues] error:', err);
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Legacy auto-extract without highlights (kept for backward compat)
 // ---------------------------------------------------------------------------
 export function autoExtractFields(

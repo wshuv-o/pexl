@@ -67,6 +67,7 @@ export type FieldLabel =
   | 'appraised_date'
   | 'appraised_as_is_value'
   | 'property_type'
+  | 'cap_rate'
   // Lease contract fields
   | 'lease_date'
   | 'executed'
@@ -89,6 +90,7 @@ export type FieldLabel =
   | 'tax_authority'
   | 'assessed_value'
   | 'total_tax_due'
+  | 'parcel_id'
   | 'custom';
 
 export interface FieldLabelOption {
@@ -124,6 +126,7 @@ export const FIELD_LABELS: FieldLabelOption[] = [
   { value: 'appraised_date',        label: 'Appraised Date',      color: '#7c3aed', bgColor: 'rgba(124,58,237,0.18)',  docTypes: ['appraisal'] },
   { value: 'appraised_as_is_value', label: 'Appraised As-Is Value', color: '#dc2626', bgColor: 'rgba(220,38,38,0.18)', docTypes: ['appraisal'] },
   { value: 'property_type',        label: 'Property Type',          color: '#0891b2', bgColor: 'rgba(8,145,178,0.18)',  docTypes: ['appraisal'] },
+  { value: 'cap_rate',             label: 'Cap Rate',               color: '#16a34a', bgColor: 'rgba(22,163,74,0.18)',  docTypes: ['appraisal'] },
   // ── Lease contract fields ───────────────────────────────────────────
   { value: 'lease_date',                label: 'Contract Date',            color: '#7c3aed', bgColor: 'rgba(124,58,237,0.18)',  docTypes: ['lease_contract'] },
   { value: 'executed',                  label: 'Executed?',                color: '#059669', bgColor: 'rgba(5,150,105,0.18)',   docTypes: ['lease_contract'] },
@@ -146,6 +149,7 @@ export const FIELD_LABELS: FieldLabelOption[] = [
   { value: 'tax_authority',   label: 'Tax Authority',       color: '#1d4ed8', bgColor: 'rgba(29,78,216,0.18)',  docTypes: ['tax'] },
   { value: 'assessed_value',  label: 'Assessed Value',      color: '#16a34a', bgColor: 'rgba(22,163,74,0.18)',  docTypes: ['tax'] },
   { value: 'total_tax_due',   label: 'Total Tax Due',       color: '#dc2626', bgColor: 'rgba(220,38,38,0.18)',  docTypes: ['tax'] },
+  { value: 'parcel_id',       label: 'Parcel ID',           color: '#9333ea', bgColor: 'rgba(147,51,234,0.18)', docTypes: ['tax'] },
   // ── Fallback ──────────────────────────────────────────────────────
   { value: 'custom',                label: 'Custom',              color: '#64748b', bgColor: 'rgba(100,116,139,0.18)', docTypes: ['utility_bill', 'bank_statement', 'appraisal', 'lease_contract', 'tax'] },
 ];
