@@ -25,16 +25,28 @@ interface UsageRow {
 type TimeRange = 'today' | 'week' | 'all';
 type SortKey   = 'files' | 'extracted' | 'downloads' | 'lastActive';
 
-// Parse a backend timestamp. FastAPI commonly returns naive UTC datetimes
-// ("2026-04-20T22:00:00" with no "Z" or offset), which JavaScript then
-// interprets as LOCAL time — causing rows to slide several hours forward
-// in UTC+N timezones and miss the "today" window. Treat any tzless string
-// as UTC to keep the bucketing correct across timezones.
+// Parse a backend timestamp. The backend may send either:
+//   (a) naive UTC      — "2026-04-20T22:00:00"  (FastAPI datetime.utcnow)
+//   (b) naive local    — "2026-04-20T22:00:00"  (FastAPI datetime.now)
+//   (c) ISO with tz    — "2026-04-20T22:00:00Z" or "+06:00"
+// JavaScript's `new Date(iso)` treats case (a) and (b) the same — as LOCAL.
+// Case (c) is unambiguous.
+//
+// If we force-append "Z" to make it UTC, we correctly handle (a) but break
+// (b) — in UTC+6 a local 22:00 gets shifted ~6h forward, into tomorrow.
+//
+// Heuristic: try UTC first. If that lands the timestamp > 2h in the future,
+// the backend is almost certainly sending local time → re-parse as local.
 const parseTimestamp = (iso: string): Date => {
   if (!iso) return new Date(NaN);
-  // Already has timezone info (Z or ±HH:MM)
   const hasTz = /[zZ]$|[+-]\d{2}:?\d{2}$/.test(iso);
-  return new Date(hasTz ? iso : `${iso}Z`);
+  if (hasTz) return new Date(iso);
+  const asUtc = new Date(`${iso}Z`);
+  // If interpreting as UTC puts this in the future, it must have been local all along.
+  if (asUtc.getTime() > Date.now() + 2 * 60 * 60 * 1000) {
+    return new Date(iso);
+  }
+  return asUtc;
 };
 
 const fmtDateTime = (iso: string) =>
@@ -61,10 +73,10 @@ const isInRange = (iso: string, range: TimeRange): boolean => {
   const t = parseTimestamp(iso).getTime();
   if (isNaN(t)) return false;
   if (range === 'today') {
-    // Start of today in LOCAL time — anything from 00:00 local up to now.
-    const startOfDay = new Date();
-    startOfDay.setHours(0, 0, 0, 0);
-    return t >= startOfDay.getTime() && t <= Date.now();
+    // Rolling last 24 hours — more useful than strict "since local midnight"
+    // because it surfaces activity that happened shortly before midnight,
+    // which the user thinks of as "recent / today".
+    return t >= Date.now() - 24 * 60 * 60 * 1000;
   }
   // week = last 7 × 24 h (rolling)
   return t >= Date.now() - 7 * 24 * 60 * 60 * 1000;
@@ -403,7 +415,7 @@ const Admin = () => {
               {search
                 ? `No users matching "${search}"`
                 : range === 'today'
-                  ? 'No activity today yet.'
+                  ? 'No activity in the last 24 hours.'
                   : range === 'week'
                     ? 'No activity in the last 7 days.'
                     : 'No activity yet.'}
