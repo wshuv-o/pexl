@@ -25,11 +25,14 @@ export const readSourceExcel = async (file: File): Promise<SourceExcel> => {
   const sheetName = workbook.SheetNames[0];
   const sheet = workbook.Sheets[sheetName];
 
-  // Grab raw rows as arrays so we can treat the first non-empty row as headers.
+  // Grab rows as formatted text (raw: false) so date-typed cells come out as
+  // "06/14/2024" instead of the raw serial number "45457" — the preview panel
+  // renders these strings directly and numeric serials would confuse users.
   const aoa = XLSX.utils.sheet_to_json<any[]>(sheet, {
     header: 1,
     defval: '',
     blankrows: false,
+    raw: false,
   });
 
   // Smart header-row detection: templates often have a merged title row

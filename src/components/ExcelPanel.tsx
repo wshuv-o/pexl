@@ -8,9 +8,6 @@ import { getFieldConfig } from '@/types/utilscraper';
 import { exportToExcel } from '@/lib/excel-export';
 import { findMergeOpportunities, applyMerges, type MergeGroup, type MergeChoice } from '@/lib/bank-excel-export';
 import MergeDialog from '@/components/bank/MergeDialog';
-import type { SourceExcel } from '@/lib/automap/excel-reader';
-import type { HeaderToField } from '@/lib/automap/header-mapping';
-import { fillAndDownloadSourceExcel } from '@/lib/automap/excel-writer';
 
 interface Props {
   data: ExtractedRow[];
@@ -23,11 +20,6 @@ interface Props {
   onDownload?: () => void;
   // Clicking a row jumps the PDF viewer to that sessionId/page.
   onRowClick?: (sessionId: string, page: number) => void;
-  // Optional source-Excel mode. When provided, Export writes into this
-  // workbook instead of generating the normal per-doc-type output.
-  sourceExcel?: SourceExcel | null;
-  headerMappings?: HeaderToField[];
-  rowKeyHeader?: string | null;
 }
 
 const CONF_PCT: Record<string, number> = { high: 95, medium: 65, low: 25 };
@@ -129,7 +121,6 @@ const isDateField = (field: string): boolean => /date$/i.test(field);
 
 export default function ExcelPanel({
   data, filename, provider, onClose, onReExtract, onDataChange, multiFile, onDownload, onRowClick,
-  sourceExcel, headerMappings, rowKeyHeader,
 }: Props) {
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const [mergeGroups, setMergeGroups] = useState<MergeGroup[] | null>(null);
@@ -392,16 +383,7 @@ export default function ExcelPanel({
             size="sm"
             className="flex-1 h-8 text-xs bg-primary hover:bg-primary/90 text-primary-foreground font-semibold"
             onClick={() => {
-              // Source-Excel mode — fill the user's template instead of
-              // generating the normal per-doc-type output.
-              if (sourceExcel && headerMappings && headerMappings.length > 0) {
-                fillAndDownloadSourceExcel(
-                  sortedFlat, sourceExcel, headerMappings, rowKeyHeader ?? null,
-                );
-                onDownload?.();
-                return;
-              }
-              // Normal flow — detect bank-statement merges, else export.
+              // Detect bank-statement merges, else export.
               const groups = findMergeOpportunities(sortedFlat);
               if (groups.length > 0) {
                 setMergeGroups(groups);
@@ -412,7 +394,7 @@ export default function ExcelPanel({
             }}
           >
             <Download className="w-3.5 h-3.5 mr-1.5" />
-            {sourceExcel ? 'Download filled Excel' : 'Export .xlsx'}
+            Export .xlsx
           </Button>
         </div>
       </div>

@@ -25,14 +25,26 @@ interface UsageRow {
 type TimeRange = 'today' | 'week' | 'all';
 type SortKey   = 'files' | 'extracted' | 'downloads' | 'lastActive';
 
+// Parse a backend timestamp. FastAPI commonly returns naive UTC datetimes
+// ("2026-04-20T22:00:00" with no "Z" or offset), which JavaScript then
+// interprets as LOCAL time — causing rows to slide several hours forward
+// in UTC+N timezones and miss the "today" window. Treat any tzless string
+// as UTC to keep the bucketing correct across timezones.
+const parseTimestamp = (iso: string): Date => {
+  if (!iso) return new Date(NaN);
+  // Already has timezone info (Z or ±HH:MM)
+  const hasTz = /[zZ]$|[+-]\d{2}:?\d{2}$/.test(iso);
+  return new Date(hasTz ? iso : `${iso}Z`);
+};
+
 const fmtDateTime = (iso: string) =>
-  new Date(iso).toLocaleString(undefined, {
+  parseTimestamp(iso).toLocaleString(undefined, {
     year: "numeric", month: "short", day: "numeric",
     hour: "2-digit", minute: "2-digit",
   });
 
 const fmtRelative = (iso: string): string => {
-  const then = new Date(iso).getTime();
+  const then = parseTimestamp(iso).getTime();
   const diff = Date.now() - then;
   const mins = Math.round(diff / 60_000);
   if (mins < 1) return 'just now';
@@ -41,19 +53,21 @@ const fmtRelative = (iso: string): string => {
   if (hrs < 24) return `${hrs}h ago`;
   const days = Math.round(hrs / 24);
   if (days < 7) return `${days}d ago`;
-  return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  return parseTimestamp(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 };
 
 const isInRange = (iso: string, range: TimeRange): boolean => {
   if (range === 'all') return true;
-  const t = new Date(iso).getTime();
-  const now = Date.now();
+  const t = parseTimestamp(iso).getTime();
+  if (isNaN(t)) return false;
   if (range === 'today') {
-    const startOfDay = new Date(); startOfDay.setHours(0, 0, 0, 0);
-    return t >= startOfDay.getTime();
+    // Start of today in LOCAL time — anything from 00:00 local up to now.
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+    return t >= startOfDay.getTime() && t <= Date.now();
   }
-  // week = last 7 days
-  return t >= now - 7 * 24 * 60 * 60 * 1000;
+  // week = last 7 × 24 h (rolling)
+  return t >= Date.now() - 7 * 24 * 60 * 60 * 1000;
 };
 
 // ─── Mini stat card (top strip) ──────────────────────────────────────────
@@ -225,7 +239,7 @@ const Admin = () => {
         cur.extracted += r.statements_extracted;
         cur.downloads += r.downloads;
         cur.sessions  += 1;
-        if (new Date(r.used_at) > new Date(cur.lastActive)) cur.lastActive = r.used_at;
+        if (parseTimestamp(r.used_at) > parseTimestamp(cur.lastActive)) cur.lastActive = r.used_at;
         cur.rows.push(r);
       } else {
         map.set(r.user_id, {
@@ -243,7 +257,7 @@ const Admin = () => {
       }
     }
     for (const u of map.values()) {
-      u.rows.sort((a, b) => new Date(b.used_at).getTime() - new Date(a.used_at).getTime());
+      u.rows.sort((a, b) => parseTimestamp(b.used_at).getTime() - parseTimestamp(a.used_at).getTime());
     }
     return Array.from(map.values());
   }, [filteredRows]);
@@ -263,7 +277,7 @@ const Admin = () => {
         case 'files':      return b.files - a.files;
         case 'extracted':  return b.extracted - a.extracted;
         case 'downloads':  return b.downloads - a.downloads;
-        case 'lastActive': return new Date(b.lastActive).getTime() - new Date(a.lastActive).getTime();
+        case 'lastActive': return parseTimestamp(b.lastActive).getTime() - parseTimestamp(a.lastActive).getTime();
       }
     });
   }, [userSummaries, search, sortKey]);
