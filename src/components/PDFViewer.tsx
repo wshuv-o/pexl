@@ -746,6 +746,16 @@ export default function PDFViewer({
         onHighlightsChange(session.id, next);
         setSelectedIds(new Set(newHls.map(h => h.id)));
       }
+      // Ctrl+S → activate the "select" tool (click/drag highlight boxes)
+      if ((e.ctrlKey || e.metaKey) && e.key === 's' && !isEditing) {
+        e.preventDefault();          // block browser's "save page" dialog
+        setTool('select');
+      }
+      // Ctrl+T → activate the "text-select" tool (copy text from PDF)
+      if ((e.ctrlKey || e.metaKey) && e.key === 't' && !isEditing) {
+        e.preventDefault();          // block browser's "new tab"
+        setTool('text-select');
+      }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);

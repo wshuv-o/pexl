@@ -73,8 +73,7 @@ const isInRange = (iso: string, range: TimeRange): boolean => {
   const t = parseTimestamp(iso).getTime();
   if (isNaN(t)) return false;
   if (range === 'today') {
-    // Rolling last 24 hours — more useful than strict "since local midnight"
-    // because it surfaces activity that happened shortly before midnight,
+    // Rolling last 24 hours — surfaces activity from late yesterday too,
     // which the user thinks of as "recent / today".
     return t >= Date.now() - 24 * 60 * 60 * 1000;
   }
@@ -82,16 +81,94 @@ const isInRange = (iso: string, range: TimeRange): boolean => {
   return t >= Date.now() - 7 * 24 * 60 * 60 * 1000;
 };
 
-// ─── Mini stat card (top strip) ──────────────────────────────────────────
-const StatCard = ({ icon: Icon, label, value }: { icon: any; label: string; value: number }) => (
-  <div className="bg-card border border-border rounded-xl p-4 flex items-center gap-3">
-    <div className="p-2 rounded-lg bg-primary/10 text-primary shrink-0">
-      <Icon className="h-4 w-4" />
+// ─── Stat card (top strip) ────────────────────────────────────────────────
+// Clickable. When expanded it reveals the top contributors to that metric —
+// e.g. "Downloads" shows which users downloaded the most.
+type MetricKey = 'users' | 'batches' | 'files' | 'extracted' | 'downloads';
+
+interface StatCardProps {
+  icon: any;
+  label: string;
+  value: number;
+  metric: MetricKey;
+  expanded: boolean;
+  onToggle: () => void;
+  // Data used to populate the drill-down list when expanded.
+  users: UserSummary[];
+}
+
+const StatCard = ({ icon: Icon, label, value, metric, expanded, onToggle, users }: StatCardProps) => {
+  // Top 5 contributors for this metric. "users" metric just lists active ones.
+  const top = useMemo(() => {
+    if (metric === 'users') {
+      return [...users]
+        .sort((a, b) => parseTimestamp(b.lastActive).getTime() - parseTimestamp(a.lastActive).getTime())
+        .slice(0, 5)
+        .map(u => ({ name: u.full_name || u.username, value: u.sessions, suffix: u.sessions === 1 ? 'session' : 'sessions' }));
+    }
+    const getVal = (u: UserSummary): number => {
+      switch (metric) {
+        case 'batches':   return u.sessions;
+        case 'files':     return u.files;
+        case 'extracted': return u.extracted;
+        case 'downloads': return u.downloads;
+        default:          return 0;
+      }
+    };
+    return [...users]
+      .filter(u => getVal(u) > 0)
+      .sort((a, b) => getVal(b) - getVal(a))
+      .slice(0, 5)
+      .map(u => ({ name: u.full_name || u.username, value: getVal(u), suffix: '' }));
+  }, [users, metric]);
+
+  const canExpand = value > 0;
+
+  return (
+    <div
+      className={`bg-card border rounded-xl transition-all duration-200 overflow-hidden
+        ${expanded ? 'border-primary shadow-md' : 'border-border hover:border-primary/40'}`}
+    >
+      <button
+        className={`w-full p-4 flex items-center gap-3 text-left transition-colors
+          ${canExpand ? 'cursor-pointer' : 'cursor-default'}`}
+        onClick={() => { if (canExpand) onToggle(); }}
+        disabled={!canExpand}
+      >
+        <div className="p-2 rounded-lg bg-primary/10 text-primary shrink-0">
+          <Icon className="h-4 w-4" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className="text-xl font-bold leading-none tabular-nums">{value.toLocaleString()}</p>
+          <p className="text-[11px] text-muted-foreground mt-1 truncate">{label}</p>
+        </div>
+        {canExpand && (
+          <ChevronDown className={`w-3.5 h-3.5 text-muted-foreground shrink-0 transition-transform ${expanded ? 'rotate-180' : ''}`} />
+        )}
+      </button>
+
+      {expanded && top.length > 0 && (
+        <div className="border-t border-border bg-muted/30 px-4 py-2 space-y-1">
+          <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-1">Top {top.length}</p>
+          {top.map((row, i) => (
+            <div key={i} className="flex items-center justify-between text-[11px]">
+              <span className="text-foreground truncate pr-2">{row.name}</span>
+              <span className="text-muted-foreground tabular-nums shrink-0">
+                {row.value.toLocaleString()}{row.suffix ? ` ${row.suffix}` : ''}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
-    <div className="min-w-0">
-      <p className="text-xl font-bold leading-none tabular-nums">{value.toLocaleString()}</p>
-      <p className="text-[11px] text-muted-foreground mt-1 truncate">{label}</p>
-    </div>
+  );
+};
+
+// Compact inline stat used inside the row-layout user card.
+const StatInline = ({ label, value }: { label: string; value: number }) => (
+  <div className="flex items-baseline gap-1.5 min-w-0">
+    <span className="text-sm font-bold tabular-nums text-foreground">{value.toLocaleString()}</span>
+    <span className="text-[10px] text-muted-foreground uppercase tracking-wide truncate">{label}</span>
   </div>
 );
 
@@ -120,15 +197,18 @@ const UserCard = ({
     .split(/\s+/).map(s => s[0]?.toUpperCase() ?? '').slice(0, 2).join('') || '?';
 
   return (
-    <div className="bg-card border border-border rounded-xl overflow-hidden transition-all duration-200 hover:border-primary/30">
+    <div className={`bg-card border rounded-xl overflow-hidden transition-all duration-200
+      ${expanded ? 'border-primary shadow-sm' : 'border-border hover:border-primary/30'}`}>
+      {/* Single horizontal row: avatar + identity | 3 stats | last-active | chevron */}
       <button
-        className="w-full flex items-center gap-3 p-4 text-left"
+        className="w-full flex items-center gap-4 p-3 text-left"
         onClick={onToggle}
       >
         <div className="w-10 h-10 rounded-full bg-primary/15 text-primary font-semibold text-sm flex items-center justify-center shrink-0">
           {initials}
         </div>
-        <div className="flex-1 min-w-0">
+
+        <div className="min-w-0 w-56 sm:w-64 shrink-0">
           <p className="font-semibold text-sm text-foreground truncate">
             {summary.full_name || summary.username}
           </p>
@@ -136,25 +216,42 @@ const UserCard = ({
             {summary.username}{summary.designation ? ` · ${summary.designation}` : ''}
           </p>
         </div>
+
+        {/* Stats inline — hidden on narrow screens, shown as a grid below instead */}
+        <div className="hidden md:flex items-center gap-5 flex-1 min-w-0">
+          <StatInline label="Files"     value={summary.files}     />
+          <StatInline label="Extracted" value={summary.extracted} />
+          <StatInline label="Downloads" value={summary.downloads} />
+        </div>
+
+        <div className="hidden lg:flex flex-col items-end text-[11px] text-muted-foreground shrink-0 min-w-[120px]">
+          <span className="flex items-center gap-1">
+            <Clock className="w-3 h-3" /> {fmtRelative(summary.lastActive)}
+          </span>
+          <span className="text-muted-foreground/70">
+            {summary.sessions} session{summary.sessions !== 1 ? 's' : ''}
+          </span>
+        </div>
+
         <ChevronDown className={`w-4 h-4 text-muted-foreground shrink-0 transition-transform ${expanded ? 'rotate-180' : ''}`} />
       </button>
 
-      <div className="grid grid-cols-3 gap-px bg-border">
-        <div className="bg-card py-2.5 text-center">
-          <p className="text-base font-bold tabular-nums leading-none">{summary.files}</p>
-          <p className="text-[10px] text-muted-foreground mt-1 uppercase tracking-wide">Files</p>
+      {/* Mobile fallback — stats in a compact 3-column grid under the header row */}
+      <div className="md:hidden grid grid-cols-3 gap-px bg-border">
+        <div className="bg-card py-2 text-center">
+          <p className="text-sm font-bold tabular-nums leading-none">{summary.files}</p>
+          <p className="text-[10px] text-muted-foreground mt-0.5 uppercase tracking-wide">Files</p>
         </div>
-        <div className="bg-card py-2.5 text-center">
-          <p className="text-base font-bold tabular-nums leading-none">{summary.extracted}</p>
-          <p className="text-[10px] text-muted-foreground mt-1 uppercase tracking-wide">Extracted</p>
+        <div className="bg-card py-2 text-center">
+          <p className="text-sm font-bold tabular-nums leading-none">{summary.extracted}</p>
+          <p className="text-[10px] text-muted-foreground mt-0.5 uppercase tracking-wide">Extracted</p>
         </div>
-        <div className="bg-card py-2.5 text-center">
-          <p className="text-base font-bold tabular-nums leading-none">{summary.downloads}</p>
-          <p className="text-[10px] text-muted-foreground mt-1 uppercase tracking-wide">Downloads</p>
+        <div className="bg-card py-2 text-center">
+          <p className="text-sm font-bold tabular-nums leading-none">{summary.downloads}</p>
+          <p className="text-[10px] text-muted-foreground mt-0.5 uppercase tracking-wide">Downloads</p>
         </div>
       </div>
-
-      <div className="bg-muted/40 px-4 py-2 flex items-center justify-between text-[11px] text-muted-foreground border-t border-border">
+      <div className="md:hidden bg-muted/40 px-4 py-1.5 flex items-center justify-between text-[11px] text-muted-foreground border-t border-border">
         <span className="flex items-center gap-1">
           <Clock className="w-3 h-3" /> Last active {fmtRelative(summary.lastActive)}
         </span>
@@ -208,6 +305,7 @@ const Admin = () => {
   const [search, setSearch] = useState('');
   const [sortKey, setSortKey] = useState<SortKey>('lastActive');
   const [expandedUserId, setExpandedUserId] = useState<number | null>(null);
+  const [expandedStat, setExpandedStat] = useState<MetricKey | null>(null);
 
   useEffect(() => {
     const token = localStorage.getItem("auth_token");
@@ -359,15 +457,18 @@ const Admin = () => {
         </div>
 
         {/* ── Stat cards ────────────────────────────────────────── */}
-        {!loading && !error && (
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
-            <StatCard icon={Users}     label="Active users"    value={totals.users} />
-            <StatCard icon={Layers}    label="Sessions"        value={totals.batches} />
-            <StatCard icon={FileText}  label="Files processed" value={totals.files} />
-            <StatCard icon={BarChart2} label="Values extracted" value={totals.extracted} />
-            <StatCard icon={Download}  label="Downloads"       value={totals.downloads} />
-          </div>
-        )}
+        {!loading && !error && (() => {
+          const toggle = (m: MetricKey) => () => setExpandedStat(prev => prev === m ? null : m);
+          return (
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 items-start">
+              <StatCard icon={Users}     label="Active users"     value={totals.users}     metric="users"     users={userSummaries} expanded={expandedStat === 'users'}     onToggle={toggle('users')} />
+              <StatCard icon={Layers}    label="Sessions"         value={totals.batches}   metric="batches"   users={userSummaries} expanded={expandedStat === 'batches'}   onToggle={toggle('batches')} />
+              <StatCard icon={FileText}  label="Files processed"  value={totals.files}     metric="files"     users={userSummaries} expanded={expandedStat === 'files'}     onToggle={toggle('files')} />
+              <StatCard icon={BarChart2} label="Values extracted" value={totals.extracted} metric="extracted" users={userSummaries} expanded={expandedStat === 'extracted'} onToggle={toggle('extracted')} />
+              <StatCard icon={Download}  label="Downloads"        value={totals.downloads} metric="downloads" users={userSummaries} expanded={expandedStat === 'downloads'} onToggle={toggle('downloads')} />
+            </div>
+          );
+        })()}
 
         {/* ── Loading / error states ────────────────────────────── */}
         {loading && (
@@ -421,7 +522,7 @@ const Admin = () => {
                     : 'No activity yet.'}
             </div>
           ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+            <div className="flex flex-col gap-2">
               {displayedUsers.map(u => (
                 <UserCard
                   key={u.user_id}
