@@ -271,9 +271,12 @@ export async function fetchOcrPdfBlob(sessionId: string): Promise<Blob | null> {
 }
 
 export async function fetchOcrPdfBlobWithReason(sessionId: string): Promise<OcrFetchResult> {
+  // Backend exposes two download paths (per /openapi.json):
+  //   /ocr-pdf → searchable PDF with invisible OCR text layer (preferred)
+  //   /pdf     → raw stored PDF bytes (fallback if the OCR build fails)
+  // A third "/searchable-pdf" path was speculative and is not deployed.
   const endpoints = [
     `${BACKEND_URL}/api/utility/session/${sessionId}/ocr-pdf`,
-    `${BACKEND_URL}/api/utility/session/${sessionId}/searchable-pdf`,
     `${BACKEND_URL}/api/utility/session/${sessionId}/pdf`,
   ];
 
