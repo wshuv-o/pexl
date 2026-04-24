@@ -415,6 +415,59 @@ export async function downloadOcrPdf(
   return { newSessionId: result.newSessionId };
 }
 
+// ---------------------------------------------------------------------------
+// Text search via the backend's structured index.
+//
+// The backend builds a word-level inverted index from PaddleOCR output + the
+// native PyMuPDF text layer, so this works for both scanned and native PDFs
+// with the same API. Boxes come back in PDF points (top-left origin); the
+// caller normalizes to 0-1 fractions using `page_sizes`.
+// ---------------------------------------------------------------------------
+export type SearchMode = 'exact' | 'partial' | 'fuzzy';
+
+export interface SearchMatch {
+  page: number;
+  text: string;
+  score: number;
+  boxes: [number, number, number, number][];   // PDF-point bboxes [x1, y1, x2, y2]
+}
+
+export interface SearchResponse {
+  query: string;
+  mode: SearchMode;
+  count: number;
+  page_sizes: Record<string, { width: number; height: number }>;  // page (as string) → dims
+  results: SearchMatch[];
+}
+
+export async function searchBackend(
+  sessionId: string,
+  query: string,
+  mode: SearchMode = 'partial',
+  opts: { fuzzyThreshold?: number; limit?: number; signal?: AbortSignal } = {},
+): Promise<SearchResponse | null> {
+  if (!query.trim()) return null;
+  try {
+    const res = await fetch(`${BACKEND_URL}/api/utility/search`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id:       sessionId,
+        query,
+        mode,
+        fuzzy_threshold:  opts.fuzzyThreshold ?? 80,
+        limit:            opts.limit ?? 100,
+      }),
+      signal: opts.signal,
+    });
+    if (!res.ok) return null;
+    const data = await res.json() as SearchResponse;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
 // Batch download all OCR'd PDFs as a single zip file.
 // `sessions` should be the list of sessions to include; returns the number
 // of PDFs successfully added to the zip (may be less than input if backend

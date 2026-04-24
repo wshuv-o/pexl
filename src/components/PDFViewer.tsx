@@ -6,7 +6,7 @@ import ViewerToolbar from './ViewerToolbar';
 import HighlightOverlay from './HighlightOverlay';
 import FieldLabelPicker from './FieldLabelPicker';
 import HighlightLegend from './HighlightLegend';
-import { downloadOcrPdf } from '@/lib/api';
+import { downloadOcrPdf, searchBackend, type SearchMode } from '@/lib/api';
 import { autoSearchFieldValues } from '@/lib/pdf-extract';
 import { getFieldLabelsForType } from '@/types/utilscraper';
 import { toast } from 'sonner';
@@ -719,6 +719,42 @@ export default function PDFViewer({
       setSearchResults({});
       return;
     }
+
+    // Try the backend's structured search. It handles both native and OCR
+    // pages with accurate per-word bounding boxes + line-aware merging.
+    // We cascade through modes so the user doesn't need to pick one:
+    //   1. EXACT    \u2014 whole-word match, strictest, highest-quality hits
+    //   2. PARTIAL  \u2014 contains, catches substrings (e.g. "226" in "$226.77")
+    //   3. FUZZY    \u2014 typo-tolerant, last resort
+    // First mode to return matches wins. Falls through to the pdfjs path
+    // if the backend is unreachable.
+    try {
+      const modes: SearchMode[] = ['exact', 'partial', 'fuzzy'];
+      for (const mode of modes) {
+        const resp = await searchBackend(session.id, query, mode);
+        if (!resp || resp.results.length === 0) continue;
+
+        const byPage: Record<number, { x: number; y: number; width: number; height: number }[]> = {};
+        for (const m of resp.results) {
+          const dims = resp.page_sizes[String(m.page)] ?? resp.page_sizes[m.page as unknown as string];
+          if (!dims || !dims.width || !dims.height) continue;
+          const arr = byPage[m.page] ?? (byPage[m.page] = []);
+          for (const [x1, y1, x2, y2] of m.boxes) {
+            arr.push({
+              x:      x1 / dims.width,
+              y:      y1 / dims.height,
+              width:  (x2 - x1) / dims.width,
+              height: (y2 - y1) / dims.height,
+            });
+          }
+        }
+        if (Object.keys(byPage).length > 0) {
+          setSearchResults(byPage);
+          return;
+        }
+      }
+    } catch { /* fall through to pdfjs */ }
+
     try {
       const allHits: Record<number, { x: number; y: number; width: number; height: number }[]> = {};
       for (let p = 1; p <= totalPages; p++) {
@@ -800,7 +836,7 @@ export default function PDFViewer({
       }
       setSearchResults(allHits);
     } catch { setSearchResults({}); }
-  }, [totalPages]);
+  }, [totalPages, session.id]);
 
   // Close picker / search on Escape, toggle search with Ctrl+F, delete selected highlights
   useEffect(() => {

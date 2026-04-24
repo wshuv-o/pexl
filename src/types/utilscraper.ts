@@ -149,7 +149,7 @@ export const FIELD_LABELS: FieldLabelOption[] = [
   { value: 'total_tax_due',   label: 'Total Tax Due',       color: '#dc2626', bgColor: 'rgba(220,38,38,0.18)',  docTypes: ['tax'] },
   { value: 'parcel_id',       label: 'Parcel ID',           color: '#9333ea', bgColor: 'rgba(147,51,234,0.18)', docTypes: ['tax'] },
   // ── Fallback ──────────────────────────────────────────────────────
-  { value: 'custom',                label: 'Custom',              color: '#64748b', bgColor: 'rgba(100,116,139,0.18)', docTypes: ['utility_bill', 'bank_statement', 'appraisal', 'lease_contract', 'tax'] },
+  { value: 'custom', label: 'Custom', color: '#64748b', bgColor: 'rgba(100,116,139,0.18)', docTypes: ['utility_bill', 'bank_statement', 'appraisal', 'lease_contract', 'tax'] },
 ];
 
 // Returns only the field labels relevant to a document type
