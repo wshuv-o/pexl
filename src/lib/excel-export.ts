@@ -4,9 +4,6 @@ import type { ExtractedRow } from '@/types/utilscraper';
 import { getFieldLabelsForType, DOCUMENT_TYPES, type DocumentType } from '@/types/utilscraper';
 import { downloadBankStatementExcel } from './bank-excel-export';
 
-// ---------------------------------------------------------------------------
-// Style helpers
-// ---------------------------------------------------------------------------
 const C = {
   whiteBg:     'FFFFFF',
   borderColor: '8EA9C1',

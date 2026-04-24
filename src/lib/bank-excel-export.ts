@@ -340,11 +340,6 @@ const parseNum = (s: string | undefined): number => {
   return isNaN(n) ? 0 : n;
 };
 
-// Flatten ExtractedRow[] for one PDF into a BankStatementItem.
-// First-occurrence wins for most fields; `total_credits` and `total_debits`
-// are SUMMED across every extracted occurrence in the PDF so a statement
-// with multiple credit/debit subtotals (per page or several highlights on
-// one page) ends up with the correct grand total for Deposits / Withdrawals.
 const flattenToItem = (filename: string, rows: ExtractedRow[]): BankStatementItem => {
   const map: Record<string, string> = {};
   let creditSum = 0;
@@ -648,8 +643,6 @@ const addRollupTable = (
 export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilename: string) => {
   const wb = new ExcelJS.Workbook();
 
-  // Group ExtractedRow[] by PDF session. Prefer sessionId so two uploads with
-  // the same filename don't collapse into a single item.
   const fileMap = new Map<string, { filename: string; rows: ExtractedRow[] }>();
   for (const row of data) {
     const key = row.sessionId || row.filename || 'Unknown';
@@ -663,9 +656,6 @@ export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilen
     items.push(flattenToItem(filename, rows));
   }
 
-  // Group by property → account.
-  // Fall back to account number, then filename, so PDFs with no extracted
-  // property_name don't all collapse into a single "Unknown Property" bucket.
   const groupedByProperty = new Map<string, Map<string, BankStatementItem[]>>();
   for (const item of items) {
     const fileKey = (item.filename || '').replace(/\.(pdf|docx?)$/i, '').trim();
@@ -780,8 +770,6 @@ export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilen
       adjRow.getCell(6).value  = { formula: `E${adjRn}` };
       adjRow.getCell(6).numFmt = currencyFmt;
 
-      // Row formula helper — fills E (Unadj Bal), F (Adj Bal), H (Actual Deposits), J (Diff).
-      // Uses N() so that empty-month rows (C/D = '') don't break the running balance chain.
       const applyRowFormulas = (row: ExcelJS.Row, rn: number) => {
         row.getCell(3).numFmt  = blankZeroCurrencyFmt;
         row.getCell(4).numFmt  = blankZeroCurrencyFmt;
@@ -803,9 +791,6 @@ export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilen
         });
       };
 
-      // Main data rows — always exactly 12 months (T-12 window ending at the
-      // latest statement date). Months without a matching statement render as
-      // empty rows, so the table always shows 12 months regardless of uploads.
       const parsedDates = acctItems
         .map(it => new Date(it.statementDate || ''))
         .filter(d => !isNaN(d.getTime()));

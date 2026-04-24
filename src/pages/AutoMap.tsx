@@ -17,12 +17,6 @@ import { processFile, extractRegions } from '@/lib/api';
 import type { FieldLabel, DocumentType, Highlight } from '@/types/utilscraper';
 import type { ResizedBox } from '@/components/automap/AutoHighlightViewer';
 
-// ───────────────────────────────────────────────────────────────────────────
-// Auto-map page: Source PDF + Source output Excel → read headers → rule-based
-// match PDF text to each header → user walks pages, confirms per-highlight or
-// per-page → live Excel preview fills the chosen row → download workbook with
-// original styles preserved.
-// ───────────────────────────────────────────────────────────────────────────
 export default function AutoMap() {
   const navigate = useNavigate();
 

@@ -15,20 +15,6 @@ function sanitizeValue(val: string | null | undefined): string | null {
   return cleaned || null;
 }
 
-// ---------------------------------------------------------------------------
-// Date normalisation for lease contracts and other date fields.
-//
-// Scanned PDFs frequently produce garbled date strings such as:
-//   "Ist.. day ofSeptember2025"  →  should become "09/01/2025"
-//   "3Oth day ofJune2026"        →  should become "06/30/2026"
-//
-// Steps:
-//  1. Fix common OCR digit↔letter swaps (I→1, O→0, l→1)
-//  2. Remove stray dots & scan noise
-//  3. Insert missing spaces between letters↔digits
-//  4. Strip ordinal suffixes (st, nd, rd, th) and filler words (day, of, the)
-//  5. Parse "D Month YYYY" or "Month D YYYY" into MM/DD/YYYY
-// ---------------------------------------------------------------------------
 const MONTH_MAP: Record<string, number> = {
   january: 1, february: 2, march: 3, april: 4, may: 5, june: 6,
   july: 7, august: 8, september: 9, october: 10, november: 11, december: 12,
@@ -117,11 +103,6 @@ const AMOUNT_FIELDS = new Set([
   'onetime_concession_amount', 'monthly_discount', 'other_discount',
 ]);
 
-// ---------------------------------------------------------------------------
-// Amount normalisation — ensures values like "$1,234.56" are clean.
-// Fixes OCR artifacts like "12.12.1531" (multiple decimals) by keeping
-// only the last dot as the decimal separator.
-// ---------------------------------------------------------------------------
 function normalizeAmountValue(raw: string): string {
   // Strip everything except digits, dots, commas, minus, and $
   let s = raw.replace(/[^0-9.,$-]/g, '').trim();
@@ -137,16 +118,10 @@ function normalizeAmountValue(raw: string): string {
     s = concatMatch[1];
   }
 
-  // Also catch: "145693032624.10" where "14569.30" + "32624.10" lost the dot
-  // Heuristic: if there's exactly one dot and the digits before it are > 8 chars,
-  // it's likely two amounts concatenated. Extract the first valid amount.
   const dotIdx = s.indexOf('.');
   if (dotIdx >= 0) {
     const beforeDot = s.slice(0, dotIdx);
     const afterDot = s.slice(dotIdx + 1);
-    // If after the decimal there are more than 2 digits, something is wrong
-    // e.g. "160287633819.74" — the "74" is fine, but the integer part is suspiciously long
-    // Check if the raw string had spaces or multiple numbers
     if (afterDot.length === 2 && beforeDot.length > 6) {
       // Try to find a valid split: look for a .XX pattern in the original raw text
       const amounts = raw.match(/-?\$?[\d,]+\.\d{2}/g);
@@ -222,20 +197,11 @@ export function isBackendOnline() {
   return backendOnline;
 }
 
-// ---------------------------------------------------------------------------
-// processFile — upload PDF, detect pages, run OCR on scanned pages
-// ---------------------------------------------------------------------------
-// Word-format detection — these can't be parsed client-side via pdfjs, so
-// if the backend fails we must surface the error instead of silently
-// falling through to a fallback that will never work.
 const isWordFile = (f: File) =>
   f.type === 'application/msword'
   || f.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
   || /\.docx?$/i.test(f.name);
 
-// After the backend converts a Word upload, fetch the resulting PDF bytes
-// so the viewer can render (react-pdf can't read .doc/.docx directly).
-// Returns a File that can replace the original session.file.
 export async function fetchConvertedPdf(sessionId: string, originalName: string): Promise<File | null> {
   try {
     const res = await fetch(`${BACKEND_URL}/api/utility/session/${sessionId}/pdf`);
@@ -249,10 +215,6 @@ export async function fetchConvertedPdf(sessionId: string, originalName: string)
   }
 }
 
-// Fetch the OCR'd PDF blob for a session (tries multiple endpoints).
-// Returns null if the backend has no OCR PDF for this session.
-// Classify the reason fetchOcrPdfBlob failed so callers can show a useful
-// message (e.g. "backend unreachable" vs "session expired").
 export type OcrFetchReason = 'ok' | 'server-error' | 'not-found' | 'network' | 'not-pdf' | 'unknown';
 
 export interface OcrFetchResult {
@@ -261,8 +223,6 @@ export interface OcrFetchResult {
   status?: number;   // last HTTP status we saw
 }
 
-// HTTP codes that tend to be transient (gateway timeout, bad gateway, service
-// unavailable, worker restart). Worth a short retry before giving up.
 const TRANSIENT_STATUSES = new Set([502, 503, 504, 522, 524]);
 
 export async function fetchOcrPdfBlob(sessionId: string): Promise<Blob | null> {
@@ -271,10 +231,6 @@ export async function fetchOcrPdfBlob(sessionId: string): Promise<Blob | null> {
 }
 
 export async function fetchOcrPdfBlobWithReason(sessionId: string): Promise<OcrFetchResult> {
-  // Backend exposes two download paths (per /openapi.json):
-  //   /ocr-pdf → searchable PDF with invisible OCR text layer (preferred)
-  //   /pdf     → raw stored PDF bytes (fallback if the OCR build fails)
-  // A third "/searchable-pdf" path was speculative and is not deployed.
   const endpoints = [
     `${BACKEND_URL}/api/utility/session/${sessionId}/ocr-pdf`,
     `${BACKEND_URL}/api/utility/session/${sessionId}/pdf`,
@@ -282,16 +238,11 @@ export async function fetchOcrPdfBlobWithReason(sessionId: string): Promise<OcrF
 
   let lastStatus: number | undefined;
   let lastReason: OcrFetchReason = 'unknown';
-  // If the first endpoint returns a server-error or network failure, the
-  // rest live on the same host — skipping them avoids pounding a dead
-  // backend with a full 3×2 grid of failed requests.
   let skipRemainingEndpoints = false;
 
   for (const url of endpoints) {
     if (skipRemainingEndpoints) break;
 
-    // Retry each endpoint once on transient failures (502/503/504).
-    // Backoff: immediate → 600ms → (move to next endpoint)
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         const res = await fetch(url, { signal: AbortSignal.timeout(60_000) });
@@ -322,8 +273,6 @@ export async function fetchOcrPdfBlobWithReason(sessionId: string): Promise<OcrF
         break;
       } catch (err: unknown) {
         void err;
-        // Network/CORS/abort (AbortSignal timeout). Retry once, then bail
-        // from all remaining endpoints for the same reason as above.
         lastReason = 'network';
         lastStatus = undefined;
         if (attempt === 0) {
@@ -339,11 +288,6 @@ export async function fetchOcrPdfBlobWithReason(sessionId: string): Promise<OcrF
   return { blob: null, reason: lastReason, status: lastStatus };
 }
 
-// Fetch with automatic session-expired recovery: on 404 ("not-found") the
-// backend has forgotten the session (restart, TTL, eviction). If we still
-// have the original File locally, re-upload to get a new session and retry
-// the download. The new session_id is returned so callers can update their
-// state, avoiding another round-trip on subsequent actions.
 export async function fetchOcrPdfBlobWithRecovery(
   sessionId: string,
   file: File | undefined,
@@ -399,10 +343,6 @@ function triggerDownload(blob: Blob, filename: string) {
   URL.revokeObjectURL(url);
 }
 
-// Download the OCR'd / searchable version of the session's PDF.
-// If `file` is provided, we'll silently re-upload on 404 (session expired)
-// and retry the download. Returns a new session id when recovery happened,
-// so the caller can update its stored session id.
 export async function downloadOcrPdf(
   sessionId: string,
   originalName: string,
@@ -415,14 +355,6 @@ export async function downloadOcrPdf(
   return { newSessionId: result.newSessionId };
 }
 
-// ---------------------------------------------------------------------------
-// Text search via the backend's structured index.
-//
-// The backend builds a word-level inverted index from PaddleOCR output + the
-// native PyMuPDF text layer, so this works for both scanned and native PDFs
-// with the same API. Boxes come back in PDF points (top-left origin); the
-// caller normalizes to 0-1 fractions using `page_sizes`.
-// ---------------------------------------------------------------------------
 export type SearchMode = 'exact' | 'partial' | 'fuzzy';
 
 export interface SearchMatch {
@@ -468,12 +400,6 @@ export async function searchBackend(
   }
 }
 
-// Batch download all OCR'd PDFs as a single zip file.
-// `sessions` should be the list of sessions to include; returns the number
-// of PDFs successfully added to the zip (may be less than input if backend
-// lacks some OCR PDFs). If a session has an associated File, we auto-re-
-// upload on 404 and retry — `renewed` reports any new session ids so the
-// caller can update its state.
 export async function downloadAllOcrPdfsAsZip(
   sessions: { id: string; filename: string; file?: File }[],
 ): Promise<{ added: number; missing: string[]; renewed: { oldId: string; newId: string }[] }> {
@@ -496,16 +422,11 @@ export async function downloadAllOcrPdfsAsZip(
     return name;
   };
 
-  // Fetch in parallel for speed. Use the recovery helper so sessions that
-  // the backend has forgotten get silently re-uploaded and retried — the
-  // user doesn't see a "session expired" error unless the File is also gone.
   const results = await Promise.all(sessions.map(async s => {
     const r = await fetchOcrPdfBlobWithRecovery(s.id, s.file);
     return { session: s, ...r };
   }));
 
-  // Tally failure reasons so we can show a specific message when nothing
-  // came back (e.g. all 502s → "backend is down", not just "missing").
   const reasonCounts: Record<OcrFetchReason, number> = {
     ok: 0, 'server-error': 0, 'not-found': 0, network: 0, 'not-pdf': 0, unknown: 0,
   };
@@ -574,10 +495,6 @@ export async function processFile(
       if (res.ok) {
         const data = await res.json();
 
-        // Always pull the backend's OCR'd / unlocked PDF back so the viewer
-        // renders the version with the text layer AND without copy restrictions.
-        // For Word uploads this is the only viewable copy; for regular PDFs it
-        // replaces the original (which may have owner-restricted copying).
         let convertedPdf: File | undefined;
         onProgress(2, wordDoc ? 'Fetching converted PDF...' : 'Fetching OCR’d PDF...');
         const pdf = await fetchConvertedPdf(data.session_id, file.name);
@@ -590,8 +507,6 @@ export async function processFile(
             + 'Ask ops to implement GET /api/utility/session/{session_id}/pdf.',
           );
         }
-        // For regular PDFs we just keep the original when the backend doesn't
-        // expose the endpoint — the viewer still works, just without unlock.
 
         onProgress(3, `Ready — ${data.ocr_pages_count ?? 0} pages OCR'd`);
         return {
@@ -602,9 +517,6 @@ export async function processFile(
         };
       }
 
-      // Non-OK response — lift the detail out of the body and throw a
-      // friendly error. Word-specific errors (415 / 500 from LibreOffice)
-      // need to surface; falling through would just crash pdfjs.
       let detail = '';
       try {
         const body = await res.json();
@@ -612,9 +524,6 @@ export async function processFile(
         detail = body.detail || body.error || body.message || '';
       } catch { /* body may be empty or non-JSON */ }
 
-      // The deployed backend hasn't shipped DOC/DOCX support yet — its
-      // validator still rejects with "Only PDF files are supported".
-      // Make that case obvious to the user.
       if (/only pdf/i.test(detail) && wordDoc) {
         throw new Error('The server hasn\u2019t shipped Word support yet. Save the document as PDF and try again, or ping your deployment team to redeploy the backend.');
       }
@@ -680,11 +589,6 @@ export async function processFile(
   }
 }
 
-// ---------------------------------------------------------------------------
-// extractRegions — MANUAL HIGHLIGHT MODE
-// Extracts ONLY the regions the user drew highlight boxes over.
-// Sends all highlights from ALL pages to backend in one call.
-// ---------------------------------------------------------------------------
 export async function extractRegions(
   sessionId: string,
   highlights: Highlight[],
@@ -763,8 +667,6 @@ export async function extractRegions(
         })),
       );
 
-      // If any results came back with wasOcr:true it means that page is scanned
-      // and pdfjs couldn't read it — try the backend for those specific highlights
       const ocrNeeded = clientResults.filter(r => r.wasOcr && r.value === null);
       const goodResults = clientResults.filter(r => !r.wasOcr || r.value !== null);
 

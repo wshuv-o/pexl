@@ -11,8 +11,6 @@ import { autoSearchFieldValues } from '@/lib/pdf-extract';
 import { getFieldLabelsForType } from '@/types/utilscraper';
 import { toast } from 'sonner';
 
-// Set worker unconditionally — pdf-extract.ts also sets this
-// so pdfjs works both in viewer and in api.ts calls
 pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
 
 interface PDFViewerProps {
@@ -23,19 +21,10 @@ interface PDFViewerProps {
   onApplyToAllPdfs: (sourceHighlights: Record<number, Highlight[]>) => void;
   onStartPageChange: (sessionId: string, startPage: number) => void;
   extracting: boolean;
-  // When this changes, scroll to the given page. `nonce` forces re-fire even if
-  // the user clicks the same row twice.
   scrollToPageTrigger?: { page: number; nonce: number } | null;
-  // Session-wide custom-field list (owned by the parent so it survives tab
-  // switches and shows up in every PDF's label picker).
   customFields: string[];
   onCustomFieldAdd: (name: string) => void;
-  // Reports which highlight IDs are currently selected so Index can act on
-  // them (Ctrl+X cut, etc.). Passing a Set — the parent stores it in a ref.
   onSelectionChange?: (ids: Set<string>) => void;
-  // Fired when the backend assigned a new session id (e.g. after a silent
-  // re-upload because the previous session expired). Index should update
-  // its session list so later calls don't hit 404 again.
   onSessionRenewed?: (oldId: string, newId: string) => void;
 }
 
@@ -89,10 +78,6 @@ export default function PDFViewer({
   const [downloadingOcr, setDownloadingOcr] = useState(false);
   const [autoSearching,  setAutoSearching]  = useState(false);
 
-  // Auto-search: scan the PDF for each doc-type field's label and create
-  // highlights over the adjacent value text. Merges with existing highlights
-  // (doesn't overwrite user's manual work); skips fields that the user has
-  // already placed on the same page.
   const handleAutoSearch = useCallback(async () => {
     if (!session.file) { toast.error('PDF file not loaded'); return; }
     setAutoSearching(true);
@@ -127,11 +112,6 @@ export default function PDFViewer({
     setAutoSearching(false);
   }, [session.file, session.docType, session.id, session.highlights, onHighlightsChange]);
 
-  // Download the OCR'd / searchable version of this PDF from the backend.
-  // Pass the local File so api.ts can silently re-upload on 404 ("session
-  // expired") and retry without bothering the user. If a new session id was
-  // assigned during recovery, notify the parent so it can update its state
-  // — otherwise later actions would also 404 against the stale id.
   const handleDownloadOcr = useCallback(async () => {
     setDownloadingOcr(true);
     try {
@@ -293,10 +273,6 @@ export default function PDFViewer({
     const pos = getRelativePos(e.clientX, e.clientY, el);
     if (!pos) return;
 
-    // Cursor mode:      drag draws a new highlight (raw rect).
-    // Select mode:      drag draws a marquee selection rectangle.
-    // Text-select mode: drag draws a highlight that will snap to text bounds on mouseUp.
-    // All share the same `drawing` state — behavior diverges on mouseUp.
     if (tool === 'cursor' || tool === 'select' || tool === 'text-select') {
       e.preventDefault();
       if (!e.shiftKey && !e.ctrlKey && !e.metaKey) setSelectedIds(new Set());
@@ -323,9 +299,6 @@ export default function PDFViewer({
     }
   }, [drawing, drawingPage, getRelativePos]);
 
-  // Shrink a normalized (0-1) rectangle to the tight bounding box of all
-  // pdfjs text items whose center falls within it. Returns the original
-  // rect if no items match or the PDF hasn't loaded yet.
   const snapRectToText = useCallback(async (
     page: number,
     r: { x: number; y: number; w: number; h: number },
@@ -374,10 +347,6 @@ export default function PDFViewer({
       const tightX = Math.max(0, minX - padX);
       const tightR = Math.min(pageWidth, maxX + padX);
 
-      // Vertical: pdfjs's `item.height` includes ascender + descender + line-gap,
-      // so the raw box overshoots the visible glyphs — especially for single-line
-      // text where the overshoot is clearly visible. Shrink to the cap-height band
-      // (~65% of the raw height) centered on the item's mid-Y.
       const rawTop    = minY;
       const rawBottom = maxY;
       const midY      = (rawTop + rawBottom) / 2;
@@ -421,9 +390,6 @@ export default function PDFViewer({
       return;
     }
 
-    // Cursor + text-select mode: finish highlight drawing — open label picker.
-    // In text-select mode we snap the box to the tight bounding box of text
-    // items contained within it, so the highlight hugs the text exactly.
     if (drawing && drawingPage !== null) {
       if (drawing.w < 0.01 || drawing.h < 0.005) {
         setDrawing(null); setDrawingPage(null);
@@ -491,8 +457,6 @@ export default function PDFViewer({
       const deltaX = newX - dragged.x;
       const deltaY = newY - dragged.y;
 
-      // If multiple highlights are selected and the dragged one is among them,
-      // move the whole group by the same delta.
       const movingGroup = selectedIds.size > 1 && selectedIds.has(id);
 
       const updated = hls.map(h => {
@@ -525,9 +489,6 @@ export default function PDFViewer({
     [session.highlights, updateHighlights],
   );
 
-  // Word-style resize commit — update the highlight's bounds and clear
-  // its extraction so the user knows to click Re-extract (or it happens
-  // automatically the next time the batch Extract runs).
   const handleResizeHighlight = useCallback(
     (id: string, pageNum: number, bounds: { x: number; y: number; width: number; height: number }) => {
       const hls = session.highlights[pageNum] ?? [];
@@ -630,8 +591,6 @@ export default function PDFViewer({
     return out;
   }, [searchResults]);
 
-  // When the result set changes (user is typing), reset focus so Enter lands
-  // on the first match instead of some stale index that may no longer exist.
   useEffect(() => { setActiveMatchIdx(-1); }, [searchResults]);
 
   // Scroll so the i-th match is visible, ~1/3 of the way down the viewport.
@@ -659,13 +618,6 @@ export default function PDFViewer({
     container.scrollTo({ top: Math.max(0, targetScroll), behavior: 'smooth' });
   }, [flatMatches]);
 
-  // External trigger (e.g. Excel panel row click) → jump to page.
-  // react-pdf renders each <Page>'s canvas asynchronously — until a page
-  // finishes rendering, it occupies an 800px placeholder. Target pages past
-  // page 1 therefore sit at a stale Y offset at first-scroll time, then
-  // shift as earlier pages finish rendering. We do one smooth scroll, then
-  // a handful of silent re-scrolls at increasing delays so the final
-  // position self-corrects once the layout settles.
   useEffect(() => {
     if (!scrollToPageTrigger || !pdfLoaded) return;
     const { page } = scrollToPageTrigger;
@@ -690,21 +642,6 @@ export default function PDFViewer({
     };
   }, [scrollToPageTrigger, pdfLoaded, totalPages]);
 
-  // -----------------------------------------------------------------------
-  // Text search
-  //
-  // Accuracy improvements over the naive "item.str.includes(query)" approach:
-  //   1. Unicode-normalize both query and PDF text (NFKD + strip combining
-  //      marks) so diacritics, ligatures, non-breaking spaces etc. all match.
-  //   2. Collapse whitespace runs so "Account  Number" / "Account\nNumber"
-  //      all match "account number".
-  //   3. Build a concatenated normalized page text with an offset→item map,
-  //      so a query that spans multiple pdfjs text items (very common —
-  //      pdfjs splits runs at kerning boundaries) is still found.
-  //   4. Highlight only the matched substring within each item (proportional
-  //      box based on character offset) instead of the entire text run.
-  //   5. Find every occurrence on the page, not just the first per item.
-  // -----------------------------------------------------------------------
   const handleSearch = useCallback(async (query: string) => {
     setSearchQuery(query);
 
@@ -720,14 +657,6 @@ export default function PDFViewer({
       return;
     }
 
-    // Try the backend's structured search. It handles both native and OCR
-    // pages with accurate per-word bounding boxes + line-aware merging.
-    // We cascade through modes so the user doesn't need to pick one:
-    //   1. EXACT    \u2014 whole-word match, strictest, highest-quality hits
-    //   2. PARTIAL  \u2014 contains, catches substrings (e.g. "226" in "$226.77")
-    //   3. FUZZY    \u2014 typo-tolerant, last resort
-    // First mode to return matches wins. Falls through to the pdfjs path
-    // if the backend is unreachable.
     try {
       const modes: SearchMode[] = ['exact', 'partial', 'fuzzy'];
       for (const mode of modes) {
@@ -764,9 +693,6 @@ export default function PDFViewer({
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const items = content.items as any[];
 
-        // Build a single normalized page text and remember which slice of
-        // the concatenated string each item contributed, so matches that
-        // straddle item boundaries can still be located and boxed.
         type Slot = {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           item: any;
@@ -782,9 +708,6 @@ export default function PDFViewer({
           const nText = normalize(item.str);
           if (!nText) continue;
 
-          // Separator between items so "account" + "number" doesn't stick
-          // together as "accountnumber" and false-match. Skipped if the
-          // accumulator already ends with whitespace (pdfjs emits its own).
           if (pageText.length > 0 && !pageText.endsWith(' ')) pageText += ' ';
 
           const start = pageText.length;
@@ -801,9 +724,6 @@ export default function PDFViewer({
           if (matchIdx === -1) break;
           const matchEnd = matchIdx + q.length;
 
-          // The match may span one or more items — emit a tight box per
-          // item it overlaps, proportioning the x-offset and width within
-          // that item's actual PDF width.
           for (const slot of slots) {
             const overlapStart = Math.max(slot.start, matchIdx);
             const overlapEnd   = Math.min(slot.end,   matchEnd);
@@ -815,10 +735,6 @@ export default function PDFViewer({
             const item   = slot.item;
             const itemX  = item.transform[4];
             const itemH  = item.height || Math.abs(item.transform[3]) || 12;
-            // transform[5] is the TEXT BASELINE in PDF space (origin
-            // bottom-left). Converting to viewport (origin top-left) gives
-            // the baseline's y in top-down coords; the glyphs extend UP
-            // from there, so the box's top is (baseline - height).
             const itemTop = vp.height - item.transform[5] - itemH;
 
             hits.push({
@@ -917,9 +833,6 @@ export default function PDFViewer({
     return () => window.removeEventListener('keydown', handler);
   }, [searchOpen, selectedIds, session.highlights, session.id, onHighlightsChange, currentPage]);
 
-  // -----------------------------------------------------------------------
-  // Render
-  // -----------------------------------------------------------------------
   if (!fileUrl) {
     return (
       <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
@@ -1011,12 +924,6 @@ export default function PDFViewer({
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
         onMouseDown={e => {
-          // In text-select mode, clicking anywhere that isn't an actual
-          // text glyph (page margin, gap between lines, canvas, wrapper,
-          // or outside a page entirely) should clear any prior selection
-          // — matches Adobe's "click empty space to deselect" behaviour.
-          // The browser won't clear it automatically because .textLayer
-          // is `user-select: none`, so no fresh selection starts there.
           if (tool !== 'text-select') return;
           const t = e.target as HTMLElement | null;
           const isOnTextSpan = !!(t && t.tagName === 'SPAN' && t.closest('.textLayer'));

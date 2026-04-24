@@ -95,26 +95,11 @@ PROVIDER_PATTERNS['Con Edison'] = {
   ],
 };
 
-// ---------------------------------------------------------------------------
-// Page type detection
-// Text items < 10 means the page is scanned — pdfjs cannot read it
-// ---------------------------------------------------------------------------
 function isScannedPage(items: any[]): boolean {
   const textItems = items.filter((i: any) => i.str && i.str.trim().length > 0);
   return textItems.length < 10;
 }
 
-// ---------------------------------------------------------------------------
-// Axis-aligned bounding box for a text item, accounting for rotation.
-//
-// pdfjs transform = [a, b, c, d, tx, ty]  (2×3 affine matrix)
-//   Non-rotated: a=scaleX, b=0, c=0, d=scaleY
-//   Rotated by θ: a=cos(θ)*s, b=sin(θ)*s, c=-sin(θ)*s, d=cos(θ)*s
-//   tx = x from left,  ty = y from page BOTTOM
-//
-// Some scanned-then-converted PDFs have slight rotation (< ~15°).
-// Without this, highlights and bounding boxes miss the text entirely.
-// ---------------------------------------------------------------------------
 interface ItemAABB {
   left: number;   right: number;
   top: number;    bottom: number;  // top-down (from page top)
@@ -267,14 +252,6 @@ export async function autoExtractWithHighlights(
   return { rows, highlights };
 }
 
-// ---------------------------------------------------------------------------
-// findTextPosition — fixed to return the TIGHTEST matching bounding box.
-//
-// Bug was: multiple occurrences of the same word (e.g. "226.77" appears 6x)
-// caused a giant bounding box spanning the whole page.
-// Fix: score each item by how many search words it contains, take only the
-// best-scoring cluster of items.
-// ---------------------------------------------------------------------------
 function findTextPosition(
   items: any[],
   searchText: string,
@@ -303,10 +280,6 @@ function findTextPosition(
   const maxScore = Math.max(...scored.map(s => s.score));
   const best = scored.filter(s => s.score === maxScore).map(s => s.item);
 
-  // When duplicates exist (e.g. "$269.43" appears in account balance AND amount due),
-  // always take the TOPMOST occurrence (smallest Y top-down).
-  // Primary field values on utility bills always appear near the top of the page —
-  // the mailing stub and footnotes at the bottom are duplicates we want to skip.
   const sorted = best.slice().sort((a, b) => {
     const bbA = itemAABB(a, pageHeight);
     const bbB = itemAABB(b, pageHeight);
@@ -340,24 +313,6 @@ function findTextPosition(
   };
 }
 
-// ---------------------------------------------------------------------------
-// extractFromRegions — MANUAL HIGHLIGHT MODE
-//
-// Fixed bug: Y coordinate was off by one itemHeight.
-//
-// Root cause:
-//   pdfjs transform[5] = distance from PAGE BOTTOM to the TOP of the text.
-//   So itemTop (top-down) = pageHeight - transform[5]   ← TOP of text
-//      itemBottom         = itemTop + itemHeight         ← BOTTOM of text
-//
-// The old code had:
-//   itemBaseline = pageHeight - transform[5]   (= itemTop, correct)
-//   itemTop      = itemBaseline - itemHeight   (WRONG — this went ABOVE the text)
-//   itemBottom   = itemBaseline               (WRONG — this was actually itemTop)
-//
-// Result: every text item was tested against a window shifted UP by itemHeight,
-// so highlights drawn exactly over text never matched.
-// ---------------------------------------------------------------------------
 export async function extractFromRegions(
   file: File,
   highlights: { page: number; field: string; x: number; y: number; width: number; height: number }[],
@@ -427,9 +382,6 @@ export async function extractFromRegions(
         }
       }
 
-      // Deduplicate: PDFs with OCR overlays or copy-paste artifacts often have
-      // two identical text items at the same position. Drop items whose text and
-      // position (within 4px) match an earlier item.
       const deduped: typeof matchedItems = [];
       for (const item of matchedItems) {
         const isDup = deduped.some(
@@ -438,26 +390,17 @@ export async function extractFromRegions(
         if (!isDup) deduped.push(item);
       }
 
-      // Sort by reading order: top-to-bottom, then left-to-right within same line
-      // Items within 6px vertical distance are considered the same line
       deduped.sort((a, b) => {
         const lineDiff = a.y - b.y;
         if (Math.abs(lineDiff) > 6) return lineDiff;
         return a.x - b.x;
       });
 
-      // For single-value fields (amounts, account numbers, dates), keep only
-      // the first line. A highlight that's slightly too tall captures the row
-      // below, producing glued values like "32965.1416883.36".
       let finalItems = deduped;
       if (deduped.length > 1) {
         const firstY = deduped[0].y;
         const firstLine = deduped.filter(i => Math.abs(i.y - firstY) <= 6);
         const restLine  = deduped.filter(i => Math.abs(i.y - firstY) > 6);
-        // If there are items on a second line, check if the first line alone
-        // looks like a complete value. For amount/date/account fields this is
-        // almost always the case. Only keep multi-line if the first line is
-        // very short (< 3 chars) — that likely means it's a label prefix.
         if (restLine.length > 0) {
           const firstLineText = firstLine.map(i => i.str).join('').trim();
           if (firstLineText.length >= 3) {
@@ -466,8 +409,6 @@ export async function extractFromRegions(
         }
       }
 
-      // Join tokens in reading order, then strip parenthetical reference numbers
-      // e.g. "(0023051011425) 8303 32 009" → "8303 32 009"
       const rawJoined = finalItems.map(i => i.str).join(' ');
       const value = rawJoined
         .replace(/\(\d+\)/g, '')   // strip (numeric) groups
@@ -490,11 +431,6 @@ export async function extractFromRegions(
   return results;
 }
 
-// ---------------------------------------------------------------------------
-// findTextPositionInPdf — find the exact bounding box of a text value
-// on a specific page, exported for use in api.ts after backend auto-extract.
-// Returns null for scanned pages (pdfjs has no text layer).
-// ---------------------------------------------------------------------------
 export async function findTextPositionInPdf(
   file: File,
   pageNumber: number,
@@ -518,8 +454,6 @@ export async function findTextPositionInPdf(
 
     if (isScannedPage(content.items as any[])) return null;
 
-    // pdfjs often splits "$226.77" into two items: "$" and "226.77"
-    // Strip currency symbols and search for just the numeric part
     const cleanedSearch = searchText
       .replace(/\$\s*/g, '')   // remove $ signs
       .replace(/,/g, '')        // remove thousand separators
@@ -542,12 +476,6 @@ export async function findTextPositionInPdf(
   }
 }
 
-// ---------------------------------------------------------------------------
-// Read the text inside a highlight rect (normalized 0-1 coords). Used when
-// cloning highlights to other PDFs — we need to know what text the source
-// highlight was sitting on so we can find the same text in each target.
-// Returns empty string for scanned pages.
-// ---------------------------------------------------------------------------
 export async function getTextAtRect(
   file: File,
   pageNumber: number,
@@ -598,15 +526,6 @@ export async function getTextAtRect(
   }
 }
 
-// ---------------------------------------------------------------------------
-// Auto-search: for each given field label, find the label text in the PDF
-// and locate the nearest "value" text item (to the right on the same line,
-// else on the next line below). Returns highlights keyed by page. Used by
-// the toolbar's "Auto-search" button so users don't have to manually draw
-// boxes for every obvious label-value pair.
-//
-// Scanned pages (no text layer) are silently skipped.
-// ---------------------------------------------------------------------------
 export async function autoSearchFieldValues(
   file: File,
   fieldLabels: { fieldKey: string; label: string }[],
@@ -650,14 +569,6 @@ export async function autoSearchFieldValues(
         if (usedFields.has(fieldKey)) continue;
         const needle = label.toLowerCase();
 
-        // Find an item whose string contains the label, preferring longer matches
-        // (so "Total Tax Due" beats a bare "Total"). We combine adjacent items on
-        // the same line so labels split across text fragments still match.
-        //
-        // First, group items by line (items within 4px Y of each other).
-        // pdfjs often splits labels into multiple items, so we join adjacent
-        // items and search the joined text.
-        // For simplicity: join every 4 consecutive items and check each join.
         let hit: Item | null = null;
         for (let i = 0; i < enriched.length; i++) {
           const it = enriched[i];
@@ -680,8 +591,6 @@ export async function autoSearchFieldValues(
         }
         if (!hit) continue;
 
-        // Now find the value item: prefer items to the RIGHT on the same line,
-        // else the nearest item on the NEXT line directly below.
         const labelRight = hit.x + hit.w;
         const sameLine = enriched
           .filter(it => it !== hit && Math.abs(it.cy - hit.cy) < 6 && it.x >= labelRight - 1)
@@ -697,9 +606,6 @@ export async function autoSearchFieldValues(
         }
         if (!value) continue;
 
-        // Build a highlight around the value item(s). If there are more items
-        // on the same line immediately right of `value`, merge them — dollar
-        // amounts, dates etc. often get split ("$" + "226.77").
         const sameLineAll = enriched
           .filter(it => Math.abs(it.cy - value!.cy) < 4 && it.x >= value!.x - 1)
           .sort((a, b) => a.x - b.x);
