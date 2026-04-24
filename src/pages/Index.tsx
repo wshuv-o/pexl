@@ -4,7 +4,7 @@ import { toast } from 'sonner';
 import {
   Upload, ChevronLeft, ChevronRight,
   AlertTriangle, FileSearch, X, ShieldCheck, LogOut, Landmark,
-  RotateCw, Eraser, DownloadCloud, Loader2,
+  RotateCw, Eraser, DownloadCloud, Loader2, XCircle,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import UploadZone from '@/components/UploadZone';
@@ -894,6 +894,17 @@ export default function Index() {
                   </div>
                 );
               })}
+              {multiSelectedTabIds.size > 0 && (
+                <button
+                  onClick={() => { setMultiSelectedTabIds(new Set()); setTabAnchorId(null); }}
+                  className="ml-2 mb-0.5 flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs
+                             bg-primary/10 text-primary hover:bg-primary/20 transition-colors shrink-0"
+                  title="Clear PDF selection"
+                >
+                  <XCircle className="w-3.5 h-3.5" />
+                  <span>Clear selection ({multiSelectedTabIds.size})</span>
+                </button>
+              )}
             </div>
           )}
 

@@ -82,6 +82,17 @@ export type FieldLabel =
   | 'monthly_discount'
   | 'other_discount'
   | 'other_discount_comment'
+  | 'household_ca_count'
+  | 'household_non_ca_count'
+  | 'total_income_ca'
+  | 'total_income_non_ca'
+  | 'total_rent'
+  | 'utility_allowance'
+  | 'ca_shelter_allowance'
+  | 'cityfheps_rent_supplement'
+  | 'household_share'
+  | 'utility_payment'
+  | 'total_monthly_rent'
   // Tax fields
   | 'tax_year'
   | 'tax_bill_date'
@@ -140,6 +151,17 @@ export const FIELD_LABELS: FieldLabelOption[] = [
   { value: 'monthly_discount',          label: 'Monthly Discount $',       color: '#0ea5e9', bgColor: 'rgba(14,165,233,0.18)',  docTypes: ['lease_contract'] },
   { value: 'other_discount',            label: 'Other Discount $',         color: '#0d9488', bgColor: 'rgba(13,148,136,0.18)',  docTypes: ['lease_contract'] },
   { value: 'other_discount_comment',    label: 'Other Discount Comment',   color: '#65a30d', bgColor: 'rgba(101,163,13,0.18)', docTypes: ['lease_contract'] },
+  { value: 'household_ca_count',        label: '# in HH Receiving CA',     color: '#1d4ed8', bgColor: 'rgba(29,78,216,0.18)',  docTypes: ['lease_contract'] },
+  { value: 'household_non_ca_count',    label: '# in HH Not Receiving CA', color: '#2563eb', bgColor: 'rgba(37,99,235,0.18)',  docTypes: ['lease_contract'] },
+  { value: 'total_income_ca',           label: 'Total Income (CA)',        color: '#16a34a', bgColor: 'rgba(22,163,74,0.18)',  docTypes: ['lease_contract'] },
+  { value: 'total_income_non_ca',       label: 'Total Income (Non-CA)',    color: '#15803d', bgColor: 'rgba(21,128,61,0.18)',  docTypes: ['lease_contract'] },
+  { value: 'total_rent',                label: 'Total Rent',               color: '#dc2626', bgColor: 'rgba(220,38,38,0.18)',  docTypes: ['lease_contract'] },
+  { value: 'utility_allowance',         label: 'Utility Allowance',        color: '#d97706', bgColor: 'rgba(217,119,6,0.18)',  docTypes: ['lease_contract'] },
+  { value: 'ca_shelter_allowance',      label: 'CA Shelter Allowance',     color: '#b45309', bgColor: 'rgba(180,83,9,0.18)',   docTypes: ['lease_contract'] },
+  { value: 'cityfheps_rent_supplement', label: 'CityFHEPS Rent Supplement',color: '#7c3aed', bgColor: 'rgba(124,58,237,0.18)', docTypes: ['lease_contract'] },
+  { value: 'household_share',           label: 'Household Share',          color: '#0ea5e9', bgColor: 'rgba(14,165,233,0.18)', docTypes: ['lease_contract'] },
+  { value: 'utility_payment',           label: 'Utility Payment',          color: '#0d9488', bgColor: 'rgba(13,148,136,0.18)', docTypes: ['lease_contract'] },
+  { value: 'total_monthly_rent',        label: 'Total Monthly Rent',       color: '#be123c', bgColor: 'rgba(190,18,60,0.18)',  docTypes: ['lease_contract'] },
   // ── Tax fields ────────────────────────────────────────────────────
   { value: 'tax_year',        label: 'Tax Year',            color: '#7c3aed', bgColor: 'rgba(124,58,237,0.18)', docTypes: ['tax'] },
   { value: 'tax_bill_date',   label: 'Tax Bill Date',       color: '#0ea5e9', bgColor: 'rgba(14,165,233,0.18)', docTypes: ['tax'] },

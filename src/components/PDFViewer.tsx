@@ -6,9 +6,8 @@ import ViewerToolbar from './ViewerToolbar';
 import HighlightOverlay from './HighlightOverlay';
 import FieldLabelPicker from './FieldLabelPicker';
 import HighlightLegend from './HighlightLegend';
+import AutoHighlightDialog from './AutoHighlightDialog';
 import { downloadOcrPdf, searchBackend, type SearchMode } from '@/lib/api';
-import { autoSearchFieldValues } from '@/lib/pdf-extract';
-import { getFieldLabelsForType } from '@/types/utilscraper';
 import { toast } from 'sonner';
 
 pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
@@ -88,46 +87,30 @@ export default function PDFViewer({
   const [activeMatchIdx, setActiveMatchIdx] = useState<number>(-1);
   const [pdfLoaded, setPdfLoaded]       = useState(false);
   const [downloadingOcr, setDownloadingOcr] = useState(false);
-  const [autoSearching,  setAutoSearching]  = useState(false);
+  const [autoHighlightOpen, setAutoHighlightOpen] = useState(false);
 
-  const handleAutoSearch = useCallback(async () => {
+  // Opens the field-picker dialog. Actual search + highlight creation lives
+  // inside AutoHighlightDialog, which calls onApply with the chosen boxes.
+  const handleAutoSearch = useCallback(() => {
     if (!session.file) { toast.error('PDF file not loaded'); return; }
-    setAutoSearching(true);
-    try {
-      const labels = getFieldLabelsForType(session.docType)
-        .filter(f => f.value !== 'custom')
-        .map(f => ({ fieldKey: f.value as string, label: f.label }));
+    setAutoHighlightOpen(true);
+  }, [session.file]);
 
-      const found = await autoSearchFieldValues(session.file, labels);
-      let addedCount = 0;
-
+  const handleAutoHighlightApply = useCallback(
+    (newHighlights: Record<number, Highlight[]>, runExtract: boolean) => {
       const merged: Record<number, Highlight[]> = { ...session.highlights };
-      for (const [pageStr, pageHls] of Object.entries(found)) {
+      for (const [pageStr, pageHls] of Object.entries(newHighlights)) {
         const page = Number(pageStr);
-        const existing = merged[page] ?? [];
-        const existingFields = new Set(existing.map(h => h.field));
-        const fresh = pageHls.filter(h => !existingFields.has(h.field));
-        if (fresh.length === 0) continue;
-        merged[page] = [...existing, ...fresh];
-        addedCount += fresh.length;
+        merged[page] = [...(merged[page] ?? []), ...pageHls];
       }
-
-      if (addedCount === 0) {
-        toast('No new fields found to auto-highlight.', { icon: 'ℹ️' });
-      } else {
-        onHighlightsChange(session.id, merged);
-        toast.success(`Auto-highlighted ${addedCount} field${addedCount !== 1 ? 's' : ''}. Extracting…`);
-        // Defer so React commits the highlights update before Extract reads
-        // the session highlight list from its closure. Extract then behaves
-        // identically to when the user clicks "Extract" after drawing boxes
-        // manually — same backend extraction, same extracted-data panel.
+      onHighlightsChange(session.id, merged);
+      if (runExtract) {
+        // Defer so the highlights commit before Extract reads them.
         setTimeout(() => { onExtract(); }, 50);
       }
-    } catch (err: unknown) {
-      toast.error(err instanceof Error ? err.message : 'Auto-search failed');
-    }
-    setAutoSearching(false);
-  }, [session.file, session.docType, session.id, session.highlights, onHighlightsChange, onExtract]);
+    },
+    [session.highlights, session.id, onHighlightsChange, onExtract],
+  );
 
   const handleDownloadOcr = useCallback(async () => {
     setDownloadingOcr(true);
@@ -924,7 +907,16 @@ export default function PDFViewer({
         onDownloadOcr={handleDownloadOcr}
         downloadingOcr={downloadingOcr}
         onAutoSearch={handleAutoSearch}
-        autoSearching={autoSearching}
+        autoSearching={false}
+      />
+
+      <AutoHighlightDialog
+        open={autoHighlightOpen}
+        onOpenChange={setAutoHighlightOpen}
+        sessionId={session.id}
+        docType={session.docType}
+        existingCustomFields={customFields}
+        onApply={handleAutoHighlightApply}
       />
 
       {/* Search bar */}

@@ -98,10 +98,14 @@ const AMOUNT_FIELDS = new Set([
   'appraised_as_is_value',
   'security_deposit', 'rent_and_charges', 'monthly_rent',
   'onetime_concession_amount', 'monthly_discount', 'other_discount',
+  'total_income_ca', 'total_income_non_ca', 'total_rent',
+  'utility_allowance', 'ca_shelter_allowance', 'cityfheps_rent_supplement',
+  'household_share', 'utility_payment', 'total_monthly_rent',
   'total_tax_due', 'assessed_value',
 ]);
 
-const PERCENT_FIELDS = new Set(['cap_rate']);
+// cap_rate arrives already-numeric — no percent conversion.
+const PERCENT_FIELDS = new Set<string>();
 const YEAR_FIELDS = new Set(['tax_year']);
 
 function normalizePercentValue(raw: string): string {

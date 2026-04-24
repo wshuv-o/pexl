@@ -57,18 +57,28 @@ const AMOUNT_FIELDS = new Set([
   'appraised_as_is_value',
   'security_deposit', 'rent_and_charges', 'monthly_rent',
   'onetime_concession_amount', 'monthly_discount', 'other_discount',
+  'total_income_ca', 'total_income_non_ca', 'total_rent',
+  'utility_allowance', 'ca_shelter_allowance', 'cityfheps_rent_supplement',
+  'household_share', 'utility_payment', 'total_monthly_rent',
   'total_tax_due', 'assessed_value',
 ]);
-const PERCENT_FIELDS = new Set(['cap_rate']);
+// Plain integer counts — stored as numbers with no $ / % format.
+const COUNT_FIELDS = new Set(['household_ca_count', 'household_non_ca_count']);
+// cap_rate arrives as a plain number (e.g. "6.5") — write it as numeric with
+// no % conversion. Listed so the cell type is numeric instead of string.
+const NUMBER_FIELDS = new Set(['cap_rate']);
+const PERCENT_FIELDS = new Set<string>();
 const YEAR_FIELDS = new Set(['tax_year']);
 
-type CellKind = 'date' | 'amount' | 'percent' | 'year' | 'text';
+type CellKind = 'date' | 'amount' | 'percent' | 'year' | 'count' | 'number' | 'text';
 
 function cellKindFor(field: string): CellKind {
   if (DATE_FIELDS.has(field))    return 'date';
   if (AMOUNT_FIELDS.has(field))  return 'amount';
   if (PERCENT_FIELDS.has(field)) return 'percent';
   if (YEAR_FIELDS.has(field))    return 'year';
+  if (COUNT_FIELDS.has(field))   return 'count';
+  if (NUMBER_FIELDS.has(field))  return 'number';
   return 'text';
 }
 
@@ -122,6 +132,14 @@ function coerceCell(field: string, raw: string): any {
     case 'year': {
       const n = parseInt(raw, 10);
       return !isNaN(n) ? { t: 'n', v: n, z: '0' } : raw;
+    }
+    case 'count': {
+      const n = parseInt(raw, 10);
+      return !isNaN(n) ? { t: 'n', v: n, z: '0' } : raw;
+    }
+    case 'number': {
+      const n = parseNumberValue(raw);
+      return n !== null ? { t: 'n', v: n } : raw;
     }
     default:
       return raw;
