@@ -41,6 +41,93 @@ function thinBorder(): any {
   return { top: s, bottom: s, left: s, right: s };
 }
 
+// ─── Per-field cell typing ──────────────────────────────────────────────────
+// Keep these in sync with the snap-type sets in src/lib/api.ts so Excel types
+// line up with how values were normalized during extraction.
+const DATE_FIELDS = new Set([
+  'billing_date', 'statement_date', 'appraised_date',
+  'lease_date', 'lease_begin_date', 'lease_end_date',
+  'tax_bill_date', 'tax_due_date',
+]);
+const AMOUNT_FIELDS = new Set([
+  'total_gas_bill', 'total_electricity_bill', 'total_internet_bill',
+  'total_phone_bill', 'total_water_bill', 'total_sewer_bill',
+  'total_water_sewer_bill', 'total_trash_bill',
+  'beginning_balance', 'ending_balance', 'total_credits', 'total_debits',
+  'appraised_as_is_value',
+  'security_deposit', 'rent_and_charges', 'monthly_rent',
+  'onetime_concession_amount', 'monthly_discount', 'other_discount',
+  'total_tax_due', 'assessed_value',
+]);
+const PERCENT_FIELDS = new Set(['cap_rate']);
+const YEAR_FIELDS = new Set(['tax_year']);
+
+type CellKind = 'date' | 'amount' | 'percent' | 'year' | 'text';
+
+function cellKindFor(field: string): CellKind {
+  if (DATE_FIELDS.has(field))    return 'date';
+  if (AMOUNT_FIELDS.has(field))  return 'amount';
+  if (PERCENT_FIELDS.has(field)) return 'percent';
+  if (YEAR_FIELDS.has(field))    return 'year';
+  return 'text';
+}
+
+function alignFor(field: string): 'left' | 'center' | 'right' {
+  return cellKindFor(field) === 'text' ? 'left' : 'right';
+}
+
+function parseDateValue(raw: string): Date | null {
+  if (!raw) return null;
+  const mdy = raw.match(/^\s*(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})\s*$/);
+  if (mdy) {
+    const mm = parseInt(mdy[1], 10);
+    const dd = parseInt(mdy[2], 10);
+    let yy   = parseInt(mdy[3], 10);
+    if (yy < 100) yy += yy < 50 ? 2000 : 1900;
+    const d = new Date(Date.UTC(yy, mm - 1, dd));
+    if (!isNaN(d.getTime())) return d;
+  }
+  const d = new Date(raw);
+  return isNaN(d.getTime()) ? null : d;
+}
+
+function parseNumberValue(raw: string): number | null {
+  if (!raw) return null;
+  const cleaned = raw.replace(/[$,\s%]/g, '').trim();
+  const n = parseFloat(cleaned);
+  return isNaN(n) ? null : n;
+}
+
+// Convert a raw extracted string into the appropriate xlsx cell object based
+// on the field. Returns the original string if parsing fails, so the user
+// still sees something (rather than an empty cell).
+function coerceCell(field: string, raw: string): any {
+  if (!raw) return '';
+  switch (cellKindFor(field)) {
+    case 'date': {
+      const d = parseDateValue(raw);
+      return d ? { t: 'd', v: d, z: 'mm/dd/yyyy' } : raw;
+    }
+    case 'amount': {
+      const n = parseNumberValue(raw);
+      return n !== null ? { t: 'n', v: n, z: '"$"#,##0.00' } : raw;
+    }
+    case 'percent': {
+      const n = parseNumberValue(raw);
+      if (n === null) return raw;
+      // "6.5" (already a percent reading) → 0.065 so Excel's % format renders "6.50%"
+      const val = n > 1 ? n / 100 : n;
+      return { t: 'n', v: val, z: '0.00%' };
+    }
+    case 'year': {
+      const n = parseInt(raw, 10);
+      return !isNaN(n) ? { t: 'n', v: n, z: '0' } : raw;
+    }
+    default:
+      return raw;
+  }
+}
+
 function applyStyles(
   ws: XLSX.WorkSheet,
   wsData: any[][],
@@ -147,14 +234,15 @@ function buildSheetForFile(
       page,
       ...visibleColumns.map(col => {
         const arr = pageMap[col.key] ?? [];
-        return arr.length > 0 ? arr[0] : '';
+        const val = arr.length > 0 ? arr[0] : '';
+        return coerceCell(col.key, val);
       }),
     ];
     const r = push(rowCells);
     sc(r, 0, cell(C.whiteBg, true, 'center', 10));
-    for (let c = 1; c < rowCells.length; c++) {
-      sc(r, c, cell(C.whiteBg, false, 'left', 10));
-    }
+    visibleColumns.forEach((col, idx) => {
+      sc(r, 1 + idx, cell(C.whiteBg, false, alignFor(col.key), 10));
+    });
   }
 
   const ws = XLSX.utils.aoa_to_sheet(wsData);
@@ -196,7 +284,7 @@ function buildLeaseSheet(fileMap: Map<string, ExtractedRow[]>): XLSX.WorkSheet {
     { key: 'lease_begin_date',   field: 'lease_begin_date',   label: 'Lease Start', width: 12 },
     { key: 'lease_end_date',     field: 'lease_end_date',     label: 'Lease End', width: 12 },
     { key: 'lease_term', field: null, label: 'Lease Term', width: 10,
-      formula: (r, L) => `IFERROR((DATEVALUE(${L.lease_end_date}${r})-DATEVALUE(${L.lease_begin_date}${r}))/365.25,0)` },
+      formula: (r, L) => `IFERROR((${L.lease_end_date}${r}-${L.lease_begin_date}${r})/365.25,0)` },
     { key: 'security_deposit',   field: 'security_deposit',   label: 'Security Deposit', width: 15, type: 'money' },
     { key: 'monthly_rent',       field: 'monthly_rent',       label: 'Monthly Rent', width: 13, type: 'money' },
     { key: 'lease_value', field: null, label: 'Lease Value', width: 14,
@@ -273,7 +361,8 @@ function buildLeaseSheet(fileMap: Map<string, ExtractedRow[]>): XLSX.WorkSheet {
         if (n !== null) rowCells.push({ t: 'n', v: n, z: '"$"#,##0.00' });
         else rowCells.push(raw ?? '');
       } else {
-        rowCells.push(col.field ? values[col.field] ?? '' : '');
+        const raw = col.field ? values[col.field] ?? '' : '';
+        rowCells.push(coerceCell(col.field ?? '', raw));
       }
     }
 
@@ -281,9 +370,10 @@ function buildLeaseSheet(fileMap: Map<string, ExtractedRow[]>): XLSX.WorkSheet {
     sc(r, 0, cell(C.whiteBg, true, 'left', 10));
     for (let c = startExtraIdx; c < startCoreIdx; c++) sc(r, c, cell(C.whiteBg, false, 'left', 10));
     core.forEach((col, i) => {
+      const isTyped = col.field ? cellKindFor(col.field) !== 'text' : false;
       const align: 'left' | 'center' | 'right' =
         col.type === 'checkbox' ? 'center' :
-        col.type === 'money' || col.formula ? 'right' : 'left';
+        col.type === 'money' || col.formula || isTyped ? 'right' : 'left';
       sc(r, startCoreIdx + i, cell(C.whiteBg, false, align, col.type === 'checkbox' ? 12 : 10));
     });
   }
@@ -370,15 +460,15 @@ function buildUnifiedSheet(fileMap: Map<string, ExtractedRow[]>, docType: Docume
       pr.pdfNum,
       pr.folder,
       pr.fileName,
-      ...visibleColumns.map(col => pr.values[col.key] ?? ''),
+      ...visibleColumns.map(col => coerceCell(col.key, pr.values[col.key] ?? '')),
     ];
     const r = push(rowCells);
     sc(r, 0, cell(C.whiteBg, true,  'center', 10));  // PDF #
     sc(r, 1, cell(C.whiteBg, false, 'left',   10));  // Folder
     sc(r, 2, cell(C.whiteBg, true,  'left',   10));  // File Name
-    for (let c = 3; c < rowCells.length; c++) {
-      sc(r, c, cell(C.whiteBg, false, 'left', 10));
-    }
+    visibleColumns.forEach((col, idx) => {
+      sc(r, 3 + idx, cell(C.whiteBg, false, alignFor(col.key), 10));
+    });
   }
 
   const ws = XLSX.utils.aoa_to_sheet(wsData);
