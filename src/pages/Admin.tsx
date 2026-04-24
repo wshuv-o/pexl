@@ -411,7 +411,7 @@ const Admin = () => {
       {/* ── Header — matches Dashboard / OcrOnly ─────────────────── */}
       <header className="h-14 bg-card border-b border-border flex items-center px-6 gap-4 shrink-0">
         <button
-          onClick={() => navigate("/dashboard")}
+          onClick={() => navigate("/")}
           className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-all duration-200 px-2 py-1.5 rounded-lg hover:bg-muted"
           title="Back to dashboard"
         >
