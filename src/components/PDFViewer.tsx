@@ -368,11 +368,23 @@ export default function PDFViewer({
       }
 
       if (matches === 0) return r;
-      const pad = 2;
-      const tightX = Math.max(0, minX - pad);
-      const tightY = Math.max(0, minY - pad);
-      const tightR = Math.min(pageWidth,  maxX + pad);
-      const tightB = Math.min(pageHeight, maxY + pad);
+
+      // Horizontal padding is safe (no typographic surprises in X).
+      const padX = 1;
+      const tightX = Math.max(0, minX - padX);
+      const tightR = Math.min(pageWidth, maxX + padX);
+
+      // Vertical: pdfjs's `item.height` includes ascender + descender + line-gap,
+      // so the raw box overshoots the visible glyphs — especially for single-line
+      // text where the overshoot is clearly visible. Shrink to the cap-height band
+      // (~65% of the raw height) centered on the item's mid-Y.
+      const rawTop    = minY;
+      const rawBottom = maxY;
+      const midY      = (rawTop + rawBottom) / 2;
+      const shrunkH   = (rawBottom - rawTop) * 0.65;
+      const tightY    = Math.max(0, midY - shrunkH / 2);
+      const tightB    = Math.min(pageHeight, midY + shrunkH / 2);
+
       return {
         x: tightX / pageWidth,
         y: tightY / pageHeight,
