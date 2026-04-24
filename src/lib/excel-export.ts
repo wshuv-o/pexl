@@ -56,9 +56,6 @@ function applyStyles(
   }
 }
 
-// ---------------------------------------------------------------------------
-// Detect document type from the fields present in a set of rows
-// ---------------------------------------------------------------------------
 function detectDocType(rows: ExtractedRow[]): DocumentType {
   const fieldToType: Record<string, DocumentType> = {};
   for (const dt of DOCUMENT_TYPES) {
@@ -75,9 +72,6 @@ function detectDocType(rows: ExtractedRow[]): DocumentType {
   return detected || 'utility_bill';
 }
 
-// ---------------------------------------------------------------------------
-// Sanitize sheet name (XLSX: max 31 chars, no []:*?/\ characters)
-// ---------------------------------------------------------------------------
 function sanitizeSheetName(name: string, usedNames: Set<string>): string {
   let clean = name
     .replace(/\.(pdf|docx?)$/i, '')
@@ -96,13 +90,6 @@ function sanitizeSheetName(name: string, usedNames: Set<string>): string {
   return final;
 }
 
-// ---------------------------------------------------------------------------
-// Build a sheet for a single PDF file
-//
-// Layout:
-//   Row 0 (header): page | field1 | field2 | ...
-//   Row 1+:         1    | value  | value  | ...   (one row per extracted page)
-// ---------------------------------------------------------------------------
 function buildSheetForFile(
   rows: ExtractedRow[],
   docType: DocumentType,
@@ -125,11 +112,6 @@ function buildSheetForFile(
     ...fieldDefs.map(f => ({ key: f.value, label: f.label })),
     ...customFields.map(f => ({ key: f, label: f })),
   ];
-
-  // Group rows by page, keeping ALL values per field (no merging).
-  // Preserve first-appearance order so caller-side sorting carries through.
-  // Also track which fields the user highlighted anywhere in this PDF so we
-  // can show their column even when extraction returned empty.
   const byPage = new Map<number, Record<string, string[]>>();
   const pageOrder: number[] = [];
   const highlightedFields = new Set<string>();
@@ -146,10 +128,6 @@ function buildSheetForFile(
   }
 
   const sortedPages = pageOrder;
-
-  // Show columns for fields the user highlighted anywhere in this PDF.
-  // Fields defined for the doc type but never highlighted are hidden —
-  // a highlighted field keeps its column even if extraction returned empty.
   const visibleColumns = allColumns.filter(col => highlightedFields.has(col.key));
 
   const wsData: any[][] = [];
@@ -189,21 +167,6 @@ function buildSheetForFile(
   return ws;
 }
 
-// (Bank statement export now lives in bank-excel-export.ts using ExcelJS,
-//  with formulas, T-12 trailing metrics, gap-fill, and roll-up sheets.)
-
-// ---------------------------------------------------------------------------
-// Lease contract sheet — fixed 10-column "Lease" template on the right side
-// of the sheet. One row per PDF. Any non-template fields (custom labels or
-// the older `rent_and_charges`/concession/discount keys) are inserted to the
-// LEFT of the core columns, preserving the template on the right.
-//
-//   file_name │ [extras…] │ Contract Date │ Executed? │ Tenant Name(s) │
-//   Utilities included in Rent │ Lease Start │ Lease End │ Lease Term* │
-//   Security Deposit │ Monthly Rent │ Lease Value*
-//
-//   *Lease Term  = (Lease End − Lease Start) / 365.25
-//   *Lease Value = Monthly Rent × Lease Term × 12
 // ---------------------------------------------------------------------------
 function buildLeaseSheet(fileMap: Map<string, ExtractedRow[]>): XLSX.WorkSheet {
   const docType: DocumentType = 'lease_contract';
@@ -243,10 +206,6 @@ function buildLeaseSheet(fileMap: Map<string, ExtractedRow[]>): XLSX.WorkSheet {
       formula: (r, L) => `IFERROR(${L.monthly_rent}${r}*${L.lease_term}${r}*12,0)` },
   ];
 
-  // Any field key not in `core` is treated as an "extra" and goes left of
-  // the template. Any non-core field that the user highlighted in at least
-  // one PDF gets a column — even if every extraction returned empty, the
-  // column still appears (it was explicitly selected by the user).
   const coreFields = new Set(core.map(c => c.field).filter((f): f is string => !!f));
   const extras = new Set<string>();
   for (const rows of fileMap.values()) {
@@ -343,20 +302,6 @@ function buildLeaseSheet(fileMap: Map<string, ExtractedRow[]>): XLSX.WorkSheet {
   ws['!freeze'] = { xSplit: 1, ySplit: 2 };
   return ws;
 }
-
-// ---------------------------------------------------------------------------
-// Build a unified single-table sheet — one row per PDF.
-//
-// Layout:
-//   PDF # | Folder | File Name | Field1 | Field2 | … | [custom fields]
-//
-// Rules:
-//   - One row per PDF (all pages merged; first non-empty value wins)
-//   - Columns where every row is empty are hidden
-//   - No property_name grouping / no stacked tables
-//
-// Used for appraisal and tax. Can be used for any doc type that wants this
-// flat layout.
 // ---------------------------------------------------------------------------
 function buildUnifiedSheet(fileMap: Map<string, ExtractedRow[]>, docType: DocumentType): XLSX.WorkSheet {
   const headerColor = HEADER_COLORS[docType];
@@ -380,8 +325,6 @@ function buildUnifiedSheet(fileMap: Map<string, ExtractedRow[]>, docType: Docume
     ...customFields.map(f => ({ key: f, label: f })),
   ];
 
-  // Flatten each PDF into a single value-per-field map (first non-empty wins)
-  // and track which fields the user highlighted (regardless of extracted value).
   type PdfRow = {
     pdfNum: number;
     folder: string;
@@ -409,9 +352,6 @@ function buildUnifiedSheet(fileMap: Map<string, ExtractedRow[]>, docType: Docume
     });
   }
 
-  // Show columns for fields the user highlighted in at least one PDF.
-  // Fields defined for the doc type but never highlighted are hidden —
-  // even if the extraction returned empty, a highlighted field keeps its column.
   const visibleColumns = fieldColumns.filter(col => highlightedFields.has(col.key));
 
   const wsData: any[][] = [];
@@ -456,13 +396,6 @@ function buildUnifiedSheet(fileMap: Map<string, ExtractedRow[]>, docType: Docume
   return ws;
 }
 
-// ---------------------------------------------------------------------------
-// Main export
-//   - bank_statement → single combined sheet (see bank-excel-export.ts)
-//   - appraisal      → single unified table (PDF # | Folder | File Name | fields)
-//   - lease_contract → fixed "Lease" template (right-aligned), extras on left
-//   - other types    → one sheet per PDF
-// ---------------------------------------------------------------------------
 export function exportToExcel(
   data: ExtractedRow[],
   _filename: string,
@@ -493,17 +426,17 @@ export function exportToExcel(
     });
     return;
   } else if (overallType === 'appraisal') {
-    // Single unified table — one row per PDF, with PDF # / Folder / File Name
-    // as leading columns. Empty field columns are hidden.
     const ws = buildUnifiedSheet(fileMap, 'appraisal');
     XLSX.utils.book_append_sheet(wb, ws, 'Appraisals');
   } else if (overallType === 'tax') {
-    // Same unified layout as appraisal — one row per PDF, empty columns hidden.
     const ws = buildUnifiedSheet(fileMap, 'tax');
     XLSX.utils.book_append_sheet(wb, ws, 'Tax');
+
+  } else if (overallType === 'utility_bill') {
+  const ws = buildUnifiedSheet(fileMap, 'utility_bill');
+  XLSX.utils.book_append_sheet(wb, ws, 'Utility Bills');
+
   } else if (overallType === 'lease_contract') {
-    // Fixed "Lease" template — 10 core columns on the right, extras on
-    // the left, computed Lease Term / Lease Value columns.
     const ws = buildLeaseSheet(fileMap);
     XLSX.utils.book_append_sheet(wb, ws, 'Lease Contracts');
   } else {
