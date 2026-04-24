@@ -40,6 +40,12 @@ export default function Index() {
   const [navCollapsed, setNavCollapsed]         = useState(false);
   const [pendingDocType, setPendingDocType]     = useState<DocumentType>('utility_bill');
   const [dragTabId, setDragTabId]               = useState<string | null>(null);
+  // Tabs the user has multi-selected (Ctrl/Cmd+click). Independent of the
+  // active tab. Drives "Apply highlights to selected PDFs".
+  const [multiSelectedTabIds, setMultiSelectedTabIds] = useState<Set<string>>(new Set());
+  // Anchor for Shift+click range selection. Updated by plain and Ctrl-clicks,
+  // held fixed during Shift-clicks so you can keep extending the range.
+  const [tabAnchorId, setTabAnchorId] = useState<string | null>(null);
   const [pageJump, setPageJump]                 = useState<{ sessionId: string; page: number; nonce: number } | null>(null);
   // Session-wide custom field labels — survive tab switches and show up in
   // every PDF's label picker.
@@ -178,10 +184,6 @@ export default function Index() {
     setPendingFiles([]); setProcessing(false);
   }, [pendingFiles, pendingDocType, activeTabId]);
 
-  // ── Undo / Redo / Cut-Paste for highlights ──────────────────────────────
-  // Per-session stacks of highlight-map snapshots. Max 10 entries each.
-  // Stored in refs so pushing doesn't cause a re-render (we only re-render
-  // when highlights actually get restored via setSessions).
   const undoStacks = useRef<Record<string, Record<number, Highlight[]>[]>>({});
   const redoStacks = useRef<Record<string, Record<number, Highlight[]>[]>>({});
   const clipboard  = useRef<Highlight[] | null>(null);
@@ -331,11 +333,16 @@ export default function Index() {
     }));
   }, []);
 
-  // Extract ALL sessions that have highlights (not just the active tab)
+  // Extract every session whose tab is currently OPEN and has highlights.
+  // Closed-tab sessions keep their existing extractedData (still visible in
+  // the Excel panel) but are skipped on subsequent extract runs — closing a
+  // tab is our signal that the user is done with that PDF.
   const handleExtract = useCallback(async () => {
+    const openTabSet = new Set(openTabs);
     const targets = sessions.filter(s =>
       s.file && Object.values(s.highlights).flat().length > 0 &&
-      (s.status === 'ready' || s.status === 'extracted')
+      (s.status === 'ready' || s.status === 'extracted') &&
+      openTabSet.has(s.id)
     );
     if (!targets.length) { toast('Draw highlight boxes first', { icon: 'ℹ️' }); return; }
 
@@ -354,7 +361,7 @@ export default function Index() {
       const allHl = Object.values(clearedHighlights).flat();
 
       try {
-        const results = await extractRegions(sess.id, allHl, sess.file!);
+        const results = await extractRegions(sess.id, allHl, sess.file!, { strict: true });
 
         const newHighlights = { ...clearedHighlights };
         let idx = 0;
@@ -389,7 +396,7 @@ export default function Index() {
 
     // Track usage
     trackUsage(targets.length, totalExtracted).catch(() => {});
-  }, [sessions, trackUsage]);
+  }, [sessions, openTabs, trackUsage]);
 
   const handleReExtractHighlight = useCallback(async (highlightId: string) => {
     if (!activeSession?.file) return;
@@ -414,7 +421,7 @@ export default function Index() {
     if (!found) return;
     setExtracting(true);
     try {
-      const results = await extractRegions(activeSession.id, [found], activeSession.file);
+      const results = await extractRegions(activeSession.id, [found], activeSession.file, { strict: true });
       const result = results[0];
       if (!result) return;
       setSessions(prev => prev.map(s => {
@@ -443,7 +450,12 @@ export default function Index() {
   // whatever text the source highlight was sitting on — so the boxes end up
   // over the correct text even when the target's layout differs. Falls back
   // to raw coords if the text can't be located (scanned page, no match).
-  const handleApplyToAllPdfs = useCallback(async (sourceHighlights: Record<number, Highlight[]>) => {
+  const handleApplyToAllPdfs = useCallback(async (
+    sourceHighlights: Record<number, Highlight[]>,
+    // Optional — if provided, mirror only to these session IDs. Used by
+    // "Apply highlights to selected PDFs" (ctrl-click tabs to build the set).
+    restrictIds?: Set<string>,
+  ) => {
     const sourceSession = sessions.find(s => s.id === activeTabId);
     if (!sourceSession?.file) return;
     const srcFile  = sourceSession.file;
@@ -477,7 +489,8 @@ export default function Index() {
     const targets = sessions.filter(s =>
       s.id !== activeTabId
       && (s.status === 'ready' || s.status === 'extracted')
-      && !!s.file,
+      && !!s.file
+      && (restrictIds ? restrictIds.has(s.id) : true),
     );
 
     // 2. For each target session, build repositioned highlights page-by-page.
@@ -533,8 +546,9 @@ export default function Index() {
     if (totalApplied === 0) {
       toast('No matching target PDFs were updated.', { icon: 'ℹ️' });
     } else {
+      const scope = restrictIds ? 'selected PDF' : 'PDF';
       toast.success(
-        `Mirrored to ${perTargetUpdates.length} PDF${perTargetUpdates.length !== 1 ? 's' : ''}` +
+        `Mirrored to ${perTargetUpdates.length} ${scope}${perTargetUpdates.length !== 1 ? 's' : ''}` +
         (totalSnapped > 0 ? ` — ${totalSnapped}/${totalApplied} snapped to matching text` : ''),
       );
     }
@@ -864,11 +878,50 @@ export default function Index() {
                     className={`group flex items-center gap-1.5 pl-3 pr-1 py-1.5 rounded-t-lg text-xs cursor-grab
                       max-w-[200px] min-w-[100px] select-none transition-colors
                       ${dragTabId === s.id ? 'opacity-40' : ''}
+                      ${multiSelectedTabIds.has(s.id) ? 'ring-2 ring-primary ring-offset-1 ring-offset-muted' : ''}
                       ${isActive
                         ? 'bg-card text-foreground font-medium'
                         : 'bg-muted/60 text-muted-foreground hover:bg-muted/80'
                       }`}
-                    onClick={() => setActiveTabId(s.id)}
+                    onClick={e => {
+                      // Shift+click → add every tab between the current
+                      // anchor and this one to the multi-select set.
+                      // Works like Explorer / VSCode file list behavior.
+                      if (e.shiftKey && tabAnchorId && tabAnchorId !== s.id) {
+                        e.stopPropagation();
+                        const aIdx = openTabs.indexOf(tabAnchorId);
+                        const bIdx = openTabs.indexOf(s.id);
+                        if (aIdx !== -1 && bIdx !== -1) {
+                          const lo = Math.min(aIdx, bIdx);
+                          const hi = Math.max(aIdx, bIdx);
+                          setMultiSelectedTabIds(prev => {
+                            const next = new Set(prev);
+                            for (let i = lo; i <= hi; i++) next.add(openTabs[i]);
+                            return next;
+                          });
+                        }
+                        return;
+                      }
+                      // Ctrl / Cmd click → toggle this tab in the multi-select
+                      // set WITHOUT switching active. Updates the anchor so
+                      // the next Shift+click extends from here.
+                      if (e.ctrlKey || e.metaKey) {
+                        e.stopPropagation();
+                        setMultiSelectedTabIds(prev => {
+                          const next = new Set(prev);
+                          if (next.has(s.id)) next.delete(s.id);
+                          else next.add(s.id);
+                          return next;
+                        });
+                        setTabAnchorId(s.id);
+                        return;
+                      }
+                      // Plain click → switch active tab and reset the anchor
+                      // so future Shift+clicks range from here.
+                      setActiveTabId(s.id);
+                      setTabAnchorId(s.id);
+                    }}
+                    title={`${s.filename}\nCtrl/Cmd+click: toggle selection\nShift+click: select range`}
                   >
                     <span
                       className="w-1.5 h-1.5 rounded-full shrink-0"
@@ -903,6 +956,10 @@ export default function Index() {
                   onExtract={handleExtract}
                   onReExtract={handleReExtractHighlight}
                   onApplyToAllPdfs={handleApplyToAllPdfs}
+                  onApplyToSelectedPdfs={multiSelectedTabIds.size > 0
+                    ? (src) => handleApplyToAllPdfs(src, multiSelectedTabIds)
+                    : undefined}
+                  selectedPdfCount={multiSelectedTabIds.size}
                   onStartPageChange={handleStartPageChange}
                   extracting={extracting}
                   scrollToPageTrigger={pageJump && pageJump.sessionId === activeSession.id ? pageJump : null}

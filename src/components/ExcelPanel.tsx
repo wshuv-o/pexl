@@ -474,6 +474,12 @@ export default function ExcelPanel({
                           ${isSelected ? 'bg-primary/10 shadow-[inset_3px_0_0_0_hsl(var(--primary))]' : ''}
                           ${isLastInGroup && gi < sortedGroups.length - 1 ? 'border-b-2 border-b-primary/40' : 'border-b border-border/40'}`}
                         onClick={() => {
+                          // If the user just finished a text selection, treat the
+                          // "click" as a selection end — don't navigate. Keeps
+                          // cell values copiable (click-drag → Ctrl+C) while the
+                          // row-click-to-scroll behavior still works on clean clicks.
+                          const sel = window.getSelection?.();
+                          if (sel && sel.toString().trim().length > 0) return;
                           setSelectedRowKey(rowKey);
                           onRowClick?.(row.sessionId, row.page);
                         }}
@@ -500,9 +506,10 @@ export default function ExcelPanel({
                           return (
                             <td
                               key={f}
-                              className="px-3 py-2 cursor-text border-l border-border/40 min-w-[120px]"
+                              className="px-3 py-2 cursor-text border-l border-border/40 min-w-[120px] select-text"
                               onDoubleClick={() => setEditingKey(cellKey)}
-                              title="Double-click to edit"
+                              onMouseDown={e => e.stopPropagation()}
+                              title={isNull ? 'Double-click to edit' : String(cell.value)}
                             >
                               {isEditing ? (
                                 <input
@@ -521,7 +528,7 @@ export default function ExcelPanel({
                                   {isNull ? (
                                     <span className="text-muted-foreground/40 italic">—</span>
                                   ) : (
-                                    <span className={`truncate ${cell.edited ? 'text-warning' : 'text-foreground'}`}>
+                                    <span className={`truncate select-text ${cell.edited ? 'text-warning' : 'text-foreground'}`}>
                                       {cell.value}
                                     </span>
                                   )}

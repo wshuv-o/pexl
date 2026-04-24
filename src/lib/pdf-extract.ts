@@ -624,6 +624,11 @@ export async function autoSearchFieldValues(
         const maxY = Math.max(...chain.map(c => c.y + c.h));
         const pad = 2;
 
+        // Leave extractedValue / confidence / wasOcr UNSET and isAutoExtracted
+        // off — the caller (handleAutoSearch) kicks off the regular Extract
+        // flow right after, which runs the backend's smart detection over
+        // these boxes and produces canonical values. Treating them as fresh
+        // user-drawn highlights gives us the same accuracy as manual draws.
         pageHls.push({
           id: `auto-${Date.now()}-${pageNum}-${fieldKey}-${Math.random().toString(36).slice(2, 5)}`,
           page: pageNum,
@@ -632,10 +637,6 @@ export async function autoSearchFieldValues(
           y:      Math.max(0, minY - pad) / pageHeight,
           width:  (Math.min(pageWidth,  maxX + pad) - Math.max(0, minX - pad)) / pageWidth,
           height: (Math.min(pageHeight, maxY + pad) - Math.max(0, minY - pad)) / pageHeight,
-          extractedValue: chain.map(c => c.str).join(' ').replace(/\s+/g, ' ').trim(),
-          confidence: 'medium',
-          wasOcr: false,
-          isAutoExtracted: true,
         });
         usedFields.add(fieldKey);              // don't double-match the same field on this page
       }

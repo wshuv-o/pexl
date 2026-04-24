@@ -149,30 +149,7 @@
   border-radius: 3px;
 }
 
-/* ------------------------------------------------------------------
- * react-pdf text-selection accuracy (react-pdf v10 / pdfjs v4)
- * ------------------------------------------------------------------
- * react-pdf v10 renders the selectable layer as <div class="textLayer">
- * (not .react-pdf__Page__textContent — that was an older API).
- *
- * The page wrapper stays `user-select: none`; we *only* enable text
- * selection on .textLayer. That way mousedowns that land in empty
- * page margins / gaps don't drag the browser's selection anchor
- * across every span in the layer (which is what made "select one
- * word" behave like "select the whole page").
- *
- * Lift the text layer above our highlight / search overlays so the
- * mousedown actually reaches it.
- * ------------------------------------------------------------------ */
 .textLayer {
-  /* Container itself is NOT a valid text-selection anchor — this is
-     the trick Adobe / pdfjs's own viewer use. Clicking in a margin
-     or in the gap between two lines therefore doesn't anchor the
-     browser's drag-selection on the layer's first text node (which
-     was the "drag anywhere → whole page selected" behaviour).
-     Pointer events still reach the layer, so pdfjs's own selection-
-     enhancement JS runs normally and selection extends through gaps
-     between spans as the cursor moves, just like Adobe. */
   user-select: none;
   -webkit-user-select: none;
   /* Above HighlightOverlay (z:10–40 — but those are pointer-events:
@@ -198,11 +175,6 @@
   color: transparent;
 }
 
-/* ------------------------------------------------------------------
- * Auto-map — colour the actual PDF glyphs that fall inside a match
- * box, so the user sees the extracted text characters themselves
- * painted green (not just a translucent rectangle).
- * ------------------------------------------------------------------ */
 .textLayer > span.am-hit {
   color: #15803d !important;          /* green-700 */
   font-weight: 700 !important;

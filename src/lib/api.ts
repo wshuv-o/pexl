@@ -55,7 +55,6 @@ function normalizeDateValue(raw: string): string {
   s = s.replace(/\s+/g, ' ').trim();
 
   // --- Try to parse "D Month YYYY" or "Month D YYYY" ---
-  // Pattern A: "1 September 2025"
   const patA = s.match(/^(\d{1,2})\s+([a-zA-Z]+)\s+(\d{4})$/);
   if (patA) {
     const month = MONTH_MAP[patA[2].toLowerCase()];
@@ -65,7 +64,6 @@ function normalizeDateValue(raw: string): string {
     }
   }
 
-  // Pattern B: "September 1 2025"
   const patB = s.match(/^([a-zA-Z]+)\s+(\d{1,2})\s+(\d{4})$/);
   if (patB) {
     const month = MONTH_MAP[patB[1].toLowerCase()];
@@ -75,7 +73,6 @@ function normalizeDateValue(raw: string): string {
     }
   }
 
-  // Pattern C: "Month YYYY" (no day — default to 1st)
   const patC = s.match(/^([a-zA-Z]+)\s+(\d{4})$/);
   if (patC) {
     const month = MONTH_MAP[patC[1].toLowerCase()];
@@ -84,13 +81,13 @@ function normalizeDateValue(raw: string): string {
     }
   }
 
-  // If already in a numeric date format, return as-is (e.g. "09/01/2025", "9-1-2025")
   return s;
 }
 
 const DATE_FIELDS = new Set([
   'billing_date', 'statement_date', 'appraised_date',
   'lease_date', 'lease_begin_date', 'lease_end_date',
+  'tax_bill_date', 'tax_due_date',
 ]);
 
 const AMOUNT_FIELDS = new Set([
@@ -99,31 +96,39 @@ const AMOUNT_FIELDS = new Set([
   'total_water_sewer_bill', 'total_trash_bill',
   'beginning_balance', 'ending_balance', 'total_credits', 'total_debits',
   'appraised_as_is_value',
-  'security_deposit', 'rent_and_charges',
+  'security_deposit', 'rent_and_charges', 'monthly_rent',
   'onetime_concession_amount', 'monthly_discount', 'other_discount',
+  'total_tax_due', 'assessed_value',
 ]);
 
-function normalizeAmountValue(raw: string): string {
-  // Strip everything except digits, dots, commas, minus, and $
-  let s = raw.replace(/[^0-9.,$-]/g, '').trim();
+const PERCENT_FIELDS = new Set(['cap_rate']);
+const YEAR_FIELDS = new Set(['tax_year']);
 
-  // Remove $ and commas
+function normalizePercentValue(raw: string): string {
+  const s = raw.replace(/[^\d.-]/g, '').trim();
+  const n = parseFloat(s);
+  if (isNaN(n)) return raw;
+  const pct = n > 0 && n < 1 ? n * 100 : n;
+  return `${pct.toFixed(2)}%`;
+}
+
+function normalizeYearValue(raw: string): string {
+  const m = raw.match(/(\d{4})/);
+  return m ? m[1] : raw.trim();
+}
+
+function normalizeAmountValue(raw: string): string {
+  let s = raw.replace(/[^0-9.,$-]/g, '').trim();
   s = s.replace(/[$,]/g, '');
 
-  // Detect two amounts glued together: "32965.1416883.36"
-  // Pattern: a number with decimals immediately followed by another number with decimals
   const concatMatch = s.match(/^(-?\d+\.\d{2})(\d+\.\d{2})$/);
-  if (concatMatch) {
-    // Take only the first amount
-    s = concatMatch[1];
-  }
+  if (concatMatch) s = concatMatch[1];
 
   const dotIdx = s.indexOf('.');
   if (dotIdx >= 0) {
     const beforeDot = s.slice(0, dotIdx);
     const afterDot = s.slice(dotIdx + 1);
     if (afterDot.length === 2 && beforeDot.length > 6) {
-      // Try to find a valid split: look for a .XX pattern in the original raw text
       const amounts = raw.match(/-?\$?[\d,]+\.\d{2}/g);
       if (amounts && amounts.length >= 1) {
         const first = amounts[0].replace(/[$,]/g, '');
@@ -133,38 +138,32 @@ function normalizeAmountValue(raw: string): string {
     }
   }
 
-  // Handle multiple dots: "12.12.1531" → two amounts, take the first
   const dotCount = (s.match(/\./g) || []).length;
   if (dotCount > 1) {
-    // Try to extract the first valid amount
     const firstAmount = s.match(/^(-?\d+\.\d{2})/);
     if (firstAmount) {
       s = firstAmount[1];
     } else {
-      // Fallback: keep only last dot as decimal
       const lastDot = s.lastIndexOf('.');
       s = s.slice(0, lastDot).replace(/\./g, '') + s.slice(lastDot);
     }
   }
 
-  // Validate: should be a number now
   const num = parseFloat(s);
   if (isNaN(num)) return raw;
-
-  // Format: always show 2 decimal places for money
   return num.toFixed(2);
 }
 
 function sanitizeResults(results: ExtractedRow[]): ExtractedRow[] {
   return results.map(r => {
-    let value = sanitizeValue(r.value);
-    if (value && DATE_FIELDS.has(r.field)) {
-      value = normalizeDateValue(value);
-    }
-    if (value && AMOUNT_FIELDS.has(r.field)) {
-      value = normalizeAmountValue(value);
-    }
-    return { ...r, value };
+    const cleaned = sanitizeValue(r.value);
+    if (!cleaned) return { ...r, value: cleaned };
+    let v = cleaned;
+    if (DATE_FIELDS.has(r.field))         v = normalizeDateValue(v);
+    else if (AMOUNT_FIELDS.has(r.field))  v = normalizeAmountValue(v);
+    else if (PERCENT_FIELDS.has(r.field)) v = normalizePercentValue(v);
+    else if (YEAR_FIELDS.has(r.field))    v = normalizeYearValue(v);
+    return { ...r, value: v };
   });
 }
 
@@ -593,6 +592,7 @@ export async function extractRegions(
   sessionId: string,
   highlights: Highlight[],
   file?: File,
+  opts: { strict?: boolean } = {},
 ): Promise<ExtractedRow[]> {
 
   // Must have at least one highlight
@@ -600,11 +600,16 @@ export async function extractRegions(
     return [];
   }
 
+  // `strict` tells the backend to just read text inside the rect — no
+  // label-adjacent smart detection.
+  const strict = opts.strict === true;
+
   // Try backend — sends highlights from ALL pages at once
   try {
     if (backendOnline && !sessionId.startsWith('local-')) {
       const body = JSON.stringify({
         session_id: sessionId,
+        strict,
         highlights: highlights.map(h => ({
           page: h.page, field: h.field,
           x: h.x, y: h.y, width: h.width, height: h.height,
@@ -630,6 +635,7 @@ export async function extractRegions(
           const redata = await reprocess.json();
           const retryBody = JSON.stringify({
             session_id: redata.session_id,
+            strict,
             highlights: highlights.map(h => ({
               page: h.page, field: h.field,
               x: h.x, y: h.y, width: h.width, height: h.height,
@@ -680,6 +686,7 @@ export async function extractRegions(
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               session_id: sessionId,
+              strict,
               highlights: ocrHighlights.map(h => ({
                 page: h.page, field: h.field,
                 x: h.x, y: h.y, width: h.width, height: h.height,

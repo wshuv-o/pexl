@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useMemo } from 'react';
 import {
   ChevronLeft, ChevronRight, ZoomIn, ZoomOut,
   MousePointer2, Eraser, Loader2, TextCursor,
-  CopyPlus, Files, Trash2, ListChecks, ChevronDown, Search,
+  FileDown, FileInput, FileStack, Trash2, ListChecks, ChevronDown, Search,
   SlidersHorizontal, Download, MousePointerClick, Wand2,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -28,6 +28,10 @@ interface ViewerToolbarProps {
   // Bulk actions
   onApplyToAllPages: () => void;
   onApplyToAllPdfs: () => void;
+  // Mirror highlights only to the ctrl/cmd-selected tabs. Count drives the
+  // button's badge; undefined handler hides the button entirely.
+  onApplyToSelectedPdfs?: () => void;
+  selectedPdfCount?: number;
   onEraseAllPages: () => void;
   onApplyToPageRange: (pages: number[]) => void;
   searchOpen: boolean;
@@ -60,7 +64,8 @@ export default function ViewerToolbar({
   currentPage, totalPages, startPage, zoom, tool, isOcr, hasHighlightsOnPage,
   onPageChange, onZoomChange, onToolChange,
   onExtract, extracting, hasHighlights,
-  onApplyToAllPages, onApplyToAllPdfs, onEraseAllPages, onApplyToPageRange,
+  onApplyToAllPages, onApplyToAllPdfs, onApplyToSelectedPdfs, selectedPdfCount = 0,
+  onEraseAllPages, onApplyToPageRange,
   searchOpen, onSearchToggle,
   fineRotation, onFineRotationChange,
   onStartPageChange,
@@ -358,17 +363,47 @@ export default function ViewerToolbar({
       {/* Bulk actions */}
       <div className="flex items-center gap-0.5 shrink-0">
         {bulkBtn(
-          <CopyPlus className="w-4 h-4" />,
+          <FileDown className="w-4 h-4" />,
           'Copy highlights to all pages in this PDF',
           onApplyToAllPages,
           !hasHighlightsOnPage,
         )}
         {bulkBtn(
-          <Files className="w-4 h-4" />,
+          <FileInput className="w-4 h-4" />,
           'Copy highlights to all open PDFs',
           onApplyToAllPdfs,
           !hasHighlightsOnPage,
         )}
+
+        {/* Copy highlights to multi-selected PDFs — appears once the user has
+            ctrl/cmd-clicked one or more tabs in the top tab bar. The badge
+            shows how many tabs are currently selected. */}
+        {onApplyToSelectedPdfs && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                className="relative p-1.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted
+                           disabled:opacity-30 disabled:cursor-not-allowed transition-colors shrink-0"
+                onClick={onApplyToSelectedPdfs}
+                disabled={!hasHighlightsOnPage || selectedPdfCount === 0}
+                aria-label="Copy highlights to selected PDFs"
+              >
+                <FileStack className="w-4 h-4" />
+                {selectedPdfCount > 0 && (
+                  <span className="absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] px-0.5 rounded-full bg-primary text-primary-foreground text-[9px] font-semibold flex items-center justify-center leading-none">
+                    {selectedPdfCount}
+                  </span>
+                )}
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom" className="max-w-[240px] text-xs">
+              {selectedPdfCount === 0
+                ? 'Ctrl/Cmd+click tabs in the top bar to multi-select, then use this to copy highlights only to those PDFs.'
+                : `Copy highlights to the ${selectedPdfCount} selected PDF${selectedPdfCount !== 1 ? 's' : ''}`}
+            </TooltipContent>
+          </Tooltip>
+        )}
+
         {bulkBtn(
           <Trash2 className="w-4 h-4" />,
           'Erase highlights from all pages in this PDF',

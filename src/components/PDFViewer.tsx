@@ -19,6 +19,11 @@ interface PDFViewerProps {
   onExtract: () => void;
   onReExtract: (highlightId: string) => void;
   onApplyToAllPdfs: (sourceHighlights: Record<number, Highlight[]>) => void;
+  // Mirror the active PDF's highlights to just the tabs the user
+  // ctrl/cmd-clicked. Undefined when no tabs are multi-selected.
+  onApplyToSelectedPdfs?: (sourceHighlights: Record<number, Highlight[]>) => void;
+  // Count of multi-selected tabs (shown on the toolbar button).
+  selectedPdfCount?: number;
   onStartPageChange: (sessionId: string, startPage: number) => void;
   extracting: boolean;
   scrollToPageTrigger?: { page: number; nonce: number } | null;
@@ -34,6 +39,8 @@ export default function PDFViewer({
   onExtract,
   onReExtract,
   onApplyToAllPdfs,
+  onApplyToSelectedPdfs,
+  selectedPdfCount,
   onStartPageChange,
   extracting,
   scrollToPageTrigger,
@@ -55,6 +62,11 @@ export default function PDFViewer({
     x: number; y: number;
     rect: { x: number; y: number; w: number; h: number };
     page: number;
+    // Populated when the highlight was created from a browser text selection
+    // (text-select tool). The picker still prompts for a field, but we
+    // pre-fill the new highlight's extractedValue with this string so users
+    // don't have to re-run extraction for native-text selections.
+    selectedText?: string;
   } | null>(null);
 
   // Multi-select (click + shift/ctrl on boxes)
@@ -104,13 +116,18 @@ export default function PDFViewer({
         toast('No new fields found to auto-highlight.', { icon: 'ℹ️' });
       } else {
         onHighlightsChange(session.id, merged);
-        toast.success(`Auto-highlighted ${addedCount} field${addedCount !== 1 ? 's' : ''}`);
+        toast.success(`Auto-highlighted ${addedCount} field${addedCount !== 1 ? 's' : ''}. Extracting…`);
+        // Defer so React commits the highlights update before Extract reads
+        // the session highlight list from its closure. Extract then behaves
+        // identically to when the user clicks "Extract" after drawing boxes
+        // manually — same backend extraction, same extracted-data panel.
+        setTimeout(() => { onExtract(); }, 50);
       }
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : 'Auto-search failed');
     }
     setAutoSearching(false);
-  }, [session.file, session.docType, session.id, session.highlights, onHighlightsChange]);
+  }, [session.file, session.docType, session.id, session.highlights, onHighlightsChange, onExtract]);
 
   const handleDownloadOcr = useCallback(async () => {
     setDownloadingOcr(true);
@@ -273,7 +290,15 @@ export default function PDFViewer({
     const pos = getRelativePos(e.clientX, e.clientY, el);
     if (!pos) return;
 
-    if (tool === 'cursor' || tool === 'select' || tool === 'text-select') {
+    // In text-select mode we let the browser handle native character-level
+    // selection. The completed selection is picked up in a global mouseup
+    // handler below and turned into a highlight with the field-label picker.
+    if (tool === 'text-select') {
+      setPickerPos(null);
+      return;
+    }
+
+    if (tool === 'cursor' || tool === 'select') {
       e.preventDefault();
       if (!e.shiftKey && !e.ctrlKey && !e.metaKey) setSelectedIds(new Set());
       setDrawingPage(pageNum);
@@ -298,70 +323,6 @@ export default function PDFViewer({
       });
     }
   }, [drawing, drawingPage, getRelativePos]);
-
-  const snapRectToText = useCallback(async (
-    page: number,
-    r: { x: number; y: number; w: number; h: number },
-  ): Promise<{ x: number; y: number; w: number; h: number }> => {
-    const doc = pdfDocRef.current;
-    if (!doc) return r;
-    try {
-      const p = await doc.getPage(page);
-      const content = await p.getTextContent();
-      const vp = p.getViewport({ scale: 1 });
-      const pageWidth = vp.width, pageHeight = vp.height;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const items = content.items as any[];
-
-      const rLeft   = r.x * pageWidth;
-      const rRight  = (r.x + r.w) * pageWidth;
-      const rTop    = r.y * pageHeight;
-      const rBottom = (r.y + r.h) * pageHeight;
-
-      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-      let matches = 0;
-      for (const item of items) {
-        if (!item.str || !item.transform) continue;
-        const str = item.str as string;
-        if (!str.trim()) continue;
-        const itemX = item.transform[4];
-        const itemH = item.height || Math.abs(item.transform[3]) || 12;
-        const itemW = item.width || str.length * 6;
-        const itemTop = pageHeight - item.transform[5];
-        const itemBottom = itemTop + itemH;
-        const itemRight = itemX + itemW;
-        const cx = (itemX + itemRight) / 2;
-        const cy = (itemTop + itemBottom) / 2;
-        if (cx < rLeft || cx > rRight || cy < rTop || cy > rBottom) continue;
-        matches++;
-        if (itemX      < minX) minX = itemX;
-        if (itemTop    < minY) minY = itemTop;
-        if (itemRight  > maxX) maxX = itemRight;
-        if (itemBottom > maxY) maxY = itemBottom;
-      }
-
-      if (matches === 0) return r;
-
-      // Horizontal padding is safe (no typographic surprises in X).
-      const padX = 1;
-      const tightX = Math.max(0, minX - padX);
-      const tightR = Math.min(pageWidth, maxX + padX);
-
-      const rawTop    = minY;
-      const rawBottom = maxY;
-      const midY      = (rawTop + rawBottom) / 2;
-      const shrunkH   = (rawBottom - rawTop) * 0.65;
-      const tightY    = Math.max(0, midY - shrunkH / 2);
-      const tightB    = Math.min(pageHeight, midY + shrunkH / 2);
-
-      return {
-        x: tightX / pageWidth,
-        y: tightY / pageHeight,
-        w: (tightR - tightX) / pageWidth,
-        h: (tightB - tightY) / pageHeight,
-      };
-    } catch { return r; }
-  }, []);
 
   const handleMouseUp = useCallback(async (e: React.MouseEvent) => {
     // Select mode: finish marquee — select all highlights whose center lies inside
@@ -401,10 +362,7 @@ export default function PDFViewer({
       const px  = pos?.px ?? e.clientX;
       const py  = pos?.py ?? e.clientY;
 
-      let rect = { x: drawing.x, y: drawing.y, w: drawing.w, h: drawing.h };
-      if (tool === 'text-select') {
-        rect = await snapRectToText(drawingPage, rect);
-      }
+      const rect = { x: drawing.x, y: drawing.y, w: drawing.w, h: drawing.h };
 
       setPickerPos({
         x:    Math.min(px, (el.offsetWidth  ?? 600) - 160),
@@ -415,7 +373,87 @@ export default function PDFViewer({
       setDrawing(null);
       setDrawingPage(null);
     }
-  }, [drawing, drawingPage, tool, session.highlights, getRelativePos, snapRectToText]);
+  }, [drawing, drawingPage, tool, session.highlights, getRelativePos]);
+
+  // -----------------------------------------------------------------------
+  // Text-select tool: when the browser finishes a character-level selection
+  // (mouseup with an active Selection), compute the bounding box and open
+  // the field-label picker with the selected text pre-filled. Works exactly
+  // like dragging across text in Adobe Acrobat.
+  // -----------------------------------------------------------------------
+  useEffect(() => {
+    if (tool !== 'text-select') return;
+
+    const onMouseUp = () => {
+      // Defer one tick so the selection is finalized before we read it.
+      setTimeout(() => {
+        const sel = window.getSelection();
+        if (!sel || sel.rangeCount === 0) return;
+        const selectedText = sel.toString().trim();
+        if (!selectedText) return;
+
+        const range = sel.getRangeAt(0);
+        const rects = Array.from(range.getClientRects()).filter(r => r.width > 0 && r.height > 0);
+        if (rects.length === 0) return;
+
+        // For each rect, find which page it lives on (click-through to the
+        // pageRef with the largest overlap).
+        const byPage = new Map<number, DOMRect[]>();
+        for (const rect of rects) {
+          const cx = (rect.left + rect.right) / 2;
+          const cy = (rect.top + rect.bottom) / 2;
+          for (const [pageStr, el] of Object.entries(pageRefs.current)) {
+            if (!el) continue;
+            const pageRect = el.getBoundingClientRect();
+            if (cx >= pageRect.left && cx <= pageRect.right
+             && cy >= pageRect.top  && cy <= pageRect.bottom) {
+              const page = Number(pageStr);
+              if (!byPage.has(page)) byPage.set(page, []);
+              byPage.get(page)!.push(rect);
+              break;
+            }
+          }
+        }
+        if (byPage.size === 0) return;
+
+        // If the selection spans multiple pages, take the first one the
+        // selection started on (typical for a single drag).
+        const firstPage = Math.min(...byPage.keys());
+        const pageRects = byPage.get(firstPage)!;
+        const pageEl = pageRefs.current[firstPage];
+        if (!pageEl) return;
+        const pageBB = pageEl.getBoundingClientRect();
+
+        // Union of all rects on this page → the highlight's bounding box.
+        const minX = Math.min(...pageRects.map(r => r.left))  - pageBB.left;
+        const minY = Math.min(...pageRects.map(r => r.top))   - pageBB.top;
+        const maxX = Math.max(...pageRects.map(r => r.right)) - pageBB.left;
+        const maxY = Math.max(...pageRects.map(r => r.bottom))- pageBB.top;
+
+        // Normalize to 0-1 so it matches every other highlight in the store.
+        const rect = {
+          x: minX / pageBB.width,
+          y: minY / pageBB.height,
+          w: (maxX - minX) / pageBB.width,
+          h: (maxY - minY) / pageBB.height,
+        };
+
+        // Position the picker just below-right of the selection end, clamped
+        // inside the page div so it doesn't overflow.
+        const pickerX = Math.min(maxX, pageEl.offsetWidth  - 160);
+        const pickerY = Math.min(maxY, pageEl.offsetHeight - 200);
+
+        setPickerPos({ x: pickerX, y: pickerY, rect, page: firstPage, selectedText });
+
+        // Clear the browser's visual selection so it doesn't stay behind
+        // the highlight box.
+        sel.removeAllRanges();
+      }, 0);
+    };
+
+    document.addEventListener('mouseup', onMouseUp);
+    return () => document.removeEventListener('mouseup', onMouseUp);
+  }, [tool]);
 
   // -----------------------------------------------------------------------
   // Label selection — uses pickerPos.page
@@ -432,6 +470,11 @@ export default function PDFViewer({
         y:      pickerPos.rect.y,
         width:  pickerPos.rect.w,
         height: pickerPos.rect.h,
+        // If the box came from a native text selection, trust the browser's
+        // text as the extracted value — saves a round-trip through extract.
+        ...(pickerPos.selectedText
+          ? { extractedValue: pickerPos.selectedText, confidence: 'high' as const, wasOcr: false }
+          : {}),
       };
       const existing = session.highlights[pg] ?? [];
       updateHighlights(pg, [...existing, hl]);
@@ -571,6 +614,11 @@ export default function PDFViewer({
     if (allHighlights.length === 0) return;
     onApplyToAllPdfs(session.highlights);
   }, [allHighlights, session.highlights, onApplyToAllPdfs]);
+
+  const handleApplyToSelectedPdfs = useCallback(() => {
+    if (allHighlights.length === 0 || !onApplyToSelectedPdfs) return;
+    onApplyToSelectedPdfs(session.highlights);
+  }, [allHighlights, session.highlights, onApplyToSelectedPdfs]);
 
   // Toolbar page nav → scroll to page
   const scrollToPage = useCallback((p: number) => {
@@ -861,6 +909,8 @@ export default function PDFViewer({
         hasHighlights={allHighlights.length > 0}
         onApplyToAllPages={handleApplyToAllPages}
         onApplyToAllPdfs={handleApplyToAllPdfs}
+        onApplyToSelectedPdfs={handleApplyToSelectedPdfs}
+        selectedPdfCount={selectedPdfCount ?? 0}
         onEraseAllPages={handleEraseAllPages}
         onApplyToPageRange={handleApplyToPageRange}
         searchOpen={searchOpen}
@@ -993,7 +1043,7 @@ export default function PDFViewer({
                   <Page
                     pageNumber={pageNum}
                     scale={zoom ?? 1}
-                    renderTextLayer={false}
+                    renderTextLayer={tool === 'text-select'}
                     renderAnnotationLayer={false}
                     loading={
                       <div className="w-[600px] h-[800px] bg-white/5 animate-pulse rounded" />
