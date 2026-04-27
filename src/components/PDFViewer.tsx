@@ -7,10 +7,61 @@ import HighlightOverlay from './HighlightOverlay';
 import FieldLabelPicker from './FieldLabelPicker';
 import HighlightLegend from './HighlightLegend';
 import AutoHighlightDialog from './AutoHighlightDialog';
+import { Check, X, ArrowRight, ArrowDown } from 'lucide-react';
 import { downloadOcrPdf, searchBackend, type SearchMode } from '@/lib/api';
+import { findValueCandidates, type ValueKind } from '@/lib/pdf-extract';
+
+// Mirror the typed-cell sets from api.ts / excel-export.ts. Fields in
+// these sets get value-pattern search (find $-amounts / dates / years
+// directly) instead of label-text search — so the user doesn't have to
+// guess how the PDF phrases the label.
+const AMOUNT_FIELDS = new Set([
+  'total_gas_bill', 'total_electricity_bill', 'total_internet_bill',
+  'total_phone_bill', 'total_water_bill', 'total_sewer_bill',
+  'total_water_sewer_bill', 'total_trash_bill',
+  'beginning_balance', 'ending_balance', 'total_credits', 'total_debits',
+  'appraised_as_is_value',
+  'security_deposit', 'rent_and_charges', 'monthly_rent',
+  'onetime_concession_amount', 'monthly_discount', 'other_discount',
+  'total_income_ca', 'total_income_non_ca', 'total_rent',
+  'utility_allowance', 'ca_shelter_allowance', 'cityfheps_rent_supplement',
+  'household_share', 'utility_payment', 'total_monthly_rent',
+  'total_tax_due', 'assessed_value',
+]);
+const DATE_FIELDS = new Set([
+  'billing_date', 'statement_date', 'appraised_date',
+  'lease_date', 'lease_begin_date', 'lease_end_date',
+  'tax_bill_date', 'tax_due_date',
+]);
+const YEAR_FIELDS = new Set(['tax_year']);
+const PERCENT_FIELDS = new Set(['cap_rate']);
+
+function fieldSearchKind(fieldKey: string): ValueKind | 'label' {
+  if (AMOUNT_FIELDS.has(fieldKey))  return 'amount';
+  if (DATE_FIELDS.has(fieldKey))    return 'date';
+  if (YEAR_FIELDS.has(fieldKey))    return 'year';
+  if (PERCENT_FIELDS.has(fieldKey)) return 'percent';
+  return 'label';
+}
 import { toast } from 'sonner';
 
 pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
+
+type Rect = { x: number; y: number; width: number; height: number };
+
+// "Value to the right of label" offset for guided auto-highlight.
+function offsetRight(label: Rect): Rect {
+  const w = Math.max(0.18, Math.min(0.5, label.width * 2.5));
+  const x = Math.min(label.x + label.width, 0.98);
+  return { x, y: label.y, width: Math.min(w, 0.99 - x), height: label.height };
+}
+
+// "Value below label" offset for guided auto-highlight.
+function offsetBelow(label: Rect): Rect {
+  const h = Math.max(0.015, label.height * 1.3);
+  const y = Math.min(label.y + label.height, 0.98);
+  return { x: label.x, y, width: Math.max(label.width, 0.15), height: Math.min(h, 0.99 - y) };
+}
 
 interface PDFViewerProps {
   session: PDFSession;
@@ -89,28 +140,77 @@ export default function PDFViewer({
   const [downloadingOcr, setDownloadingOcr] = useState(false);
   const [autoHighlightOpen, setAutoHighlightOpen] = useState(false);
 
-  // Opens the field-picker dialog. Actual search + highlight creation lives
-  // inside AutoHighlightDialog, which calls onApply with the chosen boxes.
+  // ── Guided auto-highlight mode ──────────────────────────────────
+  // After the user picks fields in the dialog, we walk through them one at
+  // a time. The Ctrl+F search bar handles match navigation; this state
+  // adds the field-name banner, ✓/skip controls, and the right/below
+  // picker that fires when the user accepts a match.
+  const [autoQueue, setAutoQueue] = useState<{ key: string; label: string; queries: string[] }[]>([]);
+  const [autoIdx, setAutoIdx] = useState(0);
+  const [autoQueryIdx, setAutoQueryIdx] = useState(0);
+  // When the user clicks ✓ on a match, the match's rect goes here so the
+  // right/below picker can offset off it. null = no match locked in yet.
+  const [autoLockedMatch, setAutoLockedMatch] = useState<
+    | null
+    | { page: number; box: { x: number; y: number; width: number; height: number } }
+  >(null);
+  // Highlights accepted in guided mode, accumulated until finishAutoMode
+  // commits them in one onHighlightsChange call. Stored in a ref because
+  // `setState` is async — pickSide / lockCurrentMatch fire `advanceField`
+  // immediately, and on the last field that calls finishAutoMode which
+  // would otherwise read stale state and silently drop the highlight.
+  const highlightsToCommitRef = useRef<Record<number, Highlight[]>>({});
+
+  const autoActive = autoQueue.length > 0;
+  const autoCurrent = autoActive ? autoQueue[autoIdx] : null;
+
+  // Opens the field-picker dialog.
   const handleAutoSearch = useCallback(() => {
     if (!session.file) { toast.error('PDF file not loaded'); return; }
     setAutoHighlightOpen(true);
   }, [session.file]);
 
-  const handleAutoHighlightApply = useCallback(
-    (newHighlights: Record<number, Highlight[]>, runExtract: boolean) => {
+  // Called by the dialog after user picks fields.
+  const handleAutoStart = useCallback(
+    (fields: { key: string; label: string; queries: string[] }[]) => {
+      if (fields.length === 0) return;
+      setAutoQueue(fields);
+      setAutoIdx(0);
+      setAutoQueryIdx(0);
+      setAutoLockedMatch(null);
+      highlightsToCommitRef.current = {};
+    },
+    [],
+  );
+
+  // End guided mode. Optionally commit any accumulated highlights and run
+  // Extract afterwards. Reads from the ref (not state) so the highlight
+  // just added by pickSide / lockCurrentMatch is included even though
+  // setState hasn't flushed yet.
+  const finishAutoMode = useCallback((commit: boolean) => {
+    const pending = highlightsToCommitRef.current;
+    if (commit && Object.keys(pending).length > 0) {
       const merged: Record<number, Highlight[]> = { ...session.highlights };
-      for (const [pageStr, pageHls] of Object.entries(newHighlights)) {
+      let added = 0;
+      for (const [pageStr, pageHls] of Object.entries(pending)) {
         const page = Number(pageStr);
         merged[page] = [...(merged[page] ?? []), ...pageHls];
+        added += pageHls.length;
       }
       onHighlightsChange(session.id, merged);
-      if (runExtract) {
-        // Defer so the highlights commit before Extract reads them.
+      if (added > 0) {
+        toast.success(`Added ${added} highlight${added !== 1 ? 's' : ''}. Extracting…`);
         setTimeout(() => { onExtract(); }, 50);
+      } else {
+        toast('No highlights added', { icon: 'ℹ️' });
       }
-    },
-    [session.highlights, session.id, onHighlightsChange, onExtract],
-  );
+    }
+    setAutoQueue([]);
+    setAutoIdx(0);
+    setAutoQueryIdx(0);
+    setAutoLockedMatch(null);
+    highlightsToCommitRef.current = {};
+  }, [session.highlights, session.id, onHighlightsChange, onExtract]);
 
   const handleDownloadOcr = useCallback(async () => {
     setDownloadingOcr(true);
@@ -649,6 +749,118 @@ export default function PDFViewer({
     container.scrollTo({ top: Math.max(0, targetScroll), behavior: 'smooth' });
   }, [flatMatches]);
 
+  // ── Drive the search bar from guided auto-highlight mode ─────────
+  // When autoQueue is set (or the field/synonym index changes), open the
+  // search bar and populate it. For amount/date/year fields we run a
+  // value-pattern scan (no labels needed); for everything else we keep
+  // the label-text search with synonyms.
+  useEffect(() => {
+    if (!autoActive) return;
+    const cur = autoQueue[autoIdx];
+    if (!cur) return;
+    setSearchOpen(true);
+    setAutoLockedMatch(null);
+
+    const kind = fieldSearchKind(cur.key);
+    if (kind === 'label') {
+      const q = cur.queries[autoQueryIdx] ?? cur.label;
+      handleSearch(q);
+      return;
+    }
+    // Value-pattern path: scan visible pages for amounts / dates / years.
+    if (!session.file) return;
+    setSearchQuery(`${kind} candidates`);
+    setSearchResults({});
+    findValueCandidates(session.file, kind)
+      .then(cands => {
+        const byPage: Record<number, { x: number; y: number; width: number; height: number }[]> = {};
+        for (const c of cands) {
+          if (!byPage[c.page]) byPage[c.page] = [];
+          byPage[c.page].push(c.box);
+        }
+        setSearchResults(byPage);
+      })
+      .catch(err => {
+        console.warn('[findValueCandidates] failed:', err);
+        setSearchResults({});
+      });
+  // handleSearch / findValueCandidates update state — only re-run when the
+  // field/synonym pointer changes.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoActive, autoIdx, autoQueryIdx]);
+
+  // Try the next synonym for the current field. Loops around if at the end.
+  const advanceSynonym = useCallback(() => {
+    if (!autoActive) return;
+    const cur = autoQueue[autoIdx];
+    if (!cur) return;
+    setAutoQueryIdx(prev => (prev + 1) % cur.queries.length);
+  }, [autoActive, autoQueue, autoIdx]);
+
+  // Move on to the next field (or finish if this was the last).
+  const advanceField = useCallback(() => {
+    if (!autoActive) return;
+    setAutoLockedMatch(null);
+    if (autoIdx + 1 >= autoQueue.length) {
+      finishAutoMode(true);
+      setSearchOpen(false);
+      setSearchQuery('');
+      setSearchResults({});
+    } else {
+      setAutoIdx(autoIdx + 1);
+      setAutoQueryIdx(0);
+    }
+  }, [autoActive, autoIdx, autoQueue.length, finishAutoMode]);
+
+  // User clicked ✓ on the current match. For label-based fields (text
+  // fields) we capture the rect so the Right/Below picker can offset
+  // off it. For value-based fields (amounts, dates, years) the match
+  // IS the value — commit it as a highlight directly and advance.
+  const lockCurrentMatch = useCallback(() => {
+    if (!autoActive) return;
+    if (activeMatchIdx < 0 || !flatMatches[activeMatchIdx]) {
+      toast('Press Enter to focus a match first', { icon: 'ℹ️' });
+      return;
+    }
+    const m = flatMatches[activeMatchIdx];
+    const cur = autoQueue[autoIdx];
+    if (!cur) return;
+
+    if (fieldSearchKind(cur.key) === 'label') {
+      setAutoLockedMatch({ page: m.page, box: m.box });
+      return;
+    }
+    // Value-pattern fields: the matched box is the value — commit and advance.
+    const hl: Highlight = {
+      id: `auto-${Date.now()}-${cur.key}-${Math.random().toString(36).slice(2, 5)}`,
+      page:  m.page,
+      field: cur.key,
+      x: m.box.x, y: m.box.y, width: m.box.width, height: m.box.height,
+      isAutoExtracted: true,
+    };
+    const cur2 = highlightsToCommitRef.current;
+    cur2[m.page] = [...(cur2[m.page] ?? []), hl];
+    advanceField();
+  }, [autoActive, activeMatchIdx, flatMatches, autoQueue, autoIdx, advanceField]);
+
+  // User picked Right or Below for the locked match — create the
+  // highlight and advance to the next field.
+  const pickSide = useCallback((side: 'right' | 'below') => {
+    if (!autoLockedMatch || !autoCurrent) return;
+    const label = autoLockedMatch.box;
+    const bbox = side === 'right' ? offsetRight(label) : offsetBelow(label);
+    const hl: Highlight = {
+      id: `auto-${Date.now()}-${autoCurrent.key}-${Math.random().toString(36).slice(2, 5)}`,
+      page:  autoLockedMatch.page,
+      field: autoCurrent.key,
+      x: bbox.x, y: bbox.y, width: bbox.width, height: bbox.height,
+      isAutoExtracted: true,
+    };
+    const ref = highlightsToCommitRef.current;
+    ref[autoLockedMatch.page] = [...(ref[autoLockedMatch.page] ?? []), hl];
+    advanceField();
+  }, [autoLockedMatch, autoCurrent, advanceField]);
+
   useEffect(() => {
     if (!scrollToPageTrigger || !pdfLoaded) return;
     const { page } = scrollToPageTrigger;
@@ -913,49 +1125,127 @@ export default function PDFViewer({
       <AutoHighlightDialog
         open={autoHighlightOpen}
         onOpenChange={setAutoHighlightOpen}
-        sessionId={session.id}
         docType={session.docType}
         existingCustomFields={customFields}
-        onApply={handleAutoHighlightApply}
+        onStart={handleAutoStart}
       />
 
       {/* Search bar */}
       {searchOpen && (
-        <div className="bg-card border-b border-border px-3 py-1.5 flex items-center gap-2 shrink-0">
-          <input
-            className="flex-1 h-7 text-xs bg-muted rounded px-2 border-none outline-none focus:ring-1 focus:ring-primary text-foreground"
-            placeholder="Search (Enter: next · Shift+Enter: previous)"
-            autoFocus
-            value={searchQuery}
-            onChange={e => handleSearch(e.target.value)}
-            onKeyDown={e => {
-              if (e.key === 'Escape') {
+        <div className="bg-card border-b border-border shrink-0">
+          {autoActive && autoCurrent && (() => {
+            const kind = fieldSearchKind(autoCurrent.key);
+            const isValueMode = kind !== 'label';
+            return (
+              <div className="px-3 py-1.5 flex items-center gap-2 text-xs border-b border-border bg-primary/5">
+                <span className="text-muted-foreground">Auto-highlight:</span>
+                <span className="font-medium text-foreground">{autoCurrent.label}</span>
+                <span className="text-muted-foreground">
+                  ({autoIdx + 1} of {autoQueue.length})
+                </span>
+                {isValueMode && (
+                  <span className="text-[11px] text-muted-foreground italic ml-1">
+                    cycling all {kind}s — Enter to navigate
+                  </span>
+                )}
+                {!isValueMode && autoCurrent.queries.length > 1 && (
+                  <button
+                    onClick={advanceSynonym}
+                    className="ml-2 px-2 py-0.5 rounded bg-muted hover:bg-muted/70 text-muted-foreground hover:text-foreground transition-colors"
+                    title="Try next synonym"
+                  >
+                    Try “{autoCurrent.queries[(autoQueryIdx + 1) % autoCurrent.queries.length]}”
+                  </button>
+                )}
+                <span className="ml-auto" />
+                {!autoLockedMatch ? (
+                  <>
+                    <button
+                      onClick={lockCurrentMatch}
+                      disabled={activeMatchIdx < 0}
+                      className="flex items-center gap-1 px-2.5 py-1 rounded bg-emerald-500/15 text-emerald-500 hover:bg-emerald-500/25 disabled:opacity-40 transition-colors"
+                      title={isValueMode ? 'Use this value as the highlight' : 'Tick this match'}
+                    >
+                      <Check className="w-3.5 h-3.5" />
+                      {isValueMode ? 'Use this' : 'Tick'}
+                    </button>
+                    <button
+                      onClick={advanceField}
+                      className="flex items-center gap-1 px-2.5 py-1 rounded bg-muted text-muted-foreground hover:bg-muted/70 hover:text-foreground transition-colors"
+                      title="Skip this field"
+                    >
+                      Skip
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <span className="text-muted-foreground">Value is:</span>
+                    <button
+                      onClick={() => pickSide('right')}
+                      className="flex items-center gap-1 px-2.5 py-1 rounded bg-primary text-primary-foreground hover:opacity-90 transition-opacity"
+                      title="Highlight to the right of label"
+                    >
+                      <ArrowRight className="w-3.5 h-3.5" /> Right
+                    </button>
+                    <button
+                      onClick={() => pickSide('below')}
+                      className="flex items-center gap-1 px-2.5 py-1 rounded bg-primary text-primary-foreground hover:opacity-90 transition-opacity"
+                      title="Highlight below label"
+                    >
+                      <ArrowDown className="w-3.5 h-3.5" /> Below
+                    </button>
+                    <button
+                      onClick={() => setAutoLockedMatch(null)}
+                      className="px-2 py-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                      title="Cancel — pick a different match"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </>
+                )}
+              </div>
+            );
+          })()}
+          <div className="px-3 py-1.5 flex items-center gap-2">
+            <input
+              className="flex-1 h-7 text-xs bg-muted rounded px-2 border-none outline-none focus:ring-1 focus:ring-primary text-foreground"
+              placeholder="Search (Enter: next · Shift+Enter: previous)"
+              autoFocus
+              value={searchQuery}
+              onChange={e => handleSearch(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Escape') {
+                  if (autoActive) finishAutoMode(false);
+                  setSearchOpen(false); setSearchQuery(''); setSearchResults({});
+                  return;
+                }
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  if (flatMatches.length === 0) return;
+                  if (e.shiftKey) gotoMatch(activeMatchIdx - 1);
+                  else            gotoMatch(activeMatchIdx + 1);
+                }
+              }}
+            />
+            {searchQuery && (
+              <span className="text-[11px] text-muted-foreground shrink-0">
+                {flatMatches.length === 0
+                  ? 'No matches'
+                  : activeMatchIdx >= 0
+                    ? `${activeMatchIdx + 1} of ${flatMatches.length}`
+                    : `${flatMatches.length} match${flatMatches.length !== 1 ? 'es' : ''}`}
+              </span>
+            )}
+            <button
+              className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-200"
+              onClick={() => {
+                if (autoActive) finishAutoMode(false);
                 setSearchOpen(false); setSearchQuery(''); setSearchResults({});
-                return;
-              }
-              if (e.key === 'Enter') {
-                e.preventDefault();
-                if (flatMatches.length === 0) return;
-                if (e.shiftKey) gotoMatch(activeMatchIdx - 1);
-                else            gotoMatch(activeMatchIdx + 1);
-              }
-            }}
-          />
-          {searchQuery && (
-            <span className="text-[11px] text-muted-foreground shrink-0">
-              {flatMatches.length === 0
-                ? 'No matches'
-                : activeMatchIdx >= 0
-                  ? `${activeMatchIdx + 1} of ${flatMatches.length}`
-                  : `${flatMatches.length} match${flatMatches.length !== 1 ? 'es' : ''}`}
-            </span>
-          )}
-          <button
-            className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-200"
-            onClick={() => { setSearchOpen(false); setSearchQuery(''); setSearchResults({}); }}
-          >
-            <span className="text-xs">Esc</span>
-          </button>
+              }}
+            >
+              <span className="text-xs">Esc</span>
+            </button>
+          </div>
         </div>
       )}
 

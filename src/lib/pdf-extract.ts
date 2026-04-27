@@ -144,6 +144,139 @@ function itemAABB(item: any, pageHeight: number): ItemAABB {
 }
 
 // ---------------------------------------------------------------------------
+// Value-pattern candidate finder (for guided auto-highlight on amount /
+// date / year fields). Skips the label search entirely — instead scans the
+// PDF for tokens that look like the requested value type and returns each
+// match's bbox in normalized 0-1 coords. The user then picks the right
+// match in the search bar; no Right/Below offset needed because the match
+// itself IS the value.
+// ---------------------------------------------------------------------------
+export type ValueKind = 'amount' | 'date' | 'year' | 'percent';
+
+export interface ValueCandidate {
+  page: number;
+  text: string;
+  box: { x: number; y: number; width: number; height: number };
+}
+
+const VALUE_PATTERNS: Record<ValueKind, RegExp> = {
+  // $1,234 / $1,234.50 / 1,234.50 / 145.20  — requires either thousand
+  // separators OR two decimals to avoid matching every bare integer.
+  amount: /(?:\$\s*)?(?:\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?|\d+\.\d{2})/g,
+  // Numeric MM/DD/YYYY · DD-MM-YYYY · YYYY-MM-DD · or "Month D, YYYY" · "D Month YYYY"
+  date: /\b(?:\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4}|\d{4}[/\-.]\d{1,2}[/\-.]\d{1,2}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+\d{4}|\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.?\s+\d{4})\b/gi,
+  // Standalone 4-digit year 1900-2099. Note: this also matches the year
+  // portion of full dates — that's fine, the user picks which they want.
+  year: /\b(?:19|20)\d{2}\b/g,
+  // Percent-shaped tokens: "6%", "6.5%", "6.50%", "10%", or a leading-zero
+  // decimal like "0.065" / ".065". Anchored to either a % sign or the
+  // "0." form so we don't match every random number on the page.
+  percent: /\b\d{1,2}(?:\.\d{1,4})?\s*%|\b0?\.\d{2,4}\b/g,
+};
+
+export async function findValueCandidates(
+  file: File,
+  kind: ValueKind,
+  startPage = 1,
+  endPage?: number,
+): Promise<ValueCandidate[]> {
+  if (!pdfjs.GlobalWorkerOptions.workerSrc) {
+    pdfjs.GlobalWorkerOptions.workerSrc =
+      `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
+  }
+
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
+  const last = endPage ?? pdf.numPages;
+  const out: ValueCandidate[] = [];
+
+  for (let p = startPage; p <= last; p++) {
+    const page = await pdf.getPage(p);
+    const content = await page.getTextContent();
+    const vp = page.getViewport({ scale: 1 });
+    const items = content.items as any[];
+    if (isScannedPage(items)) continue;
+
+    // Group items into rough lines so a value split across multiple
+    // text items (e.g. "$" + "1,234.50") gets matched as one token.
+    const enriched = items
+      .filter((it: any) => it.str)
+      .map((it: any) => ({ it, aabb: itemAABB(it, vp.height) }));
+
+    enriched.sort((a, b) => {
+      const dy = a.aabb.top - b.aabb.top;
+      if (Math.abs(dy) > 4) return dy;
+      return a.aabb.left - b.aabb.left;
+    });
+
+    type LineEntry = { str: string; aabb: ItemAABB };
+    const lines: LineEntry[][] = [];
+    let curLine: LineEntry[] = [];
+    let curY: number | null = null;
+    for (const e of enriched) {
+      const y = e.aabb.centerY;
+      if (curY === null || Math.abs(y - curY) <= 4) {
+        curLine.push({ str: e.it.str, aabb: e.aabb });
+        curY = curY === null ? y : (curY + y) / 2;
+      } else {
+        if (curLine.length) lines.push(curLine);
+        curLine = [{ str: e.it.str, aabb: e.aabb }];
+        curY = y;
+      }
+    }
+    if (curLine.length) lines.push(curLine);
+
+    const pattern = VALUE_PATTERNS[kind];
+    for (const line of lines) {
+      // Build a flat string + char-offset → item map so we can find which
+      // items each match covers.
+      let acc = '';
+      const charToItem: number[] = [];   // char index → line item index
+      for (let i = 0; i < line.length; i++) {
+        const s = line[i].str;
+        for (let c = 0; c < s.length; c++) charToItem.push(i);
+        acc += s;
+      }
+      pattern.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = pattern.exec(acc)) !== null) {
+        const start = m.index;
+        const end = start + m[0].length;
+        if (end <= start) { pattern.lastIndex++; continue; }
+        const firstItem = charToItem[start];
+        const lastItem  = charToItem[Math.min(end - 1, charToItem.length - 1)];
+        if (firstItem == null || lastItem == null) continue;
+
+        let left   = Infinity;
+        let right  = -Infinity;
+        let top    = Infinity;
+        let bottom = -Infinity;
+        for (let i = firstItem; i <= lastItem; i++) {
+          const a = line[i].aabb;
+          left   = Math.min(left,   a.left);
+          right  = Math.max(right,  a.right);
+          top    = Math.min(top,    a.top);
+          bottom = Math.max(bottom, a.bottom);
+        }
+        out.push({
+          page: p,
+          text: m[0].trim(),
+          box: {
+            x: clamp01(left / vp.width),
+            y: clamp01(top  / vp.height),
+            width:  clamp01((right  - left) / vp.width),
+            height: clamp01((bottom - top)  / vp.height),
+          },
+        });
+      }
+    }
+  }
+  return out;
+}
+
+function clamp01(v: number) { return Math.max(0, Math.min(1, v)); }
+
+// ---------------------------------------------------------------------------
 // Auto-extract with highlight positions
 // ---------------------------------------------------------------------------
 export async function autoExtractWithHighlights(
