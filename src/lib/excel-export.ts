@@ -501,6 +501,115 @@ function buildUnifiedSheet(fileMap: Map<string, ExtractedRow[]>, docType: Docume
   return ws;
 }
 
+// One row per (PDF, page) for utility bills — many bills can live in a single
+// PDF (one billing period per page), and each page is its own row.
+function buildUtilityPerPageSheet(fileMap: Map<string, ExtractedRow[]>): XLSX.WorkSheet {
+  const docType: DocumentType = 'utility_bill';
+  const headerColor = HEADER_COLORS[docType];
+
+  const fieldDefs = getFieldLabelsForType(docType).filter(f => f.value !== 'custom');
+
+  // Collect any custom fields used across files, preserving first-appearance order
+  const knownFields = new Set(fieldDefs.map(f => f.value as string));
+  const customFields: string[] = [];
+  for (const rows of fileMap.values()) {
+    for (const row of rows) {
+      if (!knownFields.has(row.field) && !customFields.includes(row.field)) {
+        customFields.push(row.field);
+      }
+    }
+  }
+
+  const fieldColumns = [
+    ...fieldDefs.map(f => ({ key: f.value, label: f.label })),
+    ...customFields.map(f => ({ key: f, label: f })),
+  ];
+
+  type PageRow = {
+    pdfNum: number;
+    folder: string;
+    fileName: string;
+    page: number;
+    values: Record<string, string>;
+  };
+  const pageRows: PageRow[] = [];
+  const highlightedFields = new Set<string>();
+  let pdfNum = 0;
+
+  for (const [filename, rows] of fileMap.entries()) {
+    pdfNum++;
+    const cleanedFilename = filename.replace(/\.(pdf|docx?)$/i, '');
+    let folder = '';
+
+    // Group rows by page within this PDF
+    const byPage = new Map<number, Record<string, string>>();
+    for (const row of rows) {
+      highlightedFields.add(row.field);
+      if (row.folderName && !folder) folder = row.folderName;
+      if (!row.value) continue;
+      if (!byPage.has(row.page)) byPage.set(row.page, {});
+      const pageVals = byPage.get(row.page)!;
+      // first-wins per field per page (a page rarely has duplicates anyway)
+      if (!pageVals[row.field]) pageVals[row.field] = row.value;
+    }
+
+    const sortedPages = Array.from(byPage.keys()).sort((a, b) => a - b);
+    for (const page of sortedPages) {
+      pageRows.push({
+        pdfNum,
+        folder,
+        fileName: cleanedFilename,
+        page,
+        values: byPage.get(page)!,
+      });
+    }
+  }
+
+  const visibleColumns = fieldColumns.filter(col => highlightedFields.has(col.key));
+
+  const wsData: any[][] = [];
+  const styles: { row: number; col: number; style: any }[] = [];
+  let ri = 0;
+  const push = (cells: any[]) => { wsData.push(cells); return ri++; };
+  const sc = (r: number, c: number, s: any) => styles.push({ row: r, col: c, style: s });
+
+  const headerCells = ['PDF #', 'Folder', 'File Name', 'Page', ...visibleColumns.map(c => c.label)];
+  const r0 = push(headerCells);
+  for (let c = 0; c < headerCells.length; c++) {
+    sc(r0, c, hdr(headerColor.bg, headerColor.font));
+  }
+
+  for (const pr of pageRows) {
+    const rowCells: any[] = [
+      pr.pdfNum,
+      pr.folder,
+      pr.fileName,
+      pr.page,
+      ...visibleColumns.map(col => coerceCell(col.key, pr.values[col.key] ?? '')),
+    ];
+    const r = push(rowCells);
+    sc(r, 0, cell(C.whiteBg, true,  'center', 10));  // PDF #
+    sc(r, 1, cell(C.whiteBg, false, 'left',   10));  // Folder
+    sc(r, 2, cell(C.whiteBg, true,  'left',   10));  // File Name
+    sc(r, 3, cell(C.whiteBg, false, 'center', 10));  // Page
+    visibleColumns.forEach((col, idx) => {
+      sc(r, 4 + idx, cell(C.whiteBg, false, alignFor(col.key), 10));
+    });
+  }
+
+  const ws = XLSX.utils.aoa_to_sheet(wsData);
+  applyStyles(ws, wsData, styles);
+  ws['!cols'] = [
+    { wch: 7 },    // PDF #
+    { wch: 20 },   // Folder
+    { wch: 30 },   // File Name
+    { wch: 7 },    // Page
+    ...visibleColumns.map(() => ({ wch: 22 })),
+  ];
+  ws['!freeze'] = { xSplit: 4, ySplit: 1 };
+  return ws;
+}
+
 export function exportToExcel(
   data: ExtractedRow[],
   _filename: string,
@@ -538,8 +647,10 @@ export function exportToExcel(
     XLSX.utils.book_append_sheet(wb, ws, 'Tax');
 
   } else if (overallType === 'utility_bill') {
-  const ws = buildUnifiedSheet(fileMap, 'utility_bill');
-  XLSX.utils.book_append_sheet(wb, ws, 'Utility Bills');
+    // Utility bills can have many billing periods per PDF (one per page),
+    // so we emit one row per (PDF, page) instead of one row per PDF.
+    const ws = buildUtilityPerPageSheet(fileMap);
+    XLSX.utils.book_append_sheet(wb, ws, 'Utility Bills');
 
   } else if (overallType === 'lease_contract') {
     const ws = buildLeaseSheet(fileMap);
