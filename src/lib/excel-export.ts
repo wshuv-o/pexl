@@ -6,7 +6,7 @@ import { downloadBankStatementExcel } from './bank-excel-export';
 
 const C = {
   whiteBg:     'FFFFFF',
-  borderColor: '8EA9C1',
+  borderColor: '000000',
 };
 
 // Header colors per document type
@@ -39,6 +39,22 @@ function cell(bg: string, bold = false, align: 'left' | 'center' | 'right' = 'le
 function thinBorder(): any {
   const s = { style: 'thin', color: { rgb: C.borderColor } };
   return { top: s, bottom: s, left: s, right: s };
+}
+
+// Lighter border for callout cells (Property / Address header).
+function softBorder(): any {
+  const s = { style: 'thin', color: { rgb: 'BFBFBF' } };
+  return { top: s, bottom: s, left: s, right: s };
+}
+
+// Cell variant with a light grey border instead of the harsh black one.
+function cellSoft(bg: string, bold = false, align: 'left' | 'center' | 'right' = 'left', sz = 10): any {
+  return {
+    font:      { name: 'Arial', bold, color: { rgb: '000000' }, sz },
+    fill:      { fgColor: { rgb: bg } },
+    alignment: { horizontal: align, vertical: 'center', wrapText: true },
+    border:    softBorder(),
+  };
 }
 
 // ─── Per-field cell typing ──────────────────────────────────────────────────
@@ -501,119 +517,417 @@ function buildUnifiedSheet(fileMap: Map<string, ExtractedRow[]>, docType: Docume
   return ws;
 }
 
-// One row per (PDF, page) for utility bills — many bills can live in a single
-// PDF (one billing period per page), and each page is its own row.
-function buildUtilityPerPageSheet(fileMap: Map<string, ExtractedRow[]>): XLSX.WorkSheet {
-  const docType: DocumentType = 'utility_bill';
-  const headerColor = HEADER_COLORS[docType];
+// Utility-type label per total_* field. Drives the per-utility-type grouping.
+const UTILITY_TOTAL_FIELDS: Record<string, string> = {
+  total_gas_bill:         'Gas',
+  total_electricity_bill: 'Electricity',
+  total_water_bill:       'Water',
+  total_sewer_bill:       'Sewer',
+  total_water_sewer_bill: 'Water & Sewer',
+  total_internet_bill:    'Internet',
+  total_phone_bill:       'Phone',
+  total_trash_bill:       'Trash',
+};
 
-  const fieldDefs = getFieldLabelsForType(docType).filter(f => f.value !== 'custom');
+// Orange/peach color shared by header + total rows in the utility sheet.
+const UTILITY_ORANGE = 'FABF8F';
+const UTILITY_HEADER = 'D8E4BC';
+const UTILITY_PROPERTY = 'FFFFFF';
+const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
-  // Collect any custom fields used across files, preserving first-appearance order
-  const knownFields = new Set(fieldDefs.map(f => f.value as string));
-  const customFields: string[] = [];
-  for (const rows of fileMap.values()) {
-    for (const row of rows) {
-      if (!knownFields.has(row.field) && !customFields.includes(row.field)) {
-        customFields.push(row.field);
-      }
-    }
+// Bucket a billing date into the calendar month it covers most.
+// Heuristic: bills are issued near the end of the period, so a bill issued
+// in the first half of a month covers most of the previous month; bills
+// issued in the second half mostly cover the current month.
+//   07/08/2025 → 2025-06 (Jun-25)
+//   12/30/2025 → 2025-12 (Dec-25)
+function billDateToMonthKey(dateStr: string): string | null {
+  const d = parseDateValue(dateStr);
+  if (!d) return null;
+  let m = d.getUTCMonth();
+  let y = d.getUTCFullYear();
+  if (d.getUTCDate() < 15) {
+    m -= 1;
+    if (m < 0) { m = 11; y -= 1; }
   }
+  return `${y}-${String(m + 1).padStart(2, '0')}`;
+}
 
-  const fieldColumns = [
-    ...fieldDefs.map(f => ({ key: f.value, label: f.label })),
-    ...customFields.map(f => ({ key: f, label: f })),
-  ];
+function monthKeyLabel(key: string): string {  // "2025-06" → "Jun-25"
+  const [y, m] = key.split('-');
+  return `${MONTH_NAMES[parseInt(m, 10) - 1]}-${y.slice(2)}`;
+}
 
-  type PageRow = {
-    pdfNum: number;
+// Per-export merge options (kept for backward compat — currently unused since
+// merging is done via the bank-style merge dialog before export).
+export interface UtilityMergeOptions {
+  property: boolean;
+  provider: boolean;
+  account:  boolean;
+}
+
+// Pick the most-common non-empty value from a list. Ties broken by first-seen.
+function mostCommon(values: string[]): string {
+  const counts = new Map<string, number>();
+  for (const v of values) {
+    if (!v) continue;
+    counts.set(v, (counts.get(v) ?? 0) + 1);
+  }
+  let best = '';
+  let bestN = 0;
+  for (const [v, n] of counts) {
+    if (n > bestN) { best = v; bestN = n; }
+  }
+  return best;
+}
+
+// Excel column letter (1-indexed): 1→A, 27→AA
+function colLetter(n: number): string {
+  let s = '';
+  while (n > 0) { n--; s = String.fromCharCode(65 + (n % 26)) + s; n = Math.floor(n / 26); }
+  return s;
+}
+
+// Layout: one table per utility type (Water, Gas, Electricity, …). Inside
+// each table, rows are (provider × account) tuples. Columns are month
+// buckets (Jun-25, Jul-25, …) with year-total columns inserted between
+// year boundaries (Dec-25 → 2025 → Jan-26). Total row at the bottom of
+// each table sums each column. Property + address shown once at the
+// top-right of the sheet. Orange (FABF8F) header / total fills.
+function buildUtilityPivotSheet(
+  fileMap: Map<string, ExtractedRow[]>,
+  _merge: UtilityMergeOptions = { property: false, provider: false, account: false },
+): XLSX.WorkSheet {
+
+  // ─── Step 1: collect per-page data with carry-forward provider/account ──
+  type PageData = {
+    fileNum: number;
     folder: string;
     fileName: string;
     page: number;
-    values: Record<string, string>;
+    provider: string;
+    account: string;
+    property: string;
+    address: string;
+    monthKey: string;          // bucketed YYYY-MM
+    fieldValues: Record<string, string>;
   };
-  const pageRows: PageRow[] = [];
-  const highlightedFields = new Set<string>();
+  const pages: PageData[] = [];
   let pdfNum = 0;
-
   for (const [filename, rows] of fileMap.entries()) {
     pdfNum++;
     const cleanedFilename = filename.replace(/\.(pdf|docx?)$/i, '');
     let folder = '';
-
-    // Group rows by page within this PDF
     const byPage = new Map<number, Record<string, string>>();
     for (const row of rows) {
-      highlightedFields.add(row.field);
       if (row.folderName && !folder) folder = row.folderName;
       if (!row.value) continue;
       if (!byPage.has(row.page)) byPage.set(row.page, {});
-      const pageVals = byPage.get(row.page)!;
-      // first-wins per field per page (a page rarely has duplicates anyway)
-      if (!pageVals[row.field]) pageVals[row.field] = row.value;
+      const m = byPage.get(row.page)!;
+      if (!m[row.field]) m[row.field] = row.value;
     }
-
+    let lastProvider = '';
+    let lastAccount = '';
+    let lastProperty = '';
+    let lastAddress = '';
     const sortedPages = Array.from(byPage.keys()).sort((a, b) => a - b);
     for (const page of sortedPages) {
-      pageRows.push({
-        pdfNum,
+      const vals = byPage.get(page)!;
+      if (vals.provider_name)  lastProvider = vals.provider_name;
+      if (vals.account_number) lastAccount  = vals.account_number;
+      if (vals.property_name)  lastProperty = vals.property_name;
+      if (vals.address)        lastAddress  = vals.address;
+      pages.push({
+        fileNum: pdfNum,
         folder,
         fileName: cleanedFilename,
         page,
-        values: byPage.get(page)!,
+        provider: lastProvider,
+        account: lastAccount,
+        property: lastProperty,
+        address: lastAddress,
+        monthKey: vals.billing_date ? (billDateToMonthKey(vals.billing_date) ?? '') : '',
+        fieldValues: vals,
       });
     }
   }
 
-  const visibleColumns = fieldColumns.filter(col => highlightedFields.has(col.key));
+  // ─── Step 2: representative property + address (shown once at top) ───
+  const allProps = pages.map(p => p.property).filter(Boolean);
+  const allAddrs = pages.map(p => p.address ).filter(Boolean);
+  const headerProperty = mostCommon(allProps);
+  const headerAddress  = mostCommon(allAddrs);
 
-  const wsData: any[][] = [];
-  const styles: { row: number; col: number; style: any }[] = [];
-  let ri = 0;
-  const push = (cells: any[]) => { wsData.push(cells); return ri++; };
-  const sc = (r: number, c: number, s: any) => styles.push({ row: r, col: c, style: s });
+  // ─── Step 3: build per-utility-type tables ───
+  type TableRow = {
+    folder: string;
+    fileName: string;
+    provider: string;
+    account: string;
+    monthValues: Map<string, number>;   // monthKey → numeric amount
+  };
+  type Table = {
+    utilityField: string;
+    utilityLabel: string;
+    rows: Map<string, TableRow>;        // key = `${provider}__${account||fileName}`
+    monthKeys: Set<string>;
+    // Actual scraped billing dates that fell into each month bucket.
+    // Used for the sub-header row under each month label.
+    monthScrapedDates: Map<string, Set<string>>;
+  };
+  const tables = new Map<string, Table>();
 
-  const headerCells = ['PDF #', 'Folder', 'File Name', 'Page', ...visibleColumns.map(c => c.label)];
-  const r0 = push(headerCells);
-  for (let c = 0; c < headerCells.length; c++) {
-    sc(r0, c, hdr(headerColor.bg, headerColor.font));
+  for (const p of pages) {
+    for (const [field, label] of Object.entries(UTILITY_TOTAL_FIELDS)) {
+      const raw = p.fieldValues[field];
+      if (!raw) continue;
+      const num = parseFloat(raw.replace(/[$,\s]/g, ''));
+      if (isNaN(num)) continue;
+      let table = tables.get(field);
+      if (!table) {
+        table = {
+          utilityField: field, utilityLabel: label,
+          rows: new Map(), monthKeys: new Set(),
+          monthScrapedDates: new Map(),
+        };
+        tables.set(field, table);
+      }
+      const rowKey = `${p.provider}__${p.account || p.fileName}`;
+      let tr = table.rows.get(rowKey);
+      if (!tr) {
+        tr = {
+          folder: p.folder,
+          fileName: p.fileName,
+          provider: p.provider,
+          account: p.account,
+          monthValues: new Map(),
+        };
+        table.rows.set(rowKey, tr);
+      } else {
+        // Multiple PDFs feeding the same (provider, account) row — keep the
+        // first non-empty folder, and join file names with " · " so all
+        // sources are visible.
+        if (!tr.folder && p.folder) tr.folder = p.folder;
+        if (tr.fileName !== p.fileName && !tr.fileName.split(' · ').includes(p.fileName)) {
+          tr.fileName = `${tr.fileName} · ${p.fileName}`;
+        }
+      }
+      if (p.monthKey) {
+        tr.monthValues.set(p.monthKey, (tr.monthValues.get(p.monthKey) ?? 0) + num);
+        table.monthKeys.add(p.monthKey);
+        const rawDate = p.fieldValues.billing_date;
+        if (rawDate) {
+          if (!table.monthScrapedDates.has(p.monthKey)) {
+            table.monthScrapedDates.set(p.monthKey, new Set());
+          }
+          table.monthScrapedDates.get(p.monthKey)!.add(rawDate.trim());
+        }
+      }
+    }
   }
 
-  for (const pr of pageRows) {
-    const rowCells: any[] = [
-      pr.pdfNum,
-      pr.folder,
-      pr.fileName,
-      pr.page,
-      ...visibleColumns.map(col => coerceCell(col.key, pr.values[col.key] ?? '')),
+  // ─── Step 4: build a unified column timeline (months + year totals) ───
+  const allMonths = new Set<string>();
+  for (const t of tables.values()) for (const k of t.monthKeys) allMonths.add(k);
+  const sortedMonths = Array.from(allMonths).sort();   // YYYY-MM sorts naturally
+
+  type ColSpec =
+    | { kind: 'month'; key: string; label: string }
+    | { kind: 'year';  key: string; label: string };
+  const timeline: ColSpec[] = [];
+  let lastYear = '';
+  for (const mk of sortedMonths) {
+    const y = mk.slice(0, 4);
+    if (lastYear && y !== lastYear) {
+      timeline.push({ kind: 'year', key: lastYear, label: lastYear });
+    }
+    timeline.push({ kind: 'month', key: mk, label: monthKeyLabel(mk) });
+    lastYear = y;
+  }
+  if (lastYear) timeline.push({ kind: 'year', key: lastYear, label: lastYear });
+
+  // ─── Step 5: emit the worksheet ───
+  const wsData: any[][] = [];
+  const styles: { row: number; col: number; style: any }[] = [];
+  const merges: { s: { r: number; c: number }; e: { r: number; c: number } }[] = [];
+  let ri = 0;
+  const push = (cells: any[]) => { wsData.push(cells); return ri++; };
+  const sc   = (r: number, c: number, s: any) => styles.push({ row: r, col: c, style: s });
+
+  // Fixed columns: 0:Utility Items · 1:Folder · 2:File Name ·
+  //                3:Utility Provider · 4:Account Number
+  const UTIL_COL    = 0;
+  const FOLDER_COL  = 1;
+  const FILE_COL    = 2;
+  const PROV_COL    = 3;
+  const ACCT_COL    = 4;
+  const FIXED_COLS  = 5;
+  const totalCols   = FIXED_COLS + timeline.length;
+
+  // Property + address block (top-LEFT, stacked, soft grey borders).
+  if (headerProperty || headerAddress) {
+    const propRow = Array(totalCols).fill('');
+    propRow[0] = 'Property:';
+    propRow[1] = headerProperty;
+    const pr = push(propRow);
+    sc(pr, 0, cellSoft(UTILITY_PROPERTY, true, 'left', 10));
+    sc(pr, 1, cellSoft(UTILITY_PROPERTY, true, 'left', 10));
+
+    const addrRow = Array(totalCols).fill('');
+    addrRow[0] = 'Address:';
+    addrRow[1] = headerAddress;
+    const ar = push(addrRow);
+    sc(ar, 0, cellSoft(UTILITY_PROPERTY, true, 'left', 10));
+    sc(ar, 1, cellSoft(UTILITY_PROPERTY, true, 'left', 10));
+
+    push(Array(totalCols).fill(''));   // spacer
+  }
+
+  // Sort utility tables by their natural label order
+  const utilityOrder = Object.keys(UTILITY_TOTAL_FIELDS);
+  const sortedTables = Array.from(tables.values()).sort(
+    (a, b) => utilityOrder.indexOf(a.utilityField) - utilityOrder.indexOf(b.utilityField),
+  );
+
+  for (const table of sortedTables) {
+    // Header row 1 — month bucket / year labels
+    const headerCells: any[] = [
+      'Utility Items', 'Folder Path', 'File Name', 'Utility Provider', 'Account Number',
     ];
-    const r = push(rowCells);
-    sc(r, 0, cell(C.whiteBg, true,  'center', 10));  // PDF #
-    sc(r, 1, cell(C.whiteBg, false, 'left',   10));  // Folder
-    sc(r, 2, cell(C.whiteBg, true,  'left',   10));  // File Name
-    sc(r, 3, cell(C.whiteBg, false, 'center', 10));  // Page
-    visibleColumns.forEach((col, idx) => {
-      sc(r, 4 + idx, cell(C.whiteBg, false, alignFor(col.key), 10));
+    for (const col of timeline) headerCells.push(col.label);
+    const hr = push(headerCells);
+    for (let c = 0; c < headerCells.length; c++) {
+      sc(hr, c, hdr(UTILITY_HEADER, '000000', true, 10));
+    }
+
+    // Header row 2 — actual scraped billing date(s) for each month bucket.
+    // Year-total columns get an empty sub-header. If multiple distinct
+    // billing dates fell into the same bucket, they're joined with " · ".
+    const subHeader: any[] = ['', '', '', '', ''];
+    for (const col of timeline) {
+      if (col.kind === 'month') {
+        const dates = table.monthScrapedDates.get(col.key);
+        if (!dates || dates.size === 0) {
+          subHeader.push('');
+        } else {
+          subHeader.push(Array.from(dates).join(' · '));
+        }
+      } else {
+        subHeader.push('');
+      }
+    }
+    const shr = push(subHeader);
+    for (let c = 0; c < subHeader.length; c++) {
+      sc(shr, c, hdr(UTILITY_ORANGE, '000000', false, 9));
+    }
+
+    // Sort rows for stable output: by provider then account
+    const sortedRows = Array.from(table.rows.values()).sort((a, b) => {
+      if (a.provider !== b.provider) return a.provider.localeCompare(b.provider);
+      return a.account.localeCompare(b.account);
     });
+
+    const dataStartRow = ri;
+    for (const row of sortedRows) {
+      const dataCells: any[] = [
+        table.utilityLabel,
+        row.folder,
+        row.fileName,
+        row.provider,
+        row.account,
+      ];
+      for (const col of timeline) {
+        if (col.kind === 'month') {
+          const v = row.monthValues.get(col.key);
+          dataCells.push(v !== undefined ? { t: 'n', v, z: '"$"#,##0.00' } : '');
+        } else {
+          // Year-total: SUM of this row's month columns within this year.
+          const monthCols: number[] = [];
+          for (let i = 0; i < timeline.length; i++) {
+            const t = timeline[i];
+            if (t.kind === 'month' && t.key.startsWith(col.key + '-')) {
+              monthCols.push(FIXED_COLS + i);
+            }
+          }
+          if (monthCols.length === 0) {
+            dataCells.push('');
+          } else {
+            const rowExcel = ri + 1;   // current data row, 1-indexed
+            const refs = monthCols.map(c => `${colLetter(c + 1)}${rowExcel}`);
+            dataCells.push({ t: 'n', v: 0, f: `SUM(${refs.join(',')})`, z: '"$"#,##0.00' });
+          }
+        }
+      }
+      const r = push(dataCells);
+      sc(r, UTIL_COL,   hdr(UTILITY_ORANGE,  '000000', true,  10));   // utility label — bold orange
+      sc(r, FOLDER_COL, cell(UTILITY_ORANGE, false, 'left',   10));
+      sc(r, FILE_COL,   cell(UTILITY_ORANGE, false, 'left',   10));
+      sc(r, PROV_COL,   cell(UTILITY_ORANGE, false, 'left',   10));
+      sc(r, ACCT_COL,   cell(UTILITY_ORANGE, false, 'center', 10));
+      for (let c = FIXED_COLS; c < dataCells.length; c++) {
+        sc(r, c, cell(UTILITY_ORANGE, false, 'right', 10));
+      }
+    }
+    const dataEndRow = ri - 1;
+
+    // Total row — label spans across the FIXED_COLS columns.
+    const totalCells: any[] = [`Total ${table.utilityLabel}`, '', '', '', ''];
+    for (let i = 0; i < timeline.length; i++) {
+      const colIdx = FIXED_COLS + i;
+      if (sortedRows.length === 0) {
+        totalCells.push('');
+        continue;
+      }
+      const startRowExcel = dataStartRow + 1;   // 1-indexed
+      const endRowExcel   = dataEndRow   + 1;
+      const letter = colLetter(colIdx + 1);
+      totalCells.push({
+        t: 'n', v: 0,
+        f: `SUM(${letter}${startRowExcel}:${letter}${endRowExcel})`,
+        z: '"$"#,##0.00',
+      });
+    }
+    const tr = push(totalCells);
+    merges.push({ s: { r: tr, c: 0 }, e: { r: tr, c: FIXED_COLS - 1 } });
+    for (let c = 0; c < totalCells.length; c++) {
+      sc(tr, c, hdr(UTILITY_ORANGE, '000000', true, 10));
+    }
+
+    // Three-row gap before the next table for visual breathing room.
+    push(Array(totalCols).fill(''));
+    push(Array(totalCols).fill(''));
+    push(Array(totalCols).fill(''));
+  }
+
+  if (wsData.length === 0) {
+    push(['No utility totals were highlighted']);
   }
 
   const ws = XLSX.utils.aoa_to_sheet(wsData);
   applyStyles(ws, wsData, styles);
-  ws['!cols'] = [
-    { wch: 7 },    // PDF #
-    { wch: 20 },   // Folder
-    { wch: 30 },   // File Name
-    { wch: 7 },    // Page
-    ...visibleColumns.map(() => ({ wch: 22 })),
+  if (merges.length > 0) ws['!merges'] = merges;
+
+  const cols: { wch: number }[] = [
+    { wch: 16 },   // Utility Items
+    { wch: 22 },   // Folder Path
+    { wch: 28 },   // File Name
+    { wch: 24 },   // Utility Provider
+    { wch: 16 },   // Account Number
   ];
-  ws['!freeze'] = { xSplit: 4, ySplit: 1 };
+  for (let i = 0; i < timeline.length; i++) {
+    cols.push({ wch: timeline[i].kind === 'year' ? 11 : 11 });
+  }
+  ws['!cols'] = cols;
+  ws['!freeze'] = { xSplit: FIXED_COLS, ySplit: 0 };
   return ws;
 }
+
 
 export function exportToExcel(
   data: ExtractedRow[],
   _filename: string,
   provider: string,
+  options: { utilityMerge?: UtilityMergeOptions } = {},
 ) {
   const now     = new Date();
   const dateStr = now.toISOString().slice(0, 16).replace(/[T:]/g, '-');
@@ -647,9 +961,10 @@ export function exportToExcel(
     XLSX.utils.book_append_sheet(wb, ws, 'Tax');
 
   } else if (overallType === 'utility_bill') {
-    // Utility bills can have many billing periods per PDF (one per page),
-    // so we emit one row per (PDF, page) instead of one row per PDF.
-    const ws = buildUtilityPerPageSheet(fileMap);
+    // One pivot table per (provider, utility-type), with billing dates as
+    // columns. Same provider + same type are merged into one table; rows
+    // are per (file × account); different providers get separate blocks.
+    const ws = buildUtilityPivotSheet(fileMap, options.utilityMerge);
     XLSX.utils.book_append_sheet(wb, ws, 'Utility Bills');
 
   } else if (overallType === 'lease_contract') {
@@ -669,6 +984,17 @@ export function exportToExcel(
   if (fileMap.size === 0) {
     const ws = XLSX.utils.aoa_to_sheet([['No data extracted']]);
     XLSX.utils.book_append_sheet(wb, ws, 'Empty');
+  }
+
+  // Turn off Excel's default gridlines on every sheet — workbook-level
+  // and per-sheet so it renders cleanly in any viewer.
+  if (!wb.Workbook) wb.Workbook = {};
+  wb.Workbook.Views = [{ RTL: false }];
+  for (const name of wb.SheetNames) {
+    const ws = wb.Sheets[name];
+    if (!ws) continue;
+    (ws as any)['!view']      = { showGridLines: false };
+    (ws as any)['!sheetView'] = { showGridLines: false };
   }
 
   XLSX.writeFile(wb, `Pexl_${provider.replace(/\s+/g, '')}_${dateStr}.xlsx`);

@@ -6,8 +6,12 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import type { ExtractedRow } from '@/types/utilscraper';
 import { getFieldConfig } from '@/types/utilscraper';
 import { exportToExcel } from '@/lib/excel-export';
-import { findMergeOpportunities, applyMerges, type MergeGroup, type MergeChoice } from '@/lib/bank-excel-export';
+import {
+  findMergeOpportunities, findUtilityMergeOpportunities, applyMerges,
+  type MergeGroup, type MergeChoice,
+} from '@/lib/bank-excel-export';
 import MergeDialog from '@/components/bank/MergeDialog';
+import { DOCUMENT_TYPES, getFieldLabelsForType } from '@/types/utilscraper';
 
 interface Props {
   data: ExtractedRow[];
@@ -23,6 +27,24 @@ interface Props {
 }
 
 const CONF_PCT: Record<string, number> = { high: 95, medium: 65, low: 25 };
+
+// Mirror of detectDocType in excel-export.ts: returns true if the dominant
+// doc type for this batch is utility_bill.
+function isUtilityExport(rows: ExtractedRow[]): boolean {
+  const fieldToType: Record<string, string> = {};
+  for (const dt of DOCUMENT_TYPES) {
+    for (const f of getFieldLabelsForType(dt.value)) {
+      if (f.value !== 'custom') fieldToType[f.value] = dt.value;
+    }
+  }
+  const counts: Record<string, number> = {};
+  for (const r of rows) {
+    const dt = fieldToType[r.field];
+    if (dt) counts[dt] = (counts[dt] || 0) + 1;
+  }
+  const top = Object.entries(counts).sort((a, b) => b[1] - a[1])[0]?.[0];
+  return top === 'utility_bill';
+}
 
 // PageRow holds ALL extracted values per field (arrays, so multi-value fields
 // like multiple statement_dates can explode into multiple display rows).
@@ -383,14 +405,24 @@ export default function ExcelPanel({
             size="sm"
             className="flex-1 h-8 text-xs bg-primary hover:bg-primary/90 text-primary-foreground font-semibold"
             onClick={() => {
-              // Detect bank-statement merges, else export.
-              const groups = findMergeOpportunities(sortedFlat);
-              if (groups.length > 0) {
-                setMergeGroups(groups);
+              // For utility bills run the utility-specific scan FIRST so we
+              // surface provider_name groups too — the bank scan ignores
+              // provider and would otherwise pre-empt this branch.
+              if (isUtilityExport(sortedFlat)) {
+                const utilGroups = findUtilityMergeOpportunities(sortedFlat);
+                if (utilGroups.length > 0) {
+                  setMergeGroups(utilGroups);
+                  return;
+                }
               } else {
-                exportToExcel(sortedFlat, filename, provider);
-                onDownload?.();
+                const bankGroups = findMergeOpportunities(sortedFlat);
+                if (bankGroups.length > 0) {
+                  setMergeGroups(bankGroups);
+                  return;
+                }
               }
+              exportToExcel(sortedFlat, filename, provider);
+              onDownload?.();
             }}
           >
             <Download className="w-3.5 h-3.5 mr-1.5" />
@@ -399,7 +431,7 @@ export default function ExcelPanel({
         </div>
       </div>
 
-      {/* Merge dialog — only shown when similar items are detected */}
+      {/* Shared merge dialog — works for bank-style and utility-style groups */}
       {mergeGroups && (
         <MergeDialog
           groups={mergeGroups}
