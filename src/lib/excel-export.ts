@@ -27,9 +27,15 @@ function hdr(bg: string, font: string, bold = true, sz = 10): any {
   };
 }
 
-function cell(bg: string, bold = false, align: 'left' | 'center' | 'right' = 'left', sz = 10): any {
+function cell(
+  bg: string,
+  bold = false,
+  align: 'left' | 'center' | 'right' = 'left',
+  sz = 10,
+  fontColor = '000000',
+): any {
   return {
-    font:      { name: 'Arial', bold, color: { rgb: '000000' }, sz },
+    font:      { name: 'Arial', bold, color: { rgb: fontColor }, sz },
     fill:      { fgColor: { rgb: bg } },
     alignment: { horizontal: align, vertical: 'center', wrapText: true },
     border:    thinBorder(),
@@ -48,9 +54,16 @@ function softBorder(): any {
 }
 
 // Cell variant with a light grey border instead of the harsh black one.
-function cellSoft(bg: string, bold = false, align: 'left' | 'center' | 'right' = 'left', sz = 10): any {
+function cellSoft(
+  bg: string,
+  bold = false,
+  align: 'left' | 'center' | 'right' = 'left',
+  sz = 10,
+  underline = false,
+  italic = false,
+): any {
   return {
-    font:      { name: 'Arial', bold, color: { rgb: '000000' }, sz },
+    font:      { name: 'Arial', bold, italic, color: { rgb: '000000' }, sz, underline },
     fill:      { fgColor: { rgb: bg } },
     alignment: { horizontal: align, vertical: 'center', wrapText: true },
     border:    softBorder(),
@@ -532,6 +545,7 @@ const UTILITY_TOTAL_FIELDS: Record<string, string> = {
 // Orange/peach color shared by header + total rows in the utility sheet.
 const UTILITY_ORANGE = 'FABF8F';
 const UTILITY_HEADER = 'D8E4BC';
+const UTILITY_NAVY   = '002060';   // year-total columns
 const UTILITY_PROPERTY = 'FFFFFF';
 const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
@@ -754,33 +768,38 @@ function buildUtilityPivotSheet(
   const push = (cells: any[]) => { wsData.push(cells); return ri++; };
   const sc   = (r: number, c: number, s: any) => styles.push({ row: r, col: c, style: s });
 
-  // Fixed columns: 0:Utility Items · 1:Folder · 2:File Name ·
-  //                3:Utility Provider · 4:Account Number
-  const UTIL_COL    = 0;
+  // Fixed columns: 0:(blank margin) · 1:Folder Path · 2:File Name ·
+  //                3:Utility Items · 4:Utility Provider · 5:Account Number
+  // Column A is intentionally left empty across the entire sheet so the
+  // tables sit with a small left margin.
   const FOLDER_COL  = 1;
   const FILE_COL    = 2;
-  const PROV_COL    = 3;
-  const ACCT_COL    = 4;
-  const FIXED_COLS  = 5;
+  const UTIL_COL    = 3;
+  const PROV_COL    = 4;
+  const ACCT_COL    = 5;
+  const FIXED_COLS  = 6;   // timeline starts at column 6
   const totalCols   = FIXED_COLS + timeline.length;
 
-  // Property + address block (top-LEFT, stacked, soft grey borders).
+  // One empty white row at the very top of the sheet — visual breathing
+  // room above the property/address block.
+  push(Array(totalCols + 2).fill(''));
+
+  // Property + address block (top-LEFT, sits in cols 1-2 since col A is
+  // intentionally left empty). Soft grey borders, underlined text.
   if (headerProperty || headerAddress) {
     const propRow = Array(totalCols).fill('');
-    propRow[0] = 'Property:';
-    propRow[1] = headerProperty;
+    propRow[1] = 'Property:';
+    propRow[2] = headerProperty;
     const pr = push(propRow);
-    sc(pr, 0, cellSoft(UTILITY_PROPERTY, true, 'left', 10));
-    sc(pr, 1, cellSoft(UTILITY_PROPERTY, true, 'left', 10));
+    sc(pr, 1, cellSoft(UTILITY_PROPERTY, true, 'left', 10, true, true));
+    sc(pr, 2, cellSoft(UTILITY_PROPERTY, true, 'left', 10, true, true));
 
     const addrRow = Array(totalCols).fill('');
-    addrRow[0] = 'Address:';
-    addrRow[1] = headerAddress;
+    addrRow[1] = 'Address:';
+    addrRow[2] = headerAddress;
     const ar = push(addrRow);
-    sc(ar, 0, cellSoft(UTILITY_PROPERTY, true, 'left', 10));
-    sc(ar, 1, cellSoft(UTILITY_PROPERTY, true, 'left', 10));
-
-    push(Array(totalCols).fill(''));   // spacer
+    sc(ar, 1, cellSoft(UTILITY_PROPERTY, true, 'left', 10, true, true));
+    sc(ar, 2, cellSoft(UTILITY_PROPERTY, true, 'left', 10, true, true));
   }
 
   // Sort utility tables by their natural label order
@@ -789,35 +808,102 @@ function buildUtilityPivotSheet(
     (a, b) => utilityOrder.indexOf(a.utilityField) - utilityOrder.indexOf(b.utilityField),
   );
 
+  // Group contiguous month-column indices into "A:C" / single-cell refs
+  // and build a SUM formula. Used by the row-level Total column so it
+  // skips the year-total columns (which would double-count).
+  const buildRowTotalFormula = (rowExcel: number, monthColIndices: number[]): string => {
+    if (monthColIndices.length === 0) return '0';
+    const sorted = [...monthColIndices].sort((a, b) => a - b);
+    const runs: [number, number][] = [];
+    for (const idx of sorted) {
+      const last = runs[runs.length - 1];
+      if (last && idx === last[1] + 1) last[1] = idx;
+      else runs.push([idx, idx]);
+    }
+    const parts = runs.map(([a, b]) => {
+      const al = colLetter(a + 1);
+      const bl = colLetter(b + 1);
+      return a === b ? `${al}${rowExcel}` : `${al}${rowExcel}:${bl}${rowExcel}`;
+    });
+    return `SUM(${parts.join(',')})`;
+  };
+
+  // Track each table's outer rectangle so we can paint a heavy border
+  // around it after applyStyles runs.
+  const tableBounds: { startRow: number; endRow: number; endCol: number }[] = [];
+
+  let tableIdx = 0;
   for (const table of sortedTables) {
-    // Header row 1 — month bucket / year labels
-    const headerCells: any[] = [
-      'Utility Items', 'Folder Path', 'File Name', 'Utility Provider', 'Account Number',
-    ];
-    for (const col of timeline) headerCells.push(col.label);
-    const hr = push(headerCells);
-    for (let c = 0; c < headerCells.length; c++) {
-      sc(hr, c, hdr(UTILITY_HEADER, '000000', true, 10));
+    const isFirstTable = tableIdx === 0;
+    tableIdx++;
+
+    // Index columns relative to the timeline / fixed cols
+    const monthColIndices: number[] = [];
+    for (let i = 0; i < timeline.length; i++) {
+      if (timeline[i].kind === 'month') monthColIndices.push(FIXED_COLS + i);
+    }
+    const TOTAL_COL    = FIXED_COLS + timeline.length;
+    const COMMENTS_COL = TOTAL_COL + 1;
+
+    const isYearCol = (c: number) => {
+      const i = c - FIXED_COLS;
+      return i >= 0 && i < timeline.length && timeline[i].kind === 'year';
+    };
+
+    // Two full empty white rows immediately before the first table's green
+    // header — sit OUTSIDE any heavy border.
+    if (isFirstTable) {
+      const fullCols = totalCols + 2;
+      push(Array(fullCols).fill(''));
+      push(Array(fullCols).fill(''));
     }
 
-    // Header row 2 — actual scraped billing date(s) for each month bucket.
-    // Year-total columns get an empty sub-header. If multiple distinct
-    // billing dates fell into the same bucket, they're joined with " · ".
-    const subHeader: any[] = ['', '', '', '', ''];
+    // The green column-label header is its OWN bounded block — it gets a
+    // heavy border by itself, separate from the sub-header / data / total
+    // block below. Only the first table shows this header.
+    if (isFirstTable) {
+      const headerStartRow = ri;
+      const headerCells: any[] = [
+        '',     // col A — blank margin
+        'Folder Path', 'File Name', 'Utility Items', 'Utility Provider', 'Account Number',
+      ];
+      for (const col of timeline) headerCells.push(col.label);
+      headerCells.push('Total', 'Comments');
+      const hr = push(headerCells);
+      // Navy ONLY on the column-label header row.
+      for (let c = 1; c < headerCells.length; c++) {
+        if (isYearCol(c)) {
+          sc(hr, c, hdr(UTILITY_NAVY, 'FFFFFF', true, 10));
+        } else {
+          sc(hr, c, hdr(UTILITY_HEADER, '000000', true, 10));
+        }
+      }
+      tableBounds.push({ startRow: headerStartRow, endRow: hr, endCol: COMMENTS_COL });
+
+      // Two empty white rows AFTER the green header — sit OUTSIDE both
+      // bounded blocks (no borders at all).
+      const fullCols = totalCols + 2;
+      push(Array(fullCols).fill(''));
+      push(Array(fullCols).fill(''));
+    }
+
+    // Main bounded block for this table: sub-header + data + spacer + total.
+    const tableStartRow = ri;
+
+    // Scraped-date sub-header — shown for EVERY table. No navy here.
+    // Six leading empties: col A (blank) + Folder/File/Util/Prov/Account.
+    const subHeader: any[] = ['', '', '', '', '', ''];
     for (const col of timeline) {
       if (col.kind === 'month') {
         const dates = table.monthScrapedDates.get(col.key);
-        if (!dates || dates.size === 0) {
-          subHeader.push('');
-        } else {
-          subHeader.push(Array.from(dates).join(' · '));
-        }
+        subHeader.push(dates && dates.size > 0 ? Array.from(dates).join(' · ') : '');
       } else {
         subHeader.push('');
       }
     }
+    subHeader.push('', '');
     const shr = push(subHeader);
-    for (let c = 0; c < subHeader.length; c++) {
+    for (let c = 1; c < subHeader.length; c++) {   // skip col A
       sc(shr, c, hdr(UTILITY_ORANGE, '000000', false, 9));
     }
 
@@ -830,9 +916,10 @@ function buildUtilityPivotSheet(
     const dataStartRow = ri;
     for (const row of sortedRows) {
       const dataCells: any[] = [
-        table.utilityLabel,
+        '',                  // col A — blank margin
         row.folder,
         row.fileName,
+        table.utilityLabel,
         row.provider,
         row.account,
       ];
@@ -842,43 +929,70 @@ function buildUtilityPivotSheet(
           dataCells.push(v !== undefined ? { t: 'n', v, z: '"$"#,##0.00' } : '');
         } else {
           // Year-total: SUM of this row's month columns within this year.
-          const monthCols: number[] = [];
+          const yearMonthCols: number[] = [];
           for (let i = 0; i < timeline.length; i++) {
             const t = timeline[i];
             if (t.kind === 'month' && t.key.startsWith(col.key + '-')) {
-              monthCols.push(FIXED_COLS + i);
+              yearMonthCols.push(FIXED_COLS + i);
             }
           }
-          if (monthCols.length === 0) {
+          if (yearMonthCols.length === 0) {
             dataCells.push('');
           } else {
-            const rowExcel = ri + 1;   // current data row, 1-indexed
-            const refs = monthCols.map(c => `${colLetter(c + 1)}${rowExcel}`);
+            const rowExcel = ri + 1;
+            const refs = yearMonthCols.map(c => `${colLetter(c + 1)}${rowExcel}`);
             dataCells.push({ t: 'n', v: 0, f: `SUM(${refs.join(',')})`, z: '"$"#,##0.00' });
           }
         }
       }
+      // Total + Comments columns at the end
+      const rowExcel = ri + 1;
+      dataCells.push({
+        t: 'n', v: 0,
+        f: buildRowTotalFormula(rowExcel, monthColIndices),
+        z: '"$"#,##0.00',
+      });
+      dataCells.push('');   // Comments — left blank for the user
+
       const r = push(dataCells);
-      sc(r, UTIL_COL,   hdr(UTILITY_ORANGE,  '000000', true,  10));   // utility label — bold orange
-      sc(r, FOLDER_COL, cell(UTILITY_ORANGE, false, 'left',   10));
-      sc(r, FILE_COL,   cell(UTILITY_ORANGE, false, 'left',   10));
-      sc(r, PROV_COL,   cell(UTILITY_ORANGE, false, 'left',   10));
-      sc(r, ACCT_COL,   cell(UTILITY_ORANGE, false, 'center', 10));
-      for (let c = FIXED_COLS; c < dataCells.length; c++) {
-        sc(r, c, cell(UTILITY_ORANGE, false, 'right', 10));
+      // Folder / File: white. Utility Items: green (matches header).
+      // Provider: orange. Account onward: white. Year columns stay white
+      // here — navy lives only on the column-label header row.
+      sc(r, FOLDER_COL, cell(UTILITY_ORANGE,         false, 'left',   10));
+      sc(r, FILE_COL,   cell(UTILITY_ORANGE,         false, 'left',   10));
+      sc(r, UTIL_COL,   hdr(UTILITY_ORANGE, '000000', true,    10));
+      sc(r, PROV_COL,   cell(UTILITY_ORANGE,    false, 'left',   10));
+      sc(r, ACCT_COL,   cell(UTILITY_ORANGE,    false, 'center', 10));
+      for (let c = FIXED_COLS; c < FIXED_COLS + timeline.length; c++) {
+        sc(r, c, cell('FFFFFF', false, 'right', 10));
       }
+      sc(r, TOTAL_COL,    cell('FFFFFF', true,  'right', 10));
+      sc(r, COMMENTS_COL, cell('FFFFFF', false, 'left',  10));
     }
     const dataEndRow = ri - 1;
 
-    // Total row — label spans across the FIXED_COLS columns.
-    const totalCells: any[] = [`Total ${table.utilityLabel}`, '', '', '', ''];
+    // Empty row between data and total row. Orange only across the fixed
+    // label columns (Folder Path → Account Number); date / year / Total /
+    // Comments cells stay white. Col A (blank margin) gets no fill.
+    const fullCols = totalCols + 2;   // includes Total + Comments
+    const spacerR = push(Array(fullCols).fill(''));
+    for (let c = 1; c <= COMMENTS_COL; c++) {   // skip col A
+      const fill = c <= ACCT_COL ? UTILITY_ORANGE : 'FFFFFF';
+      sc(spacerR, c, cell(fill, false, 'left', 10));
+    }
+
+    // Total row — the "Total <utility>" label sits in the merged Provider +
+    // Account Number cells. Other fixed cols (incl. col A) stay blank.
+    // "Total <utility>" sits in the Utility Items column (UTIL_COL = 3),
+    // not merged. Other fixed cols stay blank.
+    const totalCells: any[] = ['', '', '', `Total ${table.utilityLabel}`, '', ''];
     for (let i = 0; i < timeline.length; i++) {
       const colIdx = FIXED_COLS + i;
       if (sortedRows.length === 0) {
         totalCells.push('');
         continue;
       }
-      const startRowExcel = dataStartRow + 1;   // 1-indexed
+      const startRowExcel = dataStartRow + 1;
       const endRowExcel   = dataEndRow   + 1;
       const letter = colLetter(colIdx + 1);
       totalCells.push({
@@ -887,16 +1001,32 @@ function buildUtilityPivotSheet(
         z: '"$"#,##0.00',
       });
     }
+    if (sortedRows.length === 0) {
+      totalCells.push('', '');
+    } else {
+      const totalLetter = colLetter(TOTAL_COL + 1);
+      totalCells.push({
+        t: 'n', v: 0,
+        f: `SUM(${totalLetter}${dataStartRow + 1}:${totalLetter}${dataEndRow + 1})`,
+        z: '"$"#,##0.00',
+      });
+      totalCells.push('');
+    }
     const tr = push(totalCells);
-    merges.push({ s: { r: tr, c: 0 }, e: { r: tr, c: FIXED_COLS - 1 } });
-    for (let c = 0; c < totalCells.length; c++) {
-      sc(tr, c, hdr(UTILITY_ORANGE, '000000', true, 10));
+    // Total row uniformly orange — navy lives only on the column-label header.
+    // Skip col A so the blank margin stays clean. No merge — the label sits
+    // in its own Utility Items cell.
+    for (let c = 1; c < totalCells.length; c++) {
+      sc(tr, c, hdr('ffffff', '000000', true, 10));
     }
 
+    // Record this table's outer bounds for the heavy-border pass below.
+    tableBounds.push({ startRow: tableStartRow, endRow: tr, endCol: COMMENTS_COL });
+
     // Three-row gap before the next table for visual breathing room.
-    push(Array(totalCols).fill(''));
-    push(Array(totalCols).fill(''));
-    push(Array(totalCols).fill(''));
+    push(Array(fullCols).fill(''));
+    push(Array(fullCols).fill(''));
+    push(Array(fullCols).fill(''));
   }
 
   if (wsData.length === 0) {
@@ -907,18 +1037,45 @@ function buildUtilityPivotSheet(
   applyStyles(ws, wsData, styles);
   if (merges.length > 0) ws['!merges'] = merges;
 
+  // Heavy outer border around each table block — walks the perimeter and
+  // overrides the affected sides on each cell's existing style, so the
+  // fills/fonts and inner thin borders already applied keep working.
+  const heavyEdge = { style: 'medium', color: { rgb: '000000' } };
+  for (const b of tableBounds) {
+    for (let r = b.startRow; r <= b.endRow; r++) {
+      // Border wraps the table only — col A (blank margin) is excluded.
+      for (let c = 1; c <= b.endCol; c++) {
+        const ref = XLSX.utils.encode_cell({ r, c });
+        const existing = ws[ref];
+        if (!existing) continue;
+        const prev = existing.s?.border ?? {};
+        const next = { ...prev };
+        if (r === b.startRow) next.top    = heavyEdge;
+        if (r === b.endRow)   next.bottom = heavyEdge;
+        if (c === 1)          next.left   = heavyEdge;
+        if (c === b.endCol)   next.right  = heavyEdge;
+        existing.s = { ...existing.s, border: next };
+      }
+    }
+  }
+
   const cols: { wch: number }[] = [
-    { wch: 16 },   // Utility Items
+    { wch: 4 },    // (col A — blank margin)
     { wch: 22 },   // Folder Path
     { wch: 28 },   // File Name
+    { wch: 20 },   // Utility Items
     { wch: 24 },   // Utility Provider
-    { wch: 16 },   // Account Number
+    { wch: 20 },   // Account Number
   ];
   for (let i = 0; i < timeline.length; i++) {
     cols.push({ wch: timeline[i].kind === 'year' ? 11 : 11 });
   }
+  cols.push({ wch: 12 });  // Total
+  cols.push({ wch: 28 });  // Comments
   ws['!cols'] = cols;
-  ws['!freeze'] = { xSplit: FIXED_COLS, ySplit: 0 };
+  // Freeze just the first column (Utility Items) so the utility label
+  // stays visible while scrolling horizontally through dates.
+  ws['!freeze'] = { xSplit: 1, ySplit: 0 };
   return ws;
 }
 
@@ -986,15 +1143,17 @@ export function exportToExcel(
     XLSX.utils.book_append_sheet(wb, ws, 'Empty');
   }
 
-  // Turn off Excel's default gridlines on every sheet — workbook-level
-  // and per-sheet so it renders cleanly in any viewer.
+  // Turn off Excel's default gridlines on every sheet. xlsx-js-style honors
+  // the per-sheet `!sheetViews` array; we also set the workbook View and
+  // both casings so other readers respect the flag too.
   if (!wb.Workbook) wb.Workbook = {};
   wb.Workbook.Views = [{ RTL: false }];
   for (const name of wb.SheetNames) {
     const ws = wb.Sheets[name];
     if (!ws) continue;
-    (ws as any)['!view']      = { showGridLines: false };
-    (ws as any)['!sheetView'] = { showGridLines: false };
+    (ws as any)['!sheetViews'] = [{ workbookViewId: 0, showGridLines: false, showRowColHeaders: true }];
+    (ws as any)['!view']       = { showGridLines: false };
+    (ws as any)['!sheetView']  = { showGridLines: false };
   }
 
   XLSX.writeFile(wb, `Pexl_${provider.replace(/\s+/g, '')}_${dateStr}.xlsx`);
