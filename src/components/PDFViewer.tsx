@@ -161,6 +161,15 @@ export default function PDFViewer({
   // would otherwise read stale state and silently drop the highlight.
   const highlightsToCommitRef = useRef<Record<number, Highlight[]>>({});
 
+  // Always-fresh refs so the deferred Extract trigger inside finishAutoMode
+  // sees the latest props/state — without these, the setTimeout below
+  // captures the OLD onExtract / session.highlights and silently no-ops
+  // because the freshly-merged highlights aren't visible in that closure.
+  const onExtractRef = useRef(onExtract);
+  useEffect(() => { onExtractRef.current = onExtract; }, [onExtract]);
+  const sessionRef = useRef(session);
+  useEffect(() => { sessionRef.current = session; }, [session]);
+
   const autoActive = autoQueue.length > 0;
   const autoCurrent = autoActive ? autoQueue[autoIdx] : null;
 
@@ -190,17 +199,26 @@ export default function PDFViewer({
   const finishAutoMode = useCallback((commit: boolean) => {
     const pending = highlightsToCommitRef.current;
     if (commit && Object.keys(pending).length > 0) {
-      const merged: Record<number, Highlight[]> = { ...session.highlights };
+      // Merge using the LATEST session.highlights via the ref so we don't
+      // accidentally wipe any highlights drawn between renders.
+      const latestHls = sessionRef.current.highlights;
+      const merged: Record<number, Highlight[]> = { ...latestHls };
       let added = 0;
       for (const [pageStr, pageHls] of Object.entries(pending)) {
         const page = Number(pageStr);
         merged[page] = [...(merged[page] ?? []), ...pageHls];
         added += pageHls.length;
       }
-      onHighlightsChange(session.id, merged);
+      onHighlightsChange(sessionRef.current.id, merged);
       if (added > 0) {
         toast.success(`Added ${added} highlight${added !== 1 ? 's' : ''}. Extracting…`);
-        setTimeout(() => { onExtract(); }, 50);
+        // Fire the LATEST onExtract via ref — the version captured in this
+        // useCallback closure is stale by the time the timeout runs (the
+        // sessions update from onHighlightsChange has already produced a
+        // newer handleExtract that actually sees the merged highlights).
+        // Bumping the delay slightly to give React a chance to flush the
+        // setSessions update before extraction reads it.
+        setTimeout(() => { onExtractRef.current(); }, 80);
       } else {
         toast('No highlights added', { icon: 'ℹ️' });
       }
@@ -210,7 +228,7 @@ export default function PDFViewer({
     setAutoQueryIdx(0);
     setAutoLockedMatch(null);
     highlightsToCommitRef.current = {};
-  }, [session.highlights, session.id, onHighlightsChange, onExtract]);
+  }, [onHighlightsChange]);
 
   const handleDownloadOcr = useCallback(async () => {
     setDownloadingOcr(true);
