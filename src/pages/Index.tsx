@@ -16,14 +16,18 @@ import ThemeToggle from '@/components/ThemeToggle';
 import type { PDFSession, Highlight, ExtractedRow, DocumentType } from '@/types/utilscraper';
 import { DOCUMENT_TYPES } from '@/types/utilscraper';
 import { processFile, extractRegions, downloadAllOcrPdfsAsZip } from '@/lib/api';
+import { sessionsCache } from '@/lib/sessions-cache';
 import { useAuth } from '@/contexts/AuthContext';
 
 export default function Index() {
   const { user, trackUsage, trackDownload, logout } = useAuth();
   const navigate = useNavigate();
-  const [sessions, setSessions]                 = useState<PDFSession[]>([]);
-  const [openTabs, setOpenTabs]                 = useState<string[]>([]);
-  const [activeTabId, setActiveTabId]           = useState<string | null>(null);
+  // Hydrate from the module-level cache so navigating to /admin and back
+  // doesn't drop the open PDFs / extracted data. The cache lives as long
+  // as the JS module — does NOT survive a hard refresh.
+  const [sessions, setSessions]                 = useState<PDFSession[]>(() => sessionsCache.sessions);
+  const [openTabs, setOpenTabs]                 = useState<string[]>(() => sessionsCache.openTabs);
+  const [activeTabId, setActiveTabId]           = useState<string | null>(() => sessionsCache.activeTabId);
   const [pendingFiles, setPendingFiles]         = useState<File[]>([]);
   const [processing, setProcessing]             = useState(false);
   const [modalOpen, setModalOpen]               = useState(false);
@@ -48,7 +52,7 @@ export default function Index() {
   const [pageJump, setPageJump]                 = useState<{ sessionId: string; page: number; nonce: number } | null>(null);
   // Session-wide custom field labels — survive tab switches and show up in
   // every PDF's label picker.
-  const [customFields, setCustomFields]         = useState<string[]>([]);
+  const [customFields, setCustomFields]         = useState<string[]>(() => sessionsCache.customFields);
   // Controls whether the PDF upload zone is visible in the sidebar.
   // Default true until files exist, then hidden so the sidebar stays
   // tidy; the user reveals it again with a "+ Add PDFs" chip.
@@ -65,6 +69,13 @@ export default function Index() {
   useEffect(() => {
     if (sessions.length > 0 && pendingFiles.length === 0) setShowUploadZone(false);
   }, [sessions.length, pendingFiles.length]);
+
+  // Mirror tab/session state into the module-level cache so it survives
+  // unmounts (e.g. when navigating to /admin and back).
+  useEffect(() => { sessionsCache.sessions = sessions;       }, [sessions]);
+  useEffect(() => { sessionsCache.openTabs = openTabs;       }, [openTabs]);
+  useEffect(() => { sessionsCache.activeTabId = activeTabId; }, [activeTabId]);
+  useEffect(() => { sessionsCache.customFields = customFields; }, [customFields]);
 
   // Tab sessions in order, resolved from IDs
   const tabSessions = useMemo(

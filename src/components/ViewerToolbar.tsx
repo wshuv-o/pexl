@@ -57,6 +57,11 @@ const ZOOM_OPTIONS = [
   { label: '125%',     value: 1.25 },
   { label: '150%',     value: 1.5  },
   { label: '175%',     value: 1.75 },
+  { label: '200%',     value: 2.0  },
+  { label: '250%',     value: 2.5  },
+  { label: '300%',     value: 3.0  },
+  { label: '400%',     value: 4.0  },
+  { label: '500%',     value: 5.0  },
   { label: 'Fit Page', value: 0.8  },
 ];
 
@@ -258,7 +263,7 @@ export default function ViewerToolbar({
       <div className="flex items-center gap-0.5 shrink-0">
         <button
           className="p-1.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-200"
-          onClick={() => onZoomChange(Math.max(0.3, parseFloat((zoom - 0.15).toFixed(2))))}
+          onClick={() => onZoomChange(Math.max(0.3, parseFloat((zoom - 0.25).toFixed(2))))}
           aria-label="Zoom out"
         >
           <ZoomOut className="w-4 h-4" />
@@ -277,7 +282,7 @@ export default function ViewerToolbar({
 
         <button
           className="p-1.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-200"
-          onClick={() => onZoomChange(Math.min(1.75, parseFloat((zoom + 0.15).toFixed(2))))}
+          onClick={() => onZoomChange(Math.min(5.0, parseFloat((zoom + 0.25).toFixed(2))))}
           aria-label="Zoom in"
         >
           <ZoomIn className="w-4 h-4" />
