@@ -19,6 +19,7 @@ interface UsageRow {
   files_processed: number;
   statements_extracted: number;
   downloads: number;
+  doc_types: string[] | null;
   used_at: string;
 }
 
@@ -183,6 +184,9 @@ interface UserSummary {
   downloads: number;
   sessions: number;
   lastActive: string;    // ISO
+  // Per-doc-type session counts (e.g. { appraisal: 2, utility_bill: 1 })
+  // — drives the breakdown pills on the user card.
+  typeCounts: Record<string, number>;
   rows: UsageRow[];
 }
 
@@ -257,6 +261,22 @@ const UserCard = ({
         </span>
         <span>{summary.sessions} session{summary.sessions !== 1 ? 's' : ''}</span>
       </div>
+
+      {/* Per-doc-type breakdown pills (e.g. "2 appraisal · 1 utility bill") */}
+      {Object.keys(summary.typeCounts).length > 0 && (
+        <div className="px-4 py-2 border-t border-border bg-muted/20 flex flex-wrap gap-1.5 text-[10px]">
+          {Object.entries(summary.typeCounts)
+            .sort(([, a], [, b]) => b - a)
+            .map(([type, count]) => (
+              <span
+                key={type}
+                className="px-2 py-0.5 rounded-full bg-primary/10 text-primary font-medium"
+              >
+                {count} {type.replace(/_/g, ' ')}
+              </span>
+            ))}
+        </div>
+      )}
 
       {expanded && (
         <div className="border-t border-border">
@@ -350,8 +370,13 @@ const Admin = () => {
         cur.downloads += r.downloads;
         cur.sessions  += 1;
         if (parseTimestamp(r.used_at) > parseTimestamp(cur.lastActive)) cur.lastActive = r.used_at;
+        for (const t of r.doc_types ?? []) {
+          cur.typeCounts[t] = (cur.typeCounts[t] || 0) + 1;
+        }
         cur.rows.push(r);
       } else {
+        const typeCounts: Record<string, number> = {};
+        for (const t of r.doc_types ?? []) typeCounts[t] = (typeCounts[t] || 0) + 1;
         map.set(r.user_id, {
           user_id:     r.user_id,
           username:    r.username,
@@ -362,6 +387,7 @@ const Admin = () => {
           downloads:   r.downloads,
           sessions:    1,
           lastActive:  r.used_at,
+          typeCounts,
           rows:        [r],
         });
       }

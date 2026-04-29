@@ -861,6 +861,24 @@ export default function PDFViewer({
     advanceField();
   }, [autoLockedMatch, autoCurrent, advanceField]);
 
+  // PageUp / PageDown → previous / next PDF page. Skipped if focus is in
+  // an input field so search-bar / label-picker typing isn't broken.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'PageDown' && e.key !== 'PageUp') return;
+      const t = e.target as HTMLElement | null;
+      if (t) {
+        const tag = t.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || t.isContentEditable) return;
+      }
+      e.preventDefault();
+      if (e.key === 'PageDown') scrollToPage(currentPage + 1);
+      else                       scrollToPage(currentPage - 1);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [currentPage, scrollToPage]);
+
   useEffect(() => {
     if (!scrollToPageTrigger || !pdfLoaded) return;
     const { page } = scrollToPageTrigger;

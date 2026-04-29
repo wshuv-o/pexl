@@ -31,7 +31,7 @@ interface AuthContextType {
   authLoading: boolean;
   login: (username: string, password: string) => Promise<{ ok: boolean; error?: string }>;
   logout: () => void;
-  trackUsage: (filesCount: number, statementsCount: number) => Promise<void>;
+  trackUsage: (filesCount: number, statementsCount: number, docTypes?: string[]) => Promise<void>;
   trackDownload: () => Promise<void>;
 }
 
@@ -144,8 +144,20 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     setUsage(EMPTY_USAGE);
   };
 
-  const trackUsage = async (filesCount: number, statementsCount: number): Promise<void> => {
-    await apiPostUsage({ files_processed: filesCount, statements_extracted: statementsCount, downloads: 0 });
+  const trackUsage = async (
+    filesCount: number,
+    statementsCount: number,
+    docTypes?: string[],
+  ): Promise<void> => {
+    // doc_types is an array, one entry per session processed (e.g.
+    // ['appraisal', 'utility_bill', 'appraisal']) so the backend can
+    // surface per-type breakdowns in the admin usage view.
+    await apiPostUsage({
+      files_processed: filesCount,
+      statements_extracted: statementsCount,
+      downloads: 0,
+      ...(docTypes && docTypes.length > 0 ? { doc_types: docTypes } : {}),
+    });
     setUsage(await apiFetchUsage());
   };
 

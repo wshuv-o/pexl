@@ -401,7 +401,12 @@ const flattenToItem = (filename: string, rows: ExtractedRow[]): BankStatementIte
     if (r.field === 'total_credits') {
       creditSum += parseNum(r.value);
     } else if (r.field === 'total_debits') {
-      debitSum += parseNum(r.value);
+      // Debits store the absolute numeric value only — strip any leading
+      // minus or accounting-style parentheses ("(1,500.00)" → 1500). The
+      // sum stays positive; formulas elsewhere treat debits as positive
+      // and subtract them where needed.
+      const cleaned = r.value.replace(/[()]/g, '');
+      debitSum += Math.abs(parseNum(cleaned));
     } else if (!map[r.field]) {
       map[r.field] = r.value;
     }

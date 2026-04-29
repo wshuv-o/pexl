@@ -91,6 +91,29 @@ export default function Index() {
     });
   }, [activeTabId]);
 
+  // Ctrl+Tab / Ctrl+Shift+Tab cycle through open PDF tabs in Pexl. We try
+  // to preventDefault so the browser doesn't switch its own tabs, but note
+  // Chrome reserves Ctrl+Tab in some contexts and may still steal the
+  // event. Alt+Tab is OS-level and can't be intercepted at all.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Tab' || !e.ctrlKey) return;
+      const t = e.target as HTMLElement | null;
+      if (t) {
+        const tag = t.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || t.isContentEditable) return;
+      }
+      if (openTabs.length === 0) return;
+      e.preventDefault();
+      const curIdx = activeTabId ? openTabs.indexOf(activeTabId) : -1;
+      const delta  = e.shiftKey ? -1 : 1;
+      const nextIdx = ((curIdx + delta) % openTabs.length + openTabs.length) % openTabs.length;
+      setActiveTabId(openTabs[nextIdx]);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [openTabs, activeTabId]);
+
   // Combined extracted data from ALL sessions for the Excel panel
   const combinedExtractedData = useMemo(
     () => sessions.flatMap(s => s.extractedData),
@@ -393,8 +416,10 @@ export default function Index() {
     if (totalNull > 0) toast.warning(`${totalNull} field${totalNull !== 1 ? 's' : ''} returned empty`);
     setExtracting(false);
 
-    // Track usage
-    trackUsage(targets.length, totalExtracted).catch(() => {});
+    // Track usage — also report each session's doc type so the admin
+    // dashboard can show "user X scraped N appraisal, M utility_bill, …".
+    const docTypes = targets.map(t => t.docType);
+    trackUsage(targets.length, totalExtracted, docTypes).catch(() => {});
   }, [sessions, openTabs, trackUsage]);
 
   const handleReExtractHighlight = useCallback(async (highlightId: string) => {
