@@ -768,8 +768,10 @@ export default function PDFViewer({
       return;
     }
     // Value-pattern path: scan visible pages for amounts / dates / years.
+    // Show the current field's first synonym in the search bar so the user
+    // can see what's being looked for (matches the old auto-search UX).
     if (!session.file) return;
-    setSearchQuery(`${kind} candidates`);
+    setSearchQuery(cur.queries[autoQueryIdx] ?? cur.queries[0] ?? cur.label);
     setSearchResults({});
     findValueCandidates(session.file, kind)
       .then(cands => {
