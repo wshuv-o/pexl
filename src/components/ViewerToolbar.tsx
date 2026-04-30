@@ -3,13 +3,15 @@ import {
   ChevronLeft, ChevronRight, ZoomIn, ZoomOut,
   MousePointer2, Eraser, Loader2, TextCursor,
   FileDown, FileInput, FileStack, Trash2, ListChecks, ChevronDown, Search,
-  SlidersHorizontal, Download, MousePointerClick, Wand2,
+  SlidersHorizontal, Download, MousePointerClick, Wand2, Filter, Check,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { Input } from '@/components/ui/input';
-import type { ViewerTool } from '@/types/utilscraper';
+import type { ViewerTool, Highlight } from '@/types/utilscraper';
+import { getFieldConfig } from '@/types/utilscraper';
 
 interface ViewerToolbarProps {
   currentPage: number;
@@ -25,13 +27,17 @@ interface ViewerToolbarProps {
   onExtract: () => void;
   extracting: boolean;
   hasHighlights: boolean;
-  // Bulk actions
-  onApplyToAllPages: () => void;
-  onApplyToAllPdfs: () => void;
+  // Bulk actions — `idsFilter` is the optional subset of highlight ids to
+  // apply (driven by the Selected-fields popover). If absent / empty, the
+  // existing "all" behavior is used.
+  onApplyToAllPages: (idsFilter?: Set<string>) => void;
+  onApplyToAllPdfs:  (idsFilter?: Set<string>) => void;
   // Mirror highlights only to the ctrl/cmd-selected tabs. Count drives the
   // button's badge; undefined handler hides the button entirely.
-  onApplyToSelectedPdfs?: () => void;
+  onApplyToSelectedPdfs?: (idsFilter?: Set<string>) => void;
   selectedPdfCount?: number;
+  // All highlights across the active PDF — drives the Selected-fields list.
+  allHighlights?: import('@/types/utilscraper').Highlight[];
   onEraseAllPages: () => void;
   onApplyToPageRange: (pages: number[]) => void;
   searchOpen: boolean;
@@ -70,6 +76,7 @@ export default function ViewerToolbar({
   onPageChange, onZoomChange, onToolChange,
   onExtract, extracting, hasHighlights,
   onApplyToAllPages, onApplyToAllPdfs, onApplyToSelectedPdfs, selectedPdfCount = 0,
+  allHighlights,
   onEraseAllPages, onApplyToPageRange,
   searchOpen, onSearchToggle,
   fineRotation, onFineRotationChange,
@@ -370,13 +377,13 @@ export default function ViewerToolbar({
         {bulkBtn(
           <FileDown className="w-4 h-4" />,
           'Copy highlights to all pages in this PDF',
-          onApplyToAllPages,
+          () => onApplyToAllPages(),
           !hasHighlightsOnPage,
         )}
         {bulkBtn(
           <FileInput className="w-4 h-4" />,
           'Copy highlights to all open PDFs',
-          onApplyToAllPdfs,
+          () => onApplyToAllPdfs(),
           !hasHighlightsOnPage,
         )}
 
@@ -389,7 +396,7 @@ export default function ViewerToolbar({
               <button
                 className="relative p-1.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted
                            disabled:opacity-30 disabled:cursor-not-allowed transition-colors shrink-0"
-                onClick={onApplyToSelectedPdfs}
+                onClick={() => onApplyToSelectedPdfs()}
                 disabled={!hasHighlightsOnPage || selectedPdfCount === 0}
                 aria-label="Copy highlights to selected PDFs"
               >
@@ -408,6 +415,16 @@ export default function ViewerToolbar({
             </TooltipContent>
           </Tooltip>
         )}
+
+        {/* "Selected & Apply" popover — pick a subset of highlights and
+            choose where to copy them (all pages, all PDFs, selected PDFs). */}
+        <SelectedApplyPopover
+          highlights={allHighlights ?? []}
+          selectedPdfCount={selectedPdfCount}
+          onApplyToAllPages={onApplyToAllPages}
+          onApplyToAllPdfs={onApplyToAllPdfs}
+          onApplyToSelectedPdfs={onApplyToSelectedPdfs}
+        />
 
         {bulkBtn(
           <Trash2 className="w-4 h-4" />,
@@ -545,6 +562,177 @@ function parsePageList(input: string, totalPages: number): number[] {
   }
   return Array.from(pages).sort((a, b) => a - b);
 }
+
+// ─── Selected fields → Apply popover ────────────────────────────────────
+// Lists every highlight in the active PDF with a checkbox. The user can
+// pick a subset and then apply only those to all pages / all open PDFs /
+// the multi-tab-selected PDFs. If nothing is checked, all are used.
+function SelectedApplyPopover({
+  highlights,
+  selectedPdfCount = 0,
+  onApplyToAllPages,
+  onApplyToAllPdfs,
+  onApplyToSelectedPdfs,
+}: {
+  highlights: Highlight[];
+  selectedPdfCount?: number;
+  onApplyToAllPages:    (idsFilter?: Set<string>) => void;
+  onApplyToAllPdfs:     (idsFilter?: Set<string>) => void;
+  onApplyToSelectedPdfs?: (idsFilter?: Set<string>) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+
+  // Reset selection whenever the popover opens or the underlying
+  // highlight list changes (so stale ids don't linger).
+  useEffect(() => {
+    if (open) setPicked(new Set());
+  }, [open, highlights.length]);
+
+  const toggle = (id: string) =>
+    setPicked(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  const selectAll = () =>
+    setPicked(new Set(highlights.map(h => h.id)));
+  const clearAll = () => setPicked(new Set());
+
+  const filter = picked.size > 0 ? picked : undefined;
+  const ready  = highlights.length > 0;
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <PopoverTrigger asChild>
+            <button
+              className="relative p-1.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted
+                         disabled:opacity-30 disabled:cursor-not-allowed transition-colors shrink-0"
+              disabled={!ready}
+              aria-label="Select fields, then apply"
+            >
+              <ListChecks className="w-4 h-4" />
+              {picked.size > 0 && (
+                <span className="absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] px-0.5 rounded-full bg-primary text-primary-foreground text-[9px] font-semibold flex items-center justify-center leading-none">
+                  {picked.size}
+                </span>
+              )}
+            </button>
+          </PopoverTrigger>
+        </TooltipTrigger>
+        <TooltipContent side="bottom" className="max-w-[220px] text-xs">
+          Pick specific highlights, then apply them to all pages, all PDFs,
+          or the multi-selected PDFs.
+        </TooltipContent>
+      </Tooltip>
+
+      <PopoverContent align="end" className="w-80 p-0">
+        <div className="px-3 py-2 border-b border-border flex items-center gap-2 text-xs">
+          <span className="font-semibold text-foreground">Apply selected fields</span>
+          <span className="text-muted-foreground ml-auto">
+            {picked.size} / {highlights.length} picked
+          </span>
+        </div>
+
+        <div className="px-3 py-2 border-b border-border flex items-center gap-2 text-[11px]">
+          <button
+            onClick={selectAll}
+            disabled={!ready}
+            className="px-2 py-0.5 rounded bg-muted hover:bg-muted/80 transition-colors disabled:opacity-40"
+          >Select all</button>
+          <button
+            onClick={clearAll}
+            disabled={picked.size === 0}
+            className="px-2 py-0.5 rounded bg-muted hover:bg-muted/80 transition-colors disabled:opacity-40"
+          >Clear</button>
+          <span className="ml-auto text-muted-foreground">
+            {picked.size === 0 ? '(none → applies all)' : ''}
+          </span>
+        </div>
+
+        <div className="max-h-72 overflow-y-auto px-2 py-1">
+          {highlights.length === 0 ? (
+            <div className="text-center text-xs text-muted-foreground py-6">
+              No highlights yet — draw some first.
+            </div>
+          ) : (
+            highlights
+              .slice()
+              .sort((a, b) => (a.page - b.page) || a.field.localeCompare(b.field))
+              .map(h => {
+                const cfg = getFieldConfig(h.field);
+                const checked = picked.has(h.id);
+                return (
+                  <label
+                    key={h.id}
+                    className={`flex items-center gap-2 px-2 py-1.5 rounded text-xs cursor-pointer transition-colors
+                      ${checked ? 'bg-primary/10' : 'hover:bg-muted/60'}`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => toggle(h.id)}
+                      className="sr-only"
+                    />
+                    <span
+                      className={`w-3.5 h-3.5 rounded border flex items-center justify-center shrink-0
+                        ${checked ? 'bg-primary border-primary' : 'border-border'}`}
+                    >
+                      {checked && <Check className="w-2.5 h-2.5 text-primary-foreground" />}
+                    </span>
+                    <span
+                      className="w-2 h-2 rounded-full shrink-0"
+                      style={{ backgroundColor: cfg.color }}
+                    />
+                    <span className="truncate flex-1">{cfg.label}</span>
+                    <span className="text-[10px] text-muted-foreground shrink-0">
+                      p{h.page}
+                    </span>
+                  </label>
+                );
+              })
+          )}
+        </div>
+
+        <div className="border-t border-border p-2 flex flex-col gap-1">
+          <button
+            onClick={() => { onApplyToAllPages(filter); setOpen(false); }}
+            disabled={!ready}
+            className="flex items-center gap-2 px-2 py-1.5 rounded text-xs hover:bg-muted disabled:opacity-40 transition-colors"
+          >
+            <FileDown className="w-3.5 h-3.5" />
+            <span>Apply to all pages</span>
+          </button>
+          <button
+            onClick={() => { onApplyToAllPdfs(filter); setOpen(false); }}
+            disabled={!ready}
+            className="flex items-center gap-2 px-2 py-1.5 rounded text-xs hover:bg-muted disabled:opacity-40 transition-colors"
+          >
+            <FileInput className="w-3.5 h-3.5" />
+            <span>Apply to all open PDFs</span>
+          </button>
+          {onApplyToSelectedPdfs && (
+            <button
+              onClick={() => { onApplyToSelectedPdfs(filter); setOpen(false); }}
+              disabled={!ready || selectedPdfCount === 0}
+              className="flex items-center gap-2 px-2 py-1.5 rounded text-xs hover:bg-muted disabled:opacity-40 transition-colors"
+            >
+              <FileStack className="w-3.5 h-3.5" />
+              <span>Apply to {selectedPdfCount} selected PDF{selectedPdfCount !== 1 ? 's' : ''}</span>
+            </button>
+          )}
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+// silence "unused" hint for the icon import-set if Filter/Check aren't pulled in
+void Filter;
 
 function PageRangeButton({
   disabled,

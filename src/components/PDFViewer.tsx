@@ -6,10 +6,13 @@ import ViewerToolbar from './ViewerToolbar';
 import HighlightOverlay from './HighlightOverlay';
 import FieldLabelPicker from './FieldLabelPicker';
 import HighlightLegend from './HighlightLegend';
-import { downloadOcrPdf, searchBackend, type SearchMode } from '@/lib/api';
+import { downloadOcrPdf, extractRegions, searchBackend, type SearchMode } from '@/lib/api';
+import { findTextPositionInPdf, getTextAtRect } from '@/lib/pdf-extract';
 import { toast } from 'sonner';
 
 pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
+
+const clamp01 = (v: number): number => Math.max(0, Math.min(1, v));
 
 interface PDFViewerProps {
   session: PDFSession;
@@ -29,6 +32,21 @@ interface PDFViewerProps {
   onCustomFieldAdd: (name: string) => void;
   onSelectionChange?: (ids: Set<string>) => void;
   onSessionRenewed?: (oldId: string, newId: string) => void;
+  // Apply key-anchored auto-extract pairs to every other open PDF. Index
+  // owns the session list so it iterates and calls onHighlightsChange per
+  // session itself.
+  onAutoApplyAllPdfs?: (
+    pairs: ReadonlyArray<{
+      field: string;
+      fieldLabel: string;
+      sourcePage: number;
+      keyText: string;
+      offsetX: number;
+      offsetY: number;
+      valueWidth: number;
+      valueHeight: number;
+    }>,
+  ) => void | Promise<void>;
 }
 
 export default function PDFViewer({
@@ -46,6 +64,7 @@ export default function PDFViewer({
   onCustomFieldAdd,
   onSelectionChange,
   onSessionRenewed,
+  onAutoApplyAllPdfs,
 }: PDFViewerProps) {
   const [currentPage, setCurrentPage]   = useState(session.startPage || 1);
   const [zoom, setZoom]                 = useState<number | null>(null);
@@ -109,6 +128,219 @@ export default function PDFViewer({
   // 'value' = next drawn box becomes a new pair's value (label picker shows).
   // 'key'   = next drawn box becomes the key for the most-recent pair w/o a key.
   const [autoNextStep, setAutoNextStep] = useState<'value' | 'key'>('value');
+
+  const [applyingAuto, setApplyingAuto] = useState(false);
+
+  // Resolve key text + offset for each pair from the source PDF, then return
+  // an "enriched" array. Pairs whose key text is empty / unreadable are
+  // dropped so the apply step doesn't waste search calls.
+  const resolveAutoPairs = useCallback(async () => {
+    if (!session.file) return [];
+    const out: {
+      field: string;
+      fieldLabel: string;
+      sourcePage: number;
+      keyText: string;
+      offsetX: number;       // value.x - key.x
+      offsetY: number;       // value.y - key.y
+      valueWidth: number;
+      valueHeight: number;
+    }[] = [];
+    for (const p of autoPairs) {
+      if (!p.key) continue;
+      let trimmed = '';
+      try {
+        // 1) Fast path: pdfjs text-layer read (works for native-text PDFs).
+        const text = await getTextAtRect(session.file, p.page, p.key);
+        trimmed = (text ?? '').trim();
+      } catch (err) {
+        console.warn('[resolveAutoPairs] pdfjs read failed for', p.fieldLabel, err);
+      }
+      if (!trimmed || trimmed.length < 2) {
+        // 2) Fallback: ask the backend to OCR the key rect. Works for
+        //    scanned / vector-only PDFs where pdfjs has no text.
+        try {
+          const ocr = await extractRegions(
+            session.id,
+            [{
+              id: `__autokey_${Date.now()}`,
+              page:   p.page,
+              field:  '__autokey__',
+              x: p.key.x, y: p.key.y, width: p.key.width, height: p.key.height,
+            }],
+            session.file,
+            { strict: true },
+          );
+          trimmed = ((ocr[0]?.value ?? '') as string).trim();
+        } catch (err) {
+          console.warn('[resolveAutoPairs] backend OCR fallback failed for', p.fieldLabel, err);
+        }
+      }
+      if (!trimmed || trimmed.length < 2) {
+        toast(`Skipping "${p.fieldLabel}" — couldn't read its key text.`, { icon: '⚠️' });
+        continue;
+      }
+      out.push({
+        field:       p.field,
+        fieldLabel:  p.fieldLabel,
+        sourcePage:  p.page,
+        keyText:     trimmed,
+        offsetX:     p.value.x - p.key.x,
+        offsetY:     p.value.y - p.key.y,
+        valueWidth:  p.value.width,
+        valueHeight: p.value.height,
+      });
+    }
+    return out;
+  }, [autoPairs, session.file, session.id]);
+
+  const exitAutoSetup = useCallback(() => {
+    setAutoSetupActive(false);
+    setAutoPairs([]);
+    setAutoNextStep('value');
+  }, []);
+
+  // Apply to all pages of THIS PDF — for each pair, find the key text on
+  // each page and place the value highlight at the captured offset.
+  const handleAutoApplyAllPages = useCallback(async () => {
+    if (!session.file) return;
+    if (autoPairs.length === 0) {
+      toast('Add at least one field first.', { icon: 'ℹ️' });
+      return;
+    }
+    if (autoPairs.some(p => !p.key)) {
+      toast('Finish drawing a key for the last field first.', { icon: '⚠️' });
+      return;
+    }
+
+    setApplyingAuto(true);
+    try {
+      const resolved = await resolveAutoPairs();
+      if (resolved.length === 0) {
+        toast.error('Could not read any key text — try larger key boxes.');
+        return;
+      }
+
+      const file = session.file;
+      const merged: Record<number, Highlight[]> = { ...session.highlights };
+      let added = 0;
+      let pagesScanned = 0;
+      const lastPage = numPages ?? session.total_pages;
+
+      // Pre-cache backend search results per (keyText) so we don't refetch
+      // for every page. Each entry is a Map<page, bbox-list> in 0-1 coords.
+      const backendByKey = new Map<string, Map<number, { x: number; y: number; width: number; height: number }[]>>();
+      const fetchBackendKey = async (q: string) => {
+        if (backendByKey.has(q)) return backendByKey.get(q)!;
+        const map = new Map<number, { x: number; y: number; width: number; height: number }[]>();
+        for (const mode of ['exact', 'partial', 'fuzzy'] as const) {
+          const r = await searchBackend(session.id, q, mode);
+          if (!r || r.results.length === 0) continue;
+          for (const m of r.results) {
+            const dims = r.page_sizes[String(m.page)];
+            if (!dims) continue;
+            const arr = map.get(m.page) ?? [];
+            for (const [x1, y1, x2, y2] of m.boxes) {
+              arr.push({
+                x: x1 / dims.width,
+                y: y1 / dims.height,
+                width:  (x2 - x1) / dims.width,
+                height: (y2 - y1) / dims.height,
+              });
+            }
+            map.set(m.page, arr);
+          }
+          if (map.size > 0) break;
+        }
+        backendByKey.set(q, map);
+        return map;
+      };
+
+      for (let pg = 1; pg <= lastPage; pg++) {
+        // Skip the source page that the user already highlighted on.
+        if (pg === resolved[0].sourcePage) continue;
+        pagesScanned++;
+
+        for (const r of resolved) {
+          try {
+            // 1) Fast path: pdfjs text search.
+            let match = await findTextPositionInPdf(file, pg, r.keyText);
+            // 2) Fallback: backend (Whoosh / OCR'd index).
+            if (!match) {
+              const map = await fetchBackendKey(r.keyText);
+              const list = map.get(pg);
+              if (list && list[0]) match = list[0];
+            }
+            if (!match) continue;
+            const x = clamp01(match.x + r.offsetX);
+            const y = clamp01(match.y + r.offsetY);
+            const w = Math.min(r.valueWidth,  0.999 - x);
+            const h = Math.min(r.valueHeight, 0.999 - y);
+            if (w <= 0 || h <= 0) continue;
+            const hl: Highlight = {
+              id: `auto-${Date.now()}-${pg}-${r.field}-${Math.random().toString(36).slice(2, 5)}`,
+              page:  pg,
+              field: r.field,
+              x, y, width: w, height: h,
+              isAutoExtracted: true,
+            };
+            merged[pg] = [...(merged[pg] ?? []), hl];
+            added++;
+          } catch (err) {
+            console.warn('[applyAllPages] place failed:', err);
+          }
+        }
+      }
+
+      onHighlightsChange(session.id, merged);
+      if (added > 0) {
+        toast.success(`Placed ${added} highlight${added !== 1 ? 's' : ''} across ${pagesScanned} page${pagesScanned !== 1 ? 's' : ''}.`);
+      } else {
+        toast('No key matches found on other pages.', { icon: 'ℹ️' });
+      }
+      exitAutoSetup();
+    } catch (err) {
+      toast.error('Apply failed: ' + (err instanceof Error ? err.message : 'unknown'));
+    } finally {
+      setApplyingAuto(false);
+    }
+  }, [
+    autoPairs, session.file, session.highlights, session.id, session.total_pages,
+    numPages, onHighlightsChange, resolveAutoPairs, exitAutoSetup,
+  ]);
+
+  // Apply to all open PDFs — defer to a parent callback so Index.tsx can
+  // iterate every other session's File. We pass the already-resolved
+  // pairs (key text + offset + value size).
+  const handleAutoApplyAllPdfs = useCallback(async () => {
+    if (autoPairs.length === 0) {
+      toast('Add at least one field first.', { icon: 'ℹ️' });
+      return;
+    }
+    if (autoPairs.some(p => !p.key)) {
+      toast('Finish drawing a key for the last field first.', { icon: '⚠️' });
+      return;
+    }
+    if (!onAutoApplyAllPdfs) {
+      toast.error('Apply-to-all-PDFs callback not wired up.');
+      return;
+    }
+
+    setApplyingAuto(true);
+    try {
+      const resolved = await resolveAutoPairs();
+      if (resolved.length === 0) {
+        toast.error('Could not read any key text — try larger key boxes.');
+        return;
+      }
+      await onAutoApplyAllPdfs(resolved);
+      exitAutoSetup();
+    } catch (err) {
+      toast.error('Apply failed: ' + (err instanceof Error ? err.message : 'unknown'));
+    } finally {
+      setApplyingAuto(false);
+    }
+  }, [autoPairs, resolveAutoPairs, exitAutoSetup]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Magic-wand button → toggle setup mode ON. The actual highlighting is
   // done with the existing highlight tool while the banner is active.
@@ -614,18 +846,24 @@ export default function PDFViewer({
   // -----------------------------------------------------------------------
   // Bulk highlight actions
   // -----------------------------------------------------------------------
-  const handleApplyToAllPages = useCallback(() => {
-    if (pageHighlights.length === 0) return;
+  const handleApplyToAllPages = useCallback((idsFilter?: Set<string>) => {
+    const source = idsFilter
+      ? pageHighlights.filter(h => idsFilter.has(h.id))
+      : pageHighlights;
+    if (source.length === 0) return;
     const next = { ...session.highlights };
     for (let p = 1; p <= totalPages; p++) {
       if (p === currentPage) continue;
-      next[p] = pageHighlights.map(h => ({
+      // Append, don't replace — selecting a subset shouldn't wipe other highlights.
+      const existing = next[p] ?? [];
+      const cloned = source.map(h => ({
         ...h,
         id: `hl-${Date.now()}-${p}-${Math.random().toString(36).slice(2, 6)}`,
         page: p,
         extractedValue: undefined,
         confidence: undefined,
       }));
+      next[p] = idsFilter ? [...existing, ...cloned] : cloned;
     }
     onHighlightsChange(session.id, next);
   }, [pageHighlights, session, totalPages, currentPage, onHighlightsChange]);
@@ -651,15 +889,31 @@ export default function PDFViewer({
     onHighlightsChange(session.id, {});
   }, [session.id, onHighlightsChange]);
 
-  const handleApplyToAllPdfs = useCallback(() => {
-    if (allHighlights.length === 0) return;
-    onApplyToAllPdfs(session.highlights);
-  }, [allHighlights, session.highlights, onApplyToAllPdfs]);
+  // Build a per-page subset of session.highlights restricted to ids in the
+  // provided set. Used by the "Selected → Apply" popover so the user can
+  // mirror only specific highlights to other PDFs.
+  const filterHighlightsByIds = useCallback((idsFilter?: Set<string>) => {
+    if (!idsFilter) return session.highlights;
+    const out: Record<number, Highlight[]> = {};
+    for (const [p, hls] of Object.entries(session.highlights)) {
+      const kept = hls.filter(h => idsFilter.has(h.id));
+      if (kept.length) out[Number(p)] = kept;
+    }
+    return out;
+  }, [session.highlights]);
 
-  const handleApplyToSelectedPdfs = useCallback(() => {
-    if (allHighlights.length === 0 || !onApplyToSelectedPdfs) return;
-    onApplyToSelectedPdfs(session.highlights);
-  }, [allHighlights, session.highlights, onApplyToSelectedPdfs]);
+  const handleApplyToAllPdfs = useCallback((idsFilter?: Set<string>) => {
+    const source = filterHighlightsByIds(idsFilter);
+    if (Object.values(source).flat().length === 0) return;
+    onApplyToAllPdfs(source);
+  }, [filterHighlightsByIds, onApplyToAllPdfs]);
+
+  const handleApplyToSelectedPdfs = useCallback((idsFilter?: Set<string>) => {
+    if (!onApplyToSelectedPdfs) return;
+    const source = filterHighlightsByIds(idsFilter);
+    if (Object.values(source).flat().length === 0) return;
+    onApplyToSelectedPdfs(source);
+  }, [filterHighlightsByIds, onApplyToSelectedPdfs]);
 
   // Toolbar page nav → scroll to page
   const scrollToPage = useCallback((p: number) => {
@@ -970,6 +1224,7 @@ export default function PDFViewer({
         onApplyToAllPdfs={handleApplyToAllPdfs}
         onApplyToSelectedPdfs={handleApplyToSelectedPdfs}
         selectedPdfCount={selectedPdfCount ?? 0}
+        allHighlights={allHighlights}
         onEraseAllPages={handleEraseAllPages}
         onApplyToPageRange={handleApplyToPageRange}
         searchOpen={searchOpen}
@@ -1001,47 +1256,26 @@ export default function PDFViewer({
             </span>
             <span className="ml-auto" />
             <button
-              onClick={() => {
-                if (autoPairs.length === 0) {
-                  toast('Add at least one field first.', { icon: 'ℹ️' });
-                  return;
-                }
-                if (autoPairs.some(p => !p.key)) {
-                  toast('Finish drawing a key for the last field first.', { icon: '⚠️' });
-                  return;
-                }
-                toast('Apply to all pages — coming next iteration', { icon: '🛠️' });
-              }}
-              disabled={autoPairs.length === 0}
+              onClick={handleAutoApplyAllPages}
+              disabled={autoPairs.length === 0 || applyingAuto}
               className="px-3 py-1 rounded-md bg-primary text-primary-foreground text-xs hover:opacity-90 disabled:opacity-40 transition-opacity"
             >
-              Apply to all pages
+              {applyingAuto ? 'Applying…' : 'Apply to all pages'}
+            </button>
+            <button
+              onClick={handleAutoApplyAllPdfs}
+              disabled={autoPairs.length === 0 || applyingAuto}
+              className="px-3 py-1 rounded-md bg-primary text-primary-foreground text-xs hover:opacity-90 disabled:opacity-40 transition-opacity"
+            >
+              {applyingAuto ? 'Applying…' : 'Apply to all open PDFs'}
             </button>
             <button
               onClick={() => {
-                if (autoPairs.length === 0) {
-                  toast('Add at least one field first.', { icon: 'ℹ️' });
-                  return;
-                }
-                if (autoPairs.some(p => !p.key)) {
-                  toast('Finish drawing a key for the last field first.', { icon: '⚠️' });
-                  return;
-                }
-                toast('Apply to all open PDFs — coming next iteration', { icon: '🛠️' });
-              }}
-              disabled={autoPairs.length === 0}
-              className="px-3 py-1 rounded-md bg-primary text-primary-foreground text-xs hover:opacity-90 disabled:opacity-40 transition-opacity"
-            >
-              Apply to all open PDFs
-            </button>
-            <button
-              onClick={() => {
-                setAutoSetupActive(false);
-                setAutoPairs([]);
-                setAutoNextStep('value');
+                exitAutoSetup();
                 toast('Auto-extract setup cancelled', { icon: 'ℹ️' });
               }}
-              className="px-2 py-1 rounded-md text-xs text-muted-foreground hover:bg-muted transition-colors"
+              disabled={applyingAuto}
+              className="px-2 py-1 rounded-md text-xs text-muted-foreground hover:bg-muted transition-colors disabled:opacity-40"
             >
               Cancel
             </button>

@@ -16,6 +16,7 @@ import ThemeToggle from '@/components/ThemeToggle';
 import type { PDFSession, Highlight, ExtractedRow, DocumentType } from '@/types/utilscraper';
 import { DOCUMENT_TYPES } from '@/types/utilscraper';
 import { processFile, extractRegions, downloadAllOcrPdfsAsZip } from '@/lib/api';
+import { rasterizeIfVectorOnly } from '@/lib/vector-pdf-rasterizer';
 import { sessionsCache } from '@/lib/sessions-cache';
 import { useAuth } from '@/contexts/AuthContext';
 
@@ -142,7 +143,27 @@ export default function Index() {
     setModalFileIdx(0);
     const newSessionIds: string[] = [];
     for (let i = 0; i < pendingFiles.length; i++) {
-      const file = pendingFiles[i];
+      let file = pendingFiles[i];
+
+      // Vector-only PDFs (no text layer, no embedded images, only path
+      // drawings) come back empty from the backend's image-OCR pipeline.
+      // Rasterize them client-side to a regular image-PDF before upload
+      // so the existing /process endpoint can OCR them as image scans.
+      if (/\.pdf$/i.test(file.name)) {
+        try {
+          const result = await rasterizeIfVectorOnly(file, { dpi: 200 });
+          if (result.rasterized) {
+            file = result.file;
+            toast(`Rasterized vector PDF "${pendingFiles[i].name}" for OCR`, {
+              icon: '📄', duration: 3500,
+            });
+          }
+        } catch (err) {
+          console.warn('[rasterizeIfVectorOnly] failed:', err);
+          // fall through with the original file — backend may still cope
+        }
+      }
+
       const tempId = `temp-${Date.now()}-${Math.random().toString(36).slice(2)}`;
       // Browsers don't expose absolute filesystem paths (e.g. "C:\Users\...")
       // for security. The fullest path available is relative to whatever the
@@ -539,6 +560,129 @@ export default function Index() {
     } else {
       const scope = restrictIds ? 'selected PDF' : 'PDF';
       toast.success(`Mirrored to ${perTargetUpdates.length} ${scope}${perTargetUpdates.length !== 1 ? 's' : ''}`);
+    }
+  }, [activeTabId, sessions]);
+
+  // Apply key-anchored auto-extract pairs to every other open PDF.
+  // For each pair: search every page of every other open PDF for the
+  // captured key text. On each match, place a value highlight at
+  // (keyMatch + offset). Only the value is highlighted on targets — the
+  // key was just for anchoring.
+  const handleAutoApplyAllPdfs = useCallback(async (
+    pairs: ReadonlyArray<{
+      field: string;
+      fieldLabel: string;
+      sourcePage: number;
+      keyText: string;
+      offsetX: number;
+      offsetY: number;
+      valueWidth: number;
+      valueHeight: number;
+    }>,
+  ) => {
+    const { findTextPositionInPdf } = await import('@/lib/pdf-extract');
+    const { searchBackend } = await import('@/lib/api');
+    const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
+
+    const targets = sessions.filter(s =>
+      s.id !== activeTabId
+      && (s.status === 'ready' || s.status === 'extracted')
+      && !!s.file,
+    );
+    if (targets.length === 0) {
+      toast('No other open PDFs to apply to.', { icon: 'ℹ️' });
+      return;
+    }
+
+    let totalAdded = 0;
+    let pdfsTouched = 0;
+    const perTarget: { id: string; merged: Record<number, Highlight[]> }[] = [];
+
+    for (const target of targets) {
+      const file = target.file!;
+      const totalPgs = target.total_pages || target.pages.length;
+      const merged: Record<number, Highlight[]> = { ...target.highlights };
+      let addedHere = 0;
+
+      // Cache backend search by key text for THIS target — one network
+      // round-trip per key, then per-page lookup is local.
+      const backendByKey = new Map<string, Map<number, { x: number; y: number; width: number; height: number }[]>>();
+      const fetchBackendKey = async (q: string) => {
+        if (backendByKey.has(q)) return backendByKey.get(q)!;
+        const map = new Map<number, { x: number; y: number; width: number; height: number }[]>();
+        for (const mode of ['exact', 'partial', 'fuzzy'] as const) {
+          const r = await searchBackend(target.id, q, mode);
+          if (!r || r.results.length === 0) continue;
+          for (const m of r.results) {
+            const dims = r.page_sizes[String(m.page)];
+            if (!dims) continue;
+            const arr = map.get(m.page) ?? [];
+            for (const [x1, y1, x2, y2] of m.boxes) {
+              arr.push({
+                x: x1 / dims.width,
+                y: y1 / dims.height,
+                width:  (x2 - x1) / dims.width,
+                height: (y2 - y1) / dims.height,
+              });
+            }
+            map.set(m.page, arr);
+          }
+          if (map.size > 0) break;
+        }
+        backendByKey.set(q, map);
+        return map;
+      };
+
+      for (let pg = 1; pg <= totalPgs; pg++) {
+        for (const p of pairs) {
+          try {
+            // 1) Fast path: pdfjs text-search.
+            let match = await findTextPositionInPdf(file, pg, p.keyText);
+            // 2) Fallback: backend OCR'd index (handles vector / scanned PDFs).
+            if (!match) {
+              const map = await fetchBackendKey(p.keyText);
+              const list = map.get(pg);
+              if (list && list[0]) match = list[0];
+            }
+            if (!match) continue;
+            const x = clamp01(match.x + p.offsetX);
+            const y = clamp01(match.y + p.offsetY);
+            const w = Math.min(p.valueWidth,  0.999 - x);
+            const h = Math.min(p.valueHeight, 0.999 - y);
+            if (w <= 0 || h <= 0) continue;
+            const hl: Highlight = {
+              id: `auto-${Date.now()}-${target.id.slice(-4)}-${pg}-${p.field}-${Math.random().toString(36).slice(2, 5)}`,
+              page:  pg,
+              field: p.field,
+              x, y, width: w, height: h,
+              isAutoExtracted: true,
+            };
+            merged[pg] = [...(merged[pg] ?? []), hl];
+            addedHere++;
+          } catch (err) {
+            console.warn('[autoApplyAllPdfs] place failed:', err);
+          }
+        }
+      }
+
+      if (addedHere > 0) {
+        perTarget.push({ id: target.id, merged });
+        totalAdded += addedHere;
+        pdfsTouched++;
+      }
+    }
+
+    if (perTarget.length > 0) {
+      setSessions(prev => prev.map(s => {
+        const u = perTarget.find(t => t.id === s.id);
+        return u ? { ...s, highlights: u.merged, status: 'ready' as const } : s;
+      }));
+    }
+
+    if (totalAdded === 0) {
+      toast('No key matches found in other PDFs.', { icon: 'ℹ️' });
+    } else {
+      toast.success(`Placed ${totalAdded} highlight${totalAdded !== 1 ? 's' : ''} across ${pdfsTouched} PDF${pdfsTouched !== 1 ? 's' : ''}.`);
     }
   }, [activeTabId, sessions]);
 
@@ -973,6 +1117,7 @@ export default function Index() {
                     setOpenTabs(prev => prev.map(t => t === oldId ? newId : t));
                     setActiveTabId(prev => prev === oldId ? newId : prev);
                   }}
+                  onAutoApplyAllPdfs={handleAutoApplyAllPdfs}
                 />
               </div>
 
