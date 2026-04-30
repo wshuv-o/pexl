@@ -7,10 +7,13 @@ import HighlightOverlay from './HighlightOverlay';
 import FieldLabelPicker from './FieldLabelPicker';
 import HighlightLegend from './HighlightLegend';
 import { downloadOcrPdf, extractRegions, searchBackend, type SearchMode } from '@/lib/api';
-import { findTextPositionInPdf, getTextAtRect } from '@/lib/pdf-extract';
+import { findTextPositionInPdf, findAllTextPositionsInPdfPage, detectTableRegionsInPdfPage, getTextAtRect } from '@/lib/pdf-extract';
 import { toast } from 'sonner';
 
-pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
+pdfjs.GlobalWorkerOptions.workerSrc = new URL(
+  'pdfjs-dist/build/pdf.worker.min.mjs',
+  import.meta.url,
+).toString();
 
 const clamp01 = (v: number): number => Math.max(0, Math.min(1, v));
 
@@ -35,6 +38,11 @@ interface PDFViewerProps {
   // Apply key-anchored auto-extract pairs to every other open PDF. Index
   // owns the session list so it iterates and calls onHighlightsChange per
   // session itself.
+  // Remove all highlights with the given field from every other open PDF /
+  // only the selected PDFs. The caller (Index) iterates sessions.
+  onRemoveFieldFromAllPdfs?: (field: string) => void;
+  onRemoveFieldFromSelectedPdfs?: (field: string) => void;
+
   onAutoApplyAllPdfs?: (
     pairs: ReadonlyArray<{
       field: string;
@@ -45,6 +53,12 @@ interface PDFViewerProps {
       offsetY: number;
       valueWidth: number;
       valueHeight: number;
+      // Source-page position of the key (normalized 0-1). Used by the apply
+      // step to spatially score multiple key candidates on the target page —
+      // when the same label appears more than once, we pick the match
+      // closest to where the user originally drew the key.
+      sourceKeyX: number;
+      sourceKeyY: number;
     }>,
   ) => void | Promise<void>;
 }
@@ -65,6 +79,8 @@ export default function PDFViewer({
   onSelectionChange,
   onSessionRenewed,
   onAutoApplyAllPdfs,
+  onRemoveFieldFromAllPdfs,
+  onRemoveFieldFromSelectedPdfs,
 }: PDFViewerProps) {
   const [currentPage, setCurrentPage]   = useState(session.startPage || 1);
   const [zoom, setZoom]                 = useState<number | null>(null);
@@ -129,7 +145,9 @@ export default function PDFViewer({
   // 'key'   = next drawn box becomes the key for the most-recent pair w/o a key.
   const [autoNextStep, setAutoNextStep] = useState<'value' | 'key'>('value');
 
-  const [applyingAuto, setApplyingAuto] = useState(false);
+  // null = idle; 'pages' = applying to pages; 'pdfs' = applying to all PDFs
+  const [applyingTarget, setApplyingTarget] = useState<'pages' | 'pdfs' | null>(null);
+  const applyingAuto = applyingTarget !== null;
 
   // Resolve key text + offset for each pair from the source PDF, then return
   // an "enriched" array. Pairs whose key text is empty / unreadable are
@@ -145,7 +163,10 @@ export default function PDFViewer({
       offsetY: number;       // value.y - key.y
       valueWidth: number;
       valueHeight: number;
+      sourceKeyX: number;    // for spatial scoring on target pages
+      sourceKeyY: number;
     }[] = [];
+    let dropped = 0;
     for (const p of autoPairs) {
       if (!p.key) continue;
       let trimmed = '';
@@ -177,19 +198,31 @@ export default function PDFViewer({
         }
       }
       if (!trimmed || trimmed.length < 2) {
-        toast(`Skipping "${p.fieldLabel}" — couldn't read its key text.`, { icon: '⚠️' });
+        dropped++;
         continue;
       }
+      // Multi-line / wrapped key text matches poorly on pages where the
+      // wrap point differs. Use the first ~4 words as a search anchor.
+      const words = trimmed.split(/\s+/).filter(Boolean);
+      const anchor = words.slice(0, 4).join(' ');
       out.push({
         field:       p.field,
         fieldLabel:  p.fieldLabel,
         sourcePage:  p.page,
-        keyText:     trimmed,
+        keyText:     anchor,
         offsetX:     p.value.x - p.key.x,
         offsetY:     p.value.y - p.key.y,
         valueWidth:  p.value.width,
         valueHeight: p.value.height,
+        sourceKeyX:  p.key.x,
+        sourceKeyY:  p.key.y,
       });
+    }
+    if (dropped > 0) {
+      toast(
+        `Couldn't read ${dropped} key${dropped !== 1 ? 's' : ''} — try a larger key box around the label text.`,
+        { icon: '⚠️' },
+      );
     }
     return out;
   }, [autoPairs, session.file, session.id]);
@@ -213,7 +246,7 @@ export default function PDFViewer({
       return;
     }
 
-    setApplyingAuto(true);
+    setApplyingTarget('pages');
     try {
       const resolved = await resolveAutoPairs();
       if (resolved.length === 0) {
@@ -256,20 +289,68 @@ export default function PDFViewer({
         return map;
       };
 
+      // Skip every page that was a source for any pair, not just the first.
+      const sourcePages = new Set(resolved.map(r => r.sourcePage));
+
+      // Pick the candidate closest to the source key's normalized (x, y).
+      // Same labels typically appear in the same spot across a PDF's pages,
+      // so this disambiguates header vs. footnote vs. repeated rows.
+      const pickBest = (
+        cands: Array<{ x: number; y: number; width: number; height: number }>,
+        r: typeof resolved[number],
+        tables: Array<{ x: number; y: number; width: number; height: number }>,
+      ) => {
+        if (cands.length === 0) return null;
+        // Prefer candidates inside a detected table region.
+        const inTable = tables.length > 0
+          ? cands.filter(c => tables.some(t =>
+              c.x >= t.x - 0.01 && c.x + c.width  <= t.x + t.width  + 0.01 &&
+              c.y >= t.y - 0.01 && c.y + c.height <= t.y + t.height + 0.01))
+          : [];
+        const pool = inTable.length > 0 ? inTable : cands;
+        // Among the pool, pick closest to source key position (same-PDF layout repeats).
+        let best = pool[0];
+        let bestD = (best.x - r.sourceKeyX) ** 2 + (best.y - r.sourceKeyY) ** 2;
+        for (let i = 1; i < pool.length; i++) {
+          const c = pool[i];
+          const d = (c.x - r.sourceKeyX) ** 2 + (c.y - r.sourceKeyY) ** 2;
+          if (d < bestD) { best = c; bestD = d; }
+        }
+        return best;
+      };
+
+      // Per-page table region cache so we detect once per page not once per pair.
+      const tableCache = new Map<number, Array<{ x: number; y: number; width: number; height: number }>>();
+      const getTables = async (pg: number) => {
+        if (tableCache.has(pg)) return tableCache.get(pg)!;
+        const t = await detectTableRegionsInPdfPage(file, pg);
+        tableCache.set(pg, t);
+        return t;
+      };
+
       for (let pg = 1; pg <= lastPage; pg++) {
-        // Skip the source page that the user already highlighted on.
-        if (pg === resolved[0].sourcePage) continue;
+        if (sourcePages.has(pg)) continue;
         pagesScanned++;
 
         for (const r of resolved) {
           try {
-            // 1) Fast path: pdfjs text search.
-            let match = await findTextPositionInPdf(file, pg, r.keyText);
-            // 2) Fallback: backend (Whoosh / OCR'd index).
+            // 1) Fast path: pdfjs — get ALL matches, table-filter, then spatial-score.
+            let match: { x: number; y: number; width: number; height: number } | null = null;
+            const cands = await findAllTextPositionsInPdfPage(file, pg, r.keyText);
+            if (cands.length > 0) {
+              const tables = await getTables(pg);
+              match = pickBest(cands, r, tables);
+            } else {
+              match = await findTextPositionInPdf(file, pg, r.keyText);
+            }
+            // 2) Backend fallback for scanned / vector pages.
             if (!match) {
               const map = await fetchBackendKey(r.keyText);
               const list = map.get(pg);
-              if (list && list[0]) match = list[0];
+              if (list && list.length > 0) {
+                const tables = await getTables(pg);
+                match = pickBest(list, r, tables);
+              }
             }
             if (!match) continue;
             const x = clamp01(match.x + r.offsetX);
@@ -298,15 +379,15 @@ export default function PDFViewer({
       } else {
         toast('No key matches found on other pages.', { icon: 'ℹ️' });
       }
-      exitAutoSetup();
+      // Keep banner open so user can also apply to all PDFs, or add more pairs.
     } catch (err) {
       toast.error('Apply failed: ' + (err instanceof Error ? err.message : 'unknown'));
     } finally {
-      setApplyingAuto(false);
+      setApplyingTarget(null);
     }
   }, [
     autoPairs, session.file, session.highlights, session.id, session.total_pages,
-    numPages, onHighlightsChange, resolveAutoPairs, exitAutoSetup,
+    numPages, onHighlightsChange, resolveAutoPairs,
   ]);
 
   // Apply to all open PDFs — defer to a parent callback so Index.tsx can
@@ -326,7 +407,7 @@ export default function PDFViewer({
       return;
     }
 
-    setApplyingAuto(true);
+    setApplyingTarget('pdfs');
     try {
       const resolved = await resolveAutoPairs();
       if (resolved.length === 0) {
@@ -334,24 +415,21 @@ export default function PDFViewer({
         return;
       }
       await onAutoApplyAllPdfs(resolved);
-      exitAutoSetup();
+      // Keep banner open — user may still want to Apply to all pages too.
     } catch (err) {
       toast.error('Apply failed: ' + (err instanceof Error ? err.message : 'unknown'));
     } finally {
-      setApplyingAuto(false);
+      setApplyingTarget(null);
     }
-  }, [autoPairs, resolveAutoPairs, exitAutoSetup]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [autoPairs, resolveAutoPairs, onAutoApplyAllPdfs]);
 
-  // Magic-wand button → toggle setup mode ON. The actual highlighting is
-  // done with the existing highlight tool while the banner is active.
+  // Magic-wand button — entering setup mode. While setup is active a second
+  // click is a no-op; use the Cancel button in the banner to exit.
   const handleAutoSearch = useCallback(() => {
     if (!session.file) { toast.error('PDF file not loaded'); return; }
     if (autoSetupActive) {
-      // Already active — clicking again cancels.
-      setAutoSetupActive(false);
-      setAutoPairs([]);
-      setAutoNextStep('value');
-      toast('Auto-extract setup cancelled', { icon: 'ℹ️' });
+      // Setup already running — just scroll the banner into view with a toast.
+      toast('Auto-extract is active — use the banner above to apply or cancel.', { icon: '✨' });
       return;
     }
     setAutoSetupActive(true);
@@ -847,13 +925,22 @@ export default function PDFViewer({
   // Bulk highlight actions
   // -----------------------------------------------------------------------
   const handleApplyToAllPages = useCallback((idsFilter?: Set<string>) => {
+    // When the user picks specific highlights from the "Selected & Apply"
+    // popover, those picks may live on any page — not just the current one.
+    // Pull from the full session-wide highlight list so cross-page picks
+    // aren't silently dropped.
     const source = idsFilter
-      ? pageHighlights.filter(h => idsFilter.has(h.id))
+      ? allHighlights.filter(h => idsFilter.has(h.id))
       : pageHighlights;
     if (source.length === 0) return;
     const next = { ...session.highlights };
+    // Skip the source pages of the picked highlights so we don't duplicate
+    // them on top of themselves.
+    const skipPages = new Set<number>(
+      idsFilter ? source.map(h => h.page) : [currentPage],
+    );
     for (let p = 1; p <= totalPages; p++) {
-      if (p === currentPage) continue;
+      if (skipPages.has(p)) continue;
       // Append, don't replace — selecting a subset shouldn't wipe other highlights.
       const existing = next[p] ?? [];
       const cloned = source.map(h => ({
@@ -866,7 +953,7 @@ export default function PDFViewer({
       next[p] = idsFilter ? [...existing, ...cloned] : cloned;
     }
     onHighlightsChange(session.id, next);
-  }, [pageHighlights, session, totalPages, currentPage, onHighlightsChange]);
+  }, [allHighlights, pageHighlights, session, totalPages, currentPage, onHighlightsChange]);
 
   const handleApplyToPageRange = useCallback((pages: number[]) => {
     if (pageHighlights.length === 0 || pages.length === 0) return;
@@ -888,6 +975,25 @@ export default function PDFViewer({
   const handleEraseAllPages = useCallback(() => {
     onHighlightsChange(session.id, {});
   }, [session.id, onHighlightsChange]);
+
+  // Remove all highlights with the same field from every page of THIS PDF.
+  const handleRemoveFromAllPages = useCallback((h: Highlight) => {
+    const next: Record<number, Highlight[]> = {};
+    for (const [pgStr, hls] of Object.entries(session.highlights)) {
+      const kept = hls.filter(hl => hl.field !== h.field);
+      if (kept.length) next[Number(pgStr)] = kept;
+    }
+    onHighlightsChange(session.id, next);
+  }, [session.highlights, session.id, onHighlightsChange]);
+
+  // Cross-PDF removal delegates up to Index.
+  const handleRemoveFromAllPdfs = useCallback((h: Highlight) => {
+    onRemoveFieldFromAllPdfs?.(h.field);
+  }, [onRemoveFieldFromAllPdfs]);
+
+  const handleRemoveFromSelectedPdfs = useCallback((h: Highlight) => {
+    onRemoveFieldFromSelectedPdfs?.(h.field);
+  }, [onRemoveFieldFromSelectedPdfs]);
 
   // Build a per-page subset of session.highlights restricted to ids in the
   // provided set. Used by the "Selected → Apply" popover so the user can
@@ -1239,6 +1345,7 @@ export default function PDFViewer({
         downloadingOcr={downloadingOcr}
         onAutoSearch={handleAutoSearch}
         autoSearching={false}
+        selectedIds={selectedIds}
       />
 
       {/* Auto-extract setup banner — only visible while collecting pairs */}
@@ -1260,14 +1367,15 @@ export default function PDFViewer({
               disabled={autoPairs.length === 0 || applyingAuto}
               className="px-3 py-1 rounded-md bg-primary text-primary-foreground text-xs hover:opacity-90 disabled:opacity-40 transition-opacity"
             >
-              {applyingAuto ? 'Applying…' : 'Apply to all pages'}
+              {applyingTarget === 'pages' ? '⏳ Applying…' : 'Apply to all pages'}
             </button>
+            <span className="text-border select-none">|</span>
             <button
               onClick={handleAutoApplyAllPdfs}
               disabled={autoPairs.length === 0 || applyingAuto}
-              className="px-3 py-1 rounded-md bg-primary text-primary-foreground text-xs hover:opacity-90 disabled:opacity-40 transition-opacity"
+              className="px-3 py-1 rounded-md bg-primary/80 text-primary-foreground text-xs hover:opacity-90 disabled:opacity-40 transition-opacity"
             >
-              {applyingAuto ? 'Applying…' : 'Apply to all open PDFs'}
+              {applyingTarget === 'pdfs' ? '⏳ Applying…' : 'Apply to all PDFs'}
             </button>
             <button
               onClick={() => {
@@ -1452,6 +1560,10 @@ export default function PDFViewer({
                       });
                     }}
                     tool={tool}
+                    onRemoveFromAllPages={handleRemoveFromAllPages}
+                    onRemoveFromAllPdfs={onRemoveFieldFromAllPdfs ? handleRemoveFromAllPdfs : undefined}
+                    onRemoveFromSelectedPdfs={onRemoveFieldFromSelectedPdfs ? handleRemoveFromSelectedPdfs : undefined}
+                    selectedPdfCount={selectedPdfCount}
                   />
 
                   {/* Search highlights (active match gets brighter orange). */}

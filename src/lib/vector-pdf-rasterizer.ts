@@ -21,8 +21,10 @@
 import { pdfjs } from 'react-pdf';
 import { PDFDocument } from 'pdf-lib';
 
-pdfjs.GlobalWorkerOptions.workerSrc =
-  `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
+pdfjs.GlobalWorkerOptions.workerSrc = new URL(
+  'pdfjs-dist/build/pdf.worker.min.mjs',
+  import.meta.url,
+).toString();
 
 export type PdfKind = 'text' | 'image' | 'vector' | 'empty' | 'mixed';
 

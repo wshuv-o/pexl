@@ -578,11 +578,35 @@ export default function Index() {
       offsetY: number;
       valueWidth: number;
       valueHeight: number;
+      sourceKeyX: number;
+      sourceKeyY: number;
     }>,
   ) => {
-    const { findTextPositionInPdf } = await import('@/lib/pdf-extract');
+    const { findTextPositionInPdf, findAllTextPositionsInPdfPage, detectTableRegionsInPdfPage } = await import('@/lib/pdf-extract');
     const { searchBackend } = await import('@/lib/api');
     const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
+
+    // Cross-PDF: layouts differ between templates so we can't score by the
+    // source key's position. Instead, prefer candidates inside a detected
+    // table region (keys/values are always in tables), then among those pick
+    // the widest match. Fall back to widest-overall when no table candidates.
+    const pickBest = (
+      cands: Array<{ x: number; y: number; width: number; height: number }>,
+      tables: Array<{ x: number; y: number; width: number; height: number }>,
+    ) => {
+      if (cands.length === 0) return null;
+      const inTable = tables.length > 0
+        ? cands.filter(c => tables.some(t =>
+            c.x >= t.x - 0.01 && c.x + c.width  <= t.x + t.width  + 0.01 &&
+            c.y >= t.y - 0.01 && c.y + c.height <= t.y + t.height + 0.01))
+        : [];
+      const pool = inTable.length > 0 ? inTable : cands;
+      let best = pool[0];
+      for (let i = 1; i < pool.length; i++) {
+        if (pool[i].width > best.width) best = pool[i];
+      }
+      return best;
+    };
 
     const targets = sessions.filter(s =>
       s.id !== activeTabId
@@ -603,6 +627,15 @@ export default function Index() {
       const totalPgs = target.total_pages || target.pages.length;
       const merged: Record<number, Highlight[]> = { ...target.highlights };
       let addedHere = 0;
+
+      // Per-page table cache — detect once per page, reuse across pairs.
+      const tableCache = new Map<number, Array<{ x: number; y: number; width: number; height: number }>>();
+      const getTables = async (pg: number) => {
+        if (tableCache.has(pg)) return tableCache.get(pg)!;
+        const t = await detectTableRegionsInPdfPage(file, pg);
+        tableCache.set(pg, t);
+        return t;
+      };
 
       // Cache backend search by key text for THIS target — one network
       // round-trip per key, then per-page lookup is local.
@@ -636,13 +669,27 @@ export default function Index() {
       for (let pg = 1; pg <= totalPgs; pg++) {
         for (const p of pairs) {
           try {
-            // 1) Fast path: pdfjs text-search.
-            let match = await findTextPositionInPdf(file, pg, p.keyText);
-            // 2) Fallback: backend OCR'd index (handles vector / scanned PDFs).
+            // 1) Fast path: pdfjs — collect ALL candidates, then pick the
+            //    widest. Cross-PDF layouts differ, so we don't score by
+            //    the source key's position; we rely on the search ranking
+            //    plus a "wider box = actual full label, not a stray
+            //    substring" heuristic.
+            let match: { x: number; y: number; width: number; height: number } | null = null;
+            const cands = await findAllTextPositionsInPdfPage(file, pg, p.keyText);
+            if (cands.length > 0) {
+              const tables = await getTables(pg);
+              match = pickBest(cands, tables);
+            } else {
+              match = await findTextPositionInPdf(file, pg, p.keyText);
+            }
+            // 2) Backend OCR'd index — handles vector / scanned PDFs.
             if (!match) {
               const map = await fetchBackendKey(p.keyText);
               const list = map.get(pg);
-              if (list && list[0]) match = list[0];
+              if (list && list.length > 0) {
+                const tables = await getTables(pg);
+                match = pickBest(list, tables);
+              }
             }
             if (!match) continue;
             const x = clamp01(match.x + p.offsetX);
@@ -689,6 +736,32 @@ export default function Index() {
   // Excel panel row click → switch to that PDF's tab (if needed) and scroll its
   // viewer to the row's page. Uses a nonce so clicking the same row repeatedly
   // still re-fires the scroll.
+
+  // Remove all highlights with the given field from every OTHER open PDF.
+  const handleRemoveFieldFromAllPdfs = useCallback((field: string) => {
+    setSessions(prev => prev.map(s => {
+      if (s.id === activeTabId) return s;
+      const next: Record<number, Highlight[]> = {};
+      for (const [pgStr, hls] of Object.entries(s.highlights)) {
+        const kept = hls.filter(h => h.field !== field);
+        if (kept.length) next[Number(pgStr)] = kept;
+      }
+      return { ...s, highlights: next };
+    }));
+  }, [activeTabId]);
+
+  // Same but restricted to the ctrl/cmd-selected tabs.
+  const handleRemoveFieldFromSelectedPdfs = useCallback((field: string) => {
+    setSessions(prev => prev.map(s => {
+      if (!multiSelectedTabIds.has(s.id)) return s;
+      const next: Record<number, Highlight[]> = {};
+      for (const [pgStr, hls] of Object.entries(s.highlights)) {
+        const kept = hls.filter(h => h.field !== field);
+        if (kept.length) next[Number(pgStr)] = kept;
+      }
+      return { ...s, highlights: next };
+    }));
+  }, [multiSelectedTabIds]);
 
   // Adds a user-typed custom field label to the session-wide list, so every
   // PDF's label picker shows it.
@@ -1118,6 +1191,10 @@ export default function Index() {
                     setActiveTabId(prev => prev === oldId ? newId : prev);
                   }}
                   onAutoApplyAllPdfs={handleAutoApplyAllPdfs}
+                  onRemoveFieldFromAllPdfs={handleRemoveFieldFromAllPdfs}
+                  onRemoveFieldFromSelectedPdfs={multiSelectedTabIds.size > 0
+                    ? handleRemoveFieldFromSelectedPdfs
+                    : undefined}
                 />
               </div>
 

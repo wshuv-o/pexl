@@ -3,11 +3,12 @@
 import { pdfjs } from 'react-pdf';
 import type { ExtractedRow, FieldLabel, Highlight } from '@/types/utilscraper';
 
-// Set worker here so pdfjs works in any context (api.ts, pdf-extract.ts)
-// not just when PDFViewer is mounted.
-if (!pdfjs.GlobalWorkerOptions.workerSrc) {
-  pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
-}
+// Set worker once at module load — covers calls from Index.tsx dynamic imports
+// that happen before (or without) PDFViewer mounting.
+pdfjs.GlobalWorkerOptions.workerSrc = new URL(
+  'pdfjs-dist/build/pdf.worker.min.mjs',
+  import.meta.url,
+).toString();
 
 // ---------------------------------------------------------------------------
 // Extract all text from a PDF file, page by page
@@ -180,11 +181,6 @@ export async function findValueCandidates(
   startPage = 1,
   endPage?: number,
 ): Promise<ValueCandidate[]> {
-  if (!pdfjs.GlobalWorkerOptions.workerSrc) {
-    pdfjs.GlobalWorkerOptions.workerSrc =
-      `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
-  }
-
   const arrayBuffer = await file.arrayBuffer();
   const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
   const last = endPage ?? pdf.numPages;
@@ -564,15 +560,210 @@ export async function extractFromRegions(
   return results;
 }
 
+/**
+ * Detect table regions on a single page using text-layout heuristics.
+ * Works for both bordered and borderless tables — detection is purely
+ * text-based (consistent column alignment across 3+ consecutive rows).
+ *
+ * Algorithm:
+ *   1. Cluster items into rows (items within ~3 pt vertically).
+ *   2. A row is "multi-column" when it has ≥2 items.
+ *   3. Two adjacent rows "align" when they share at least one X-start
+ *      position within a 3% page-width tolerance.
+ *   4. Chains of ≥3 aligning rows → table bounding box.
+ */
+export async function detectTableRegionsInPdfPage(
+  file: File,
+  pageNumber: number,
+): Promise<Array<{ x: number; y: number; width: number; height: number }>> {
+  try {
+    const buf = await file.arrayBuffer();
+    const pdf = await pdfjs.getDocument({ data: buf }).promise;
+    if (pageNumber < 1 || pageNumber > pdf.numPages) return [];
+    const page    = await pdf.getPage(pageNumber);
+    const content = await page.getTextContent();
+    const vp      = page.getViewport({ scale: 1 });
+    const items   = content.items as any[];
+    if (isScannedPage(items)) return [];
+
+    type Row = { top: number; bottom: number; xs: number[] };
+
+    // Build rows (group by Y, tolerance = 3 PDF pts)
+    const TOL_Y = 3;
+    const enriched = items
+      .filter((it: any) => it.str?.trim() && it.transform)
+      .map((it: any) => {
+        const h  = it.height || Math.abs(it.transform[3]) || 12;
+        const tp = vp.height - it.transform[5] - h;
+        return { x: it.transform[4], top: tp, bottom: tp + h };
+      })
+      .sort((a, b) => a.top - b.top);
+
+    const rows: Row[] = [];
+    let cur: Row | null = null;
+    for (const it of enriched) {
+      if (!cur || it.top > cur.bottom + TOL_Y) {
+        if (cur && cur.xs.length >= 2) rows.push(cur);
+        cur = { top: it.top, bottom: it.bottom, xs: [it.x] };
+      } else {
+        cur.xs.push(it.x);
+        cur.bottom = Math.max(cur.bottom, it.bottom);
+      }
+    }
+    if (cur && cur.xs.length >= 2) rows.push(cur);
+    if (rows.length < 3) return [];
+
+    // Check if two rows share a column X within 3% page width
+    const TOL_X = vp.width * 0.03;
+    const aligns = (a: Row, b: Row) =>
+      a.xs.some(ax => b.xs.some(bx => Math.abs(ax - bx) < TOL_X));
+
+    // Group consecutive aligning rows into chains
+    const used = new Uint8Array(rows.length);
+    const tables: Array<{ x: number; y: number; width: number; height: number }> = [];
+
+    for (let i = 0; i < rows.length; i++) {
+      if (used[i]) continue;
+      const group: number[] = [i];
+      for (let j = i + 1; j < rows.length; j++) {
+        if (used[j]) break;
+        // Stop if the gap to the next row is more than 5% page height
+        if (rows[j].top - rows[group[group.length - 1]].bottom > vp.height * 0.05) break;
+        if (aligns(rows[group[group.length - 1]], rows[j])) {
+          group.push(j);
+          used[j] = 1;
+        } else {
+          break;
+        }
+      }
+      if (group.length < 3) continue;
+      used[i] = 1;
+      const allXs  = group.flatMap(gi => rows[gi].xs);
+      const minX   = Math.min(...allXs);
+      const maxXraw = group.flatMap(gi => rows[gi].xs).reduce((m, x) => Math.max(m, x), 0);
+      // Right edge: approximate from the rightmost item + average char width
+      const maxX = maxXraw + vp.width * 0.15;
+      const minY  = rows[group[0]].top;
+      const maxY  = rows[group[group.length - 1]].bottom;
+      const pad   = vp.width * 0.01;
+      tables.push({
+        x:      clamp01((minX - pad)           / vp.width),
+        y:      clamp01((minY - pad)            / vp.height),
+        width:  clamp01((Math.min(maxX, vp.width) - minX + 2 * pad) / vp.width),
+        height: clamp01((maxY - minY + 2 * pad) / vp.height),
+      });
+    }
+    return tables;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Return ALL occurrences of `searchText` on the given page using a
+ * normalized (lowercase, diacritic-stripped, punctuation-collapsed) substring
+ * match. Lines/words can wrap, and items often arrive split (e.g. "Invoice"
+ * + " " + "No"), so we build one normalized string per page with a
+ * char-offset → item map and emit one bbox per match.
+ *
+ * Caller-side spatial scoring (e.g. "match closest to source key position")
+ * is what lets auto-extract pick the right cell when the same label appears
+ * multiple times on a page (header + footer, repeated table rows, etc.).
+ */
+export async function findAllTextPositionsInPdfPage(
+  file: File,
+  pageNumber: number,
+  searchText: string,
+): Promise<Array<{ x: number; y: number; width: number; height: number }>> {
+  if (!searchText || !searchText.trim()) return [];
+
+  try {
+    const arrayBuffer = await file.arrayBuffer();
+    const pdf  = await pdfjs.getDocument({ data: arrayBuffer }).promise;
+    if (pageNumber < 1 || pageNumber > pdf.numPages) return [];
+    const page    = await pdf.getPage(pageNumber);
+    const content = await page.getTextContent();
+    const vp      = page.getViewport({ scale: 1 });
+    const items   = content.items as any[];
+    if (isScannedPage(items)) return [];
+
+    const normalize = (s: string) => s
+      .toLowerCase()
+      .normalize('NFKD')
+      .replace(/\p{M}+/gu, '')           // strip combining marks (diacritics)
+      .replace(/[^a-z0-9 ]/g, ' ')        // collapse punctuation/symbols to space
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    const q = normalize(searchText);
+    if (!q) return [];
+
+    type Slot = { item: any; itemW: number; start: number; end: number; normLen: number };
+    const slots: Slot[] = [];
+    let pageText = '';
+    for (const item of items) {
+      if (!item.str || !item.transform) continue;
+      const nText = normalize(item.str);
+      if (!nText) continue;
+      if (pageText.length > 0 && !pageText.endsWith(' ')) pageText += ' ';
+      const start = pageText.length;
+      pageText += nText;
+      const end = pageText.length;
+      const itemW = item.width || item.str.length * 6;
+      slots.push({ item, itemW, start, end, normLen: end - start });
+    }
+
+    const hits: Array<{ x: number; y: number; width: number; height: number }> = [];
+    let searchFrom = 0;
+    while (searchFrom <= pageText.length) {
+      const matchIdx = pageText.indexOf(q, searchFrom);
+      if (matchIdx === -1) break;
+      const matchEnd = matchIdx + q.length;
+
+      let left = Infinity, right = -Infinity, top = Infinity, bottom = -Infinity;
+      let anyOverlap = false;
+      for (const slot of slots) {
+        const overlapStart = Math.max(slot.start, matchIdx);
+        const overlapEnd   = Math.min(slot.end,   matchEnd);
+        if (overlapStart >= overlapEnd) continue;
+        anyOverlap = true;
+        const pStart = (overlapStart - slot.start) / slot.normLen;
+        const pEnd   = (overlapEnd   - slot.start) / slot.normLen;
+        const item   = slot.item;
+        const itemX  = item.transform[4];
+        const itemH  = item.height || Math.abs(item.transform[3]) || 12;
+        const itemTop = vp.height - item.transform[5] - itemH;
+        const xL = itemX + pStart * slot.itemW;
+        const xR = itemX + pEnd   * slot.itemW;
+        left   = Math.min(left,   xL);
+        right  = Math.max(right,  xR);
+        top    = Math.min(top,    itemTop);
+        bottom = Math.max(bottom, itemTop + itemH);
+      }
+      if (anyOverlap && right > left && bottom > top) {
+        hits.push({
+          x:      clamp01(left   / vp.width),
+          y:      clamp01(top    / vp.height),
+          width:  clamp01((right  - left) / vp.width),
+          height: clamp01((bottom - top)  / vp.height),
+        });
+      }
+      searchFrom = matchEnd;
+    }
+
+    return hits;
+  } catch (err) {
+    console.warn('[findAllTextPositionsInPdfPage] error:', err);
+    return [];
+  }
+}
+
 export async function findTextPositionInPdf(
   file: File,
   pageNumber: number,
   searchText: string,
 ): Promise<{ x: number; y: number; width: number; height: number } | null> {
   if (!searchText || !searchText.trim()) return null;
-  // Ensure worker is set before every call — not just module load time
-  pdfjs.GlobalWorkerOptions.workerSrc =
-    `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
 
   try {
     const arrayBuffer = await file.arrayBuffer();
@@ -614,9 +805,6 @@ export async function getTextAtRect(
   pageNumber: number,
   rect: { x: number; y: number; width: number; height: number },
 ): Promise<string> {
-  pdfjs.GlobalWorkerOptions.workerSrc =
-    `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
-
   try {
     const arrayBuffer = await file.arrayBuffer();
     const pdf  = await pdfjs.getDocument({ data: arrayBuffer }).promise;
@@ -663,8 +851,6 @@ export async function autoSearchFieldValues(
   file: File,
   fieldLabels: { fieldKey: string; label: string }[],
 ): Promise<Record<number, Highlight[]>> {
-  pdfjs.GlobalWorkerOptions.workerSrc =
-    `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
 
   const out: Record<number, Highlight[]> = {};
   if (fieldLabels.length === 0) return out;

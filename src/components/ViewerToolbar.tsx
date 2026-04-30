@@ -38,6 +38,10 @@ interface ViewerToolbarProps {
   selectedPdfCount?: number;
   // All highlights across the active PDF — drives the Selected-fields list.
   allHighlights?: import('@/types/utilscraper').Highlight[];
+  // Ids of highlights the user has visually selected (cursor / select tool).
+  // When non-empty the regular bulk-apply buttons filter to only those ids,
+  // and the Selected-fields popover opens pre-checked with those ids.
+  selectedIds?: Set<string>;
   onEraseAllPages: () => void;
   onApplyToPageRange: (pages: number[]) => void;
   searchOpen: boolean;
@@ -77,6 +81,7 @@ export default function ViewerToolbar({
   onExtract, extracting, hasHighlights,
   onApplyToAllPages, onApplyToAllPdfs, onApplyToSelectedPdfs, selectedPdfCount = 0,
   allHighlights,
+  selectedIds,
   onEraseAllPages, onApplyToPageRange,
   searchOpen, onSearchToggle,
   fineRotation, onFineRotationChange,
@@ -376,14 +381,18 @@ export default function ViewerToolbar({
       <div className="flex items-center gap-0.5 shrink-0">
         {bulkBtn(
           <FileDown className="w-4 h-4" />,
-          'Copy highlights to all pages in this PDF',
-          () => onApplyToAllPages(),
+          selectedIds && selectedIds.size > 0
+            ? `Copy ${selectedIds.size} selected highlight${selectedIds.size !== 1 ? 's' : ''} to all pages`
+            : 'Copy highlights to all pages in this PDF',
+          () => onApplyToAllPages(selectedIds && selectedIds.size > 0 ? selectedIds : undefined),
           !hasHighlightsOnPage,
         )}
         {bulkBtn(
           <FileInput className="w-4 h-4" />,
-          'Copy highlights to all open PDFs',
-          () => onApplyToAllPdfs(),
+          selectedIds && selectedIds.size > 0
+            ? `Copy ${selectedIds.size} selected highlight${selectedIds.size !== 1 ? 's' : ''} to all open PDFs`
+            : 'Copy highlights to all open PDFs',
+          () => onApplyToAllPdfs(selectedIds && selectedIds.size > 0 ? selectedIds : undefined),
           !hasHighlightsOnPage,
         )}
 
@@ -396,7 +405,7 @@ export default function ViewerToolbar({
               <button
                 className="relative p-1.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted
                            disabled:opacity-30 disabled:cursor-not-allowed transition-colors shrink-0"
-                onClick={() => onApplyToSelectedPdfs()}
+                onClick={() => onApplyToSelectedPdfs(selectedIds && selectedIds.size > 0 ? selectedIds : undefined)}
                 disabled={!hasHighlightsOnPage || selectedPdfCount === 0}
                 aria-label="Copy highlights to selected PDFs"
               >
@@ -421,6 +430,7 @@ export default function ViewerToolbar({
         <SelectedApplyPopover
           highlights={allHighlights ?? []}
           selectedPdfCount={selectedPdfCount}
+          preSelectedIds={selectedIds}
           onApplyToAllPages={onApplyToAllPages}
           onApplyToAllPdfs={onApplyToAllPdfs}
           onApplyToSelectedPdfs={onApplyToSelectedPdfs}
@@ -570,12 +580,16 @@ function parsePageList(input: string, totalPages: number): number[] {
 function SelectedApplyPopover({
   highlights,
   selectedPdfCount = 0,
+  preSelectedIds,
   onApplyToAllPages,
   onApplyToAllPdfs,
   onApplyToSelectedPdfs,
 }: {
   highlights: Highlight[];
   selectedPdfCount?: number;
+  // Ids already selected via the cursor/select tool. When provided the
+  // popover opens with those checkboxes pre-ticked.
+  preSelectedIds?: Set<string>;
   onApplyToAllPages:    (idsFilter?: Set<string>) => void;
   onApplyToAllPdfs:     (idsFilter?: Set<string>) => void;
   onApplyToSelectedPdfs?: (idsFilter?: Set<string>) => void;
@@ -583,11 +597,13 @@ function SelectedApplyPopover({
   const [open, setOpen] = useState(false);
   const [picked, setPicked] = useState<Set<string>>(new Set());
 
-  // Reset selection whenever the popover opens or the underlying
-  // highlight list changes (so stale ids don't linger).
+  // When the popover opens, seed checkboxes from the visual selection
+  // (cursor/select tool). If nothing is visually selected, start empty.
   useEffect(() => {
-    if (open) setPicked(new Set());
-  }, [open, highlights.length]);
+    if (open) {
+      setPicked(preSelectedIds && preSelectedIds.size > 0 ? new Set(preSelectedIds) : new Set());
+    }
+  }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const toggle = (id: string) =>
     setPicked(prev => {

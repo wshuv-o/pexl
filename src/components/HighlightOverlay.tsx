@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { X } from 'lucide-react';
+import { X, MoreHorizontal, FileX, FileX2, Files } from 'lucide-react';
 import type { Highlight, ViewerTool } from '@/types/utilscraper';
 import { getFieldConfig } from '@/types/utilscraper';
 
@@ -19,11 +19,14 @@ interface Props {
   onDelete: (id: string) => void;
   onReExtract: (id: string) => void;
   onMove?: (id: string, newX: number, newY: number) => void;
-  // Fires on release after a Word/Paint-style edge/corner drag — caller
-  // should update the highlight geometry and re-extract its value.
   onResize?: (id: string, bounds: { x: number; y: number; width: number; height: number }) => void;
   onSelectToggle?: (id: string, additive: boolean) => void;
   tool: ViewerTool;
+  // 3-dot bulk-remove actions (visible only in cursor/select mode)
+  onRemoveFromAllPages?: (h: Highlight) => void;
+  onRemoveFromAllPdfs?: (h: Highlight) => void;
+  onRemoveFromSelectedPdfs?: (h: Highlight) => void;
+  selectedPdfCount?: number;
 }
 
 const CONFIDENCE_PCT: Record<string, number> = {
@@ -34,6 +37,7 @@ const CONFIDENCE_PCT: Record<string, number> = {
 
 export default function HighlightOverlay({
   highlights, drawing, selectionBox, selectedIds, onDelete, onMove, onResize, onSelectToggle, tool,
+  onRemoveFromAllPages, onRemoveFromAllPdfs, onRemoveFromSelectedPdfs, selectedPdfCount = 0,
 }: Props) {
   // Boxes are interactive (clickable / movable / resizable) in both cursor and select modes
   const canInteract = tool === 'cursor' || tool === 'select';
@@ -47,6 +51,22 @@ export default function HighlightOverlay({
     previewX: number; // live x during drag
     previewY: number; // live y during drag
   } | null>(null);
+
+  // Id of the highlight whose 3-dot menu is currently open (null = closed)
+  const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  // Close the menu when the user clicks outside it
+  useEffect(() => {
+    if (!menuOpenId) return;
+    const handler = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setMenuOpenId(null);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [menuOpenId]);
 
   const overlayRef = useRef<HTMLDivElement>(null);
 
@@ -357,7 +377,7 @@ export default function HighlightOverlay({
               );
             })()}
 
-            {/* Hover action button — Delete only */}
+            {/* Hover action buttons — Delete + 3-dot bulk-remove menu */}
             {canInteract && (
               <div
                 className="absolute right-0 flex gap-0.5
@@ -368,6 +388,58 @@ export default function HighlightOverlay({
                     : { bottom: 'calc(100% + 2px)' }),
                 }}
               >
+                {/* 3-dot bulk-remove — only shown in cursor/select mode */}
+                {(onRemoveFromAllPages || onRemoveFromAllPdfs || onRemoveFromSelectedPdfs) && (
+                  <div className="relative" ref={menuOpenId === h.id ? menuRef : undefined}>
+                    <button
+                      className="w-5 h-5 rounded flex items-center justify-center
+                                 bg-muted hover:bg-muted/80 border border-border transition-all duration-200"
+                      onClick={e => { e.stopPropagation(); setMenuOpenId(menuOpenId === h.id ? null : h.id); }}
+                      title="More actions"
+                    >
+                      <MoreHorizontal className="w-3 h-3 text-foreground" />
+                    </button>
+
+                    {menuOpenId === h.id && (
+                      <div
+                        className="absolute right-0 mt-1 w-52 rounded-md border border-border bg-popover
+                                   shadow-lg z-50 py-1 text-xs"
+                        style={{ bottom: 'calc(100% + 2px)', top: 'auto' }}
+                        onMouseDown={e => e.stopPropagation()}
+                      >
+                        {onRemoveFromAllPages && (
+                          <button
+                            className="flex w-full items-center gap-2 px-3 py-2 hover:bg-muted transition-colors text-left"
+                            onClick={e => { e.stopPropagation(); onRemoveFromAllPages(h); setMenuOpenId(null); }}
+                          >
+                            <FileX className="w-3.5 h-3.5 shrink-0 text-muted-foreground" />
+                            Remove from all pages
+                          </button>
+                        )}
+                        {onRemoveFromAllPdfs && (
+                          <button
+                            className="flex w-full items-center gap-2 px-3 py-2 hover:bg-muted transition-colors text-left"
+                            onClick={e => { e.stopPropagation(); onRemoveFromAllPdfs(h); setMenuOpenId(null); }}
+                          >
+                            <FileX2 className="w-3.5 h-3.5 shrink-0 text-muted-foreground" />
+                            Remove from all open PDFs
+                          </button>
+                        )}
+                        {onRemoveFromSelectedPdfs && selectedPdfCount > 0 && (
+                          <button
+                            className="flex w-full items-center gap-2 px-3 py-2 hover:bg-muted transition-colors text-left"
+                            onClick={e => { e.stopPropagation(); onRemoveFromSelectedPdfs(h); setMenuOpenId(null); }}
+                          >
+                            <Files className="w-3.5 h-3.5 shrink-0 text-muted-foreground" />
+                            Remove from {selectedPdfCount} selected PDF{selectedPdfCount !== 1 ? 's' : ''}
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Delete this highlight */}
                 <button
                   className="w-5 h-5 rounded flex items-center justify-center
                              bg-red-500 hover:bg-red-600 transition-all duration-200"

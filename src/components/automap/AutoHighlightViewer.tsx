@@ -7,7 +7,10 @@ import { Button } from '@/components/ui/button';
 import { getFieldConfig } from '@/types/utilscraper';
 import type { MappingState } from './MappingReview';
 
-pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
+pdfjs.GlobalWorkerOptions.workerSrc = new URL(
+  'pdfjs-dist/build/pdf.worker.min.mjs',
+  import.meta.url,
+).toString();
 
 export interface ResizedBox { page: number; x: number; y: number; width: number; height: number }
 
