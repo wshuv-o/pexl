@@ -461,6 +461,7 @@ function buildUnifiedSheet(fileMap: Map<string, ExtractedRow[]>, docType: Docume
 
   type PdfRow = {
     pdfNum: number;
+    page: number;
     folder: string;
     fileName: string;
     values: Record<string, string>;
@@ -470,20 +471,27 @@ function buildUnifiedSheet(fileMap: Map<string, ExtractedRow[]>, docType: Docume
   let pdfNum = 0;
   for (const [filename, rows] of fileMap.entries()) {
     pdfNum++;
-    const values: Record<string, string> = {};
+    const byPage = new Map<number, Record<string, string>>();
+    const pageOrder: number[] = [];
     let folder = '';
     for (const row of rows) {
-      highlightedFields.add(row.field);  // presence in rows → user highlighted this field
+      highlightedFields.add(row.field);
       if (row.folderName && !folder) folder = row.folderName;
       if (!row.value) continue;
-      if (!values[row.field]) values[row.field] = row.value;
+      if (!byPage.has(row.page)) { byPage.set(row.page, {}); pageOrder.push(row.page); }
+      const m = byPage.get(row.page)!;
+      if (!m[row.field]) m[row.field] = row.value;
     }
-    pdfRows.push({
-      pdfNum,
-      folder,
-      fileName: filename.replace(/\.(pdf|docx?)$/i, ''),
-      values,
-    });
+    const sortedPages = pageOrder.sort((a, b) => a - b);
+    for (const page of sortedPages) {
+      pdfRows.push({
+        pdfNum,
+        page,
+        folder,
+        fileName: filename.replace(/\.(pdf|docx?)$/i, ''),
+        values: byPage.get(page)!,
+      });
+    }
   }
 
   const visibleColumns = fieldColumns.filter(col => highlightedFields.has(col.key));
@@ -495,26 +503,28 @@ function buildUnifiedSheet(fileMap: Map<string, ExtractedRow[]>, docType: Docume
   const sc = (r: number, c: number, s: any) => styles.push({ row: r, col: c, style: s });
 
   // Header row
-  const headerCells = ['PDF #', 'Folder', 'File Name', ...visibleColumns.map(c => c.label)];
+  const headerCells = ['PDF #', 'Page', 'Folder', 'File Name', ...visibleColumns.map(c => c.label)];
   const r0 = push(headerCells);
   for (let c = 0; c < headerCells.length; c++) {
     sc(r0, c, hdr(headerColor.bg, headerColor.font));
   }
 
-  // Data rows — one per PDF
+  // Data rows — one per page per PDF
   for (const pr of pdfRows) {
     const rowCells: any[] = [
       pr.pdfNum,
+      pr.page,
       pr.folder,
       pr.fileName,
       ...visibleColumns.map(col => coerceCell(col.key, pr.values[col.key] ?? '')),
     ];
     const r = push(rowCells);
     sc(r, 0, cell(C.whiteBg, true,  'center', 10));  // PDF #
-    sc(r, 1, cell(C.whiteBg, false, 'left',   10));  // Folder
-    sc(r, 2, cell(C.whiteBg, true,  'left',   10));  // File Name
+    sc(r, 1, cell(C.whiteBg, false, 'center', 10));  // Page
+    sc(r, 2, cell(C.whiteBg, false, 'left',   10));  // Folder
+    sc(r, 3, cell(C.whiteBg, true,  'left',   10));  // File Name
     visibleColumns.forEach((col, idx) => {
-      sc(r, 3 + idx, cell(C.whiteBg, false, alignFor(col.key), 10));
+      sc(r, 4 + idx, cell(C.whiteBg, false, alignFor(col.key), 10));
     });
   }
 
@@ -522,11 +532,12 @@ function buildUnifiedSheet(fileMap: Map<string, ExtractedRow[]>, docType: Docume
   applyStyles(ws, wsData, styles);
   ws['!cols'] = [
     { wch: 7 },    // PDF #
+    { wch: 7 },    // Page
     { wch: 20 },   // Folder
     { wch: 30 },   // File Name
     ...visibleColumns.map(() => ({ wch: 22 })),
   ];
-  ws['!freeze'] = { xSplit: 3, ySplit: 1 };
+  ws['!freeze'] = { xSplit: 4, ySplit: 1 };
   return ws;
 }
 

@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import React, { useState, useMemo, useEffect } from 'react';
-import { X, Download, RefreshCw, Pencil, CheckCircle2, ArrowUpDown, ArrowUp, ArrowDown } from 'lucide-react';
+import { X, Download, RefreshCw, Pencil, CheckCircle2, ArrowUpDown, ArrowUp, ArrowDown, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import type { ExtractedRow } from '@/types/utilscraper';
@@ -319,6 +319,12 @@ export default function ExcelPanel({
     else { setSortCol(col); setSortAsc(true); }
   };
 
+  const handleDeleteRow = (row: DisplayRow) => {
+    const next = data.filter(r => !(r.sessionId === row.sessionId && r.page === row.page));
+    onDataChange(next);
+    if (selectedRowKey === `${row.sessionId}-${row.page}-${row.subIndex}`) setSelectedRowKey(null);
+  };
+
   const handleEdit = (cellKey: string, cell: ExtractedRow, newValue: string) => {
     const next = data.map(r =>
       r === cell ? { ...r, value: newValue, edited: true } : r,
@@ -338,6 +344,8 @@ export default function ExcelPanel({
   const extracted = data.filter(r => r.value).length;
   const nullCount = data.filter(r => !r.value).length;
   const totalRows = sortedGroups.reduce((s, g) => s + g.rows.length, 0);
+  // +1 for the delete button column at the end
+  const totalCols = (multiFile ? 1 : 0) + 1 + fieldColumns.length + 1;
 
   // Per-PDF sums for bank-statement credit/debit fields. This number is
   // what the exporter writes into the `Deposits` / `Withdrawals` cells —
@@ -456,7 +464,7 @@ export default function ExcelPanel({
             <p className="text-xs text-muted-foreground/60">Draw highlight boxes over bill values then click Extract.</p>
           </div>
         ) : (
-          <table className="min-w-full text-xs border-collapse">
+          <table className="w-max min-w-full text-xs border-collapse">
             <thead className="sticky top-0 z-10">
               <tr className="bg-primary text-primary-foreground text-[11px] font-semibold">
                 {multiFile && (
@@ -489,6 +497,7 @@ export default function ExcelPanel({
                     </th>
                   );
                 })}
+                <th className="px-2 py-2.5 w-7 border-l border-white/10" />
               </tr>
             </thead>
             <tbody>
@@ -528,7 +537,7 @@ export default function ExcelPanel({
                           const cell = row.cells[f];
                           const cellKey = `${g.sessionId}-${row.page}-${row.subIndex}-${f}`;
                           if (!cell) {
-                            return <td key={f} className="px-3 py-2 text-muted-foreground/30 italic border-l border-border/40">—</td>;
+                            return <td key={f} className="px-3 py-2 text-muted-foreground/30 italic border-l border-border/40 whitespace-nowrap">—</td>;
                           }
                           const isNull  = cell.value === null || cell.value === undefined || cell.value === '';
                           const pct     = CONF_PCT[cell.confidence ?? 'low'] ?? 25;
@@ -585,6 +594,19 @@ export default function ExcelPanel({
                             </td>
                           );
                         })}
+                        {/* Delete row button */}
+                        <td className="px-1 py-2 w-7 border-l border-border/40">
+                          {row.isFirstOfPage && (
+                            <button
+                              className="opacity-0 group-hover/row:opacity-60 hover:!opacity-100 p-0.5 rounded
+                                         text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-all"
+                              onClick={e => { e.stopPropagation(); handleDeleteRow(row); }}
+                              title="Remove this row"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                            </button>
+                          )}
+                        </td>
                       </tr>
                     );
                   })}
@@ -594,10 +616,10 @@ export default function ExcelPanel({
                   {(() => {
                     const sums = perPdfSums.get(g.sessionId);
                     if (!sums || (sums.creditCount <= 1 && sums.debitCount <= 1)) return null;
-                    const totalCols = (multiFile ? 1 : 0) + 1 + fieldColumns.length;
+                    const sumCols = totalCols;
                     return (
                       <tr className="bg-primary/5 text-[11px]">
-                        <td colSpan={totalCols} className="px-3 py-1.5 text-primary font-medium border-b border-primary/20">
+                        <td colSpan={sumCols} className="px-3 py-1.5 text-primary font-medium border-b border-primary/20">
                           Σ this PDF →
                           {sums.creditCount > 0 && (
                             <span className="ml-2">
