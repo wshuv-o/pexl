@@ -306,7 +306,7 @@ const UserCard = ({
                     </td>
                     <td className="px-4 py-2">
                       {r.doc_types && r.doc_types.length > 0
-                        ? <span className="text-muted-foreground">{r.doc_types.map(t => t.replace(/_/g, ' ')).join(', ')}</span>
+                        ? <span className="text-muted-foreground">{[...new Set(r.doc_types)].map(t => t.replace(/_/g, ' ')).join(', ')}</span>
                         : <span className="text-muted-foreground/50">—</span>}
                     </td>
                   </tr>
