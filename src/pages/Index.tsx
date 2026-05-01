@@ -3,7 +3,7 @@ import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { toast } from 'sonner';
 import {
   Upload, ChevronLeft, ChevronRight,
-  AlertTriangle, FileSearch, X, ShieldCheck, LogOut, Landmark,
+  AlertTriangle, FileSearch, X, ShieldCheck, LogOut,
   RotateCw, Eraser, DownloadCloud, Loader2, XCircle,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
@@ -581,32 +581,11 @@ export default function Index() {
       sourceKeyX: number;
       sourceKeyY: number;
     }>,
+    tableOnly: boolean,
   ) => {
-    const { findTextPositionInPdf, findAllTextPositionsInPdfPage, detectTableRegionsInPdfPage } = await import('@/lib/pdf-extract');
+    const { findAllTextPositionsInPdfPage, detectTableRegionsInPdfPage } = await import('@/lib/pdf-extract');
     const { searchBackend } = await import('@/lib/api');
     const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
-
-    // Cross-PDF: layouts differ between templates so we can't score by the
-    // source key's position. Instead, prefer candidates inside a detected
-    // table region (keys/values are always in tables), then among those pick
-    // the widest match. Fall back to widest-overall when no table candidates.
-    const pickBest = (
-      cands: Array<{ x: number; y: number; width: number; height: number }>,
-      tables: Array<{ x: number; y: number; width: number; height: number }>,
-    ) => {
-      if (cands.length === 0) return null;
-      const inTable = tables.length > 0
-        ? cands.filter(c => tables.some(t =>
-            c.x >= t.x - 0.01 && c.x + c.width  <= t.x + t.width  + 0.01 &&
-            c.y >= t.y - 0.01 && c.y + c.height <= t.y + t.height + 0.01))
-        : [];
-      const pool = inTable.length > 0 ? inTable : cands;
-      let best = pool[0];
-      for (let i = 1; i < pool.length; i++) {
-        if (pool[i].width > best.width) best = pool[i];
-      }
-      return best;
-    };
 
     const targets = sessions.filter(s =>
       s.id !== activeTabId
@@ -628,13 +607,31 @@ export default function Index() {
       const merged: Record<number, Highlight[]> = { ...target.highlights };
       let addedHere = 0;
 
-      // Per-page table cache — detect once per page, reuse across pairs.
+      // Per-page table region cache for this target.
       const tableCache = new Map<number, Array<{ x: number; y: number; width: number; height: number }>>();
       const getTables = async (pg: number) => {
         if (tableCache.has(pg)) return tableCache.get(pg)!;
         const t = await detectTableRegionsInPdfPage(file, pg);
         tableCache.set(pg, t);
         return t;
+      };
+      const preferInTable = async (
+        cands: Array<{ x: number; y: number; width: number; height: number }>,
+        pg: number,
+      ) => {
+        if (cands.length === 0) return null;
+        const tables = await getTables(pg);
+        if (tables.length > 0) {
+          const inTable = cands.filter(c =>
+            tables.some(t =>
+              c.x + c.width  / 2 >= t.x && c.x + c.width  / 2 <= t.x + t.width &&
+              c.y + c.height / 2 >= t.y && c.y + c.height / 2 <= t.y + t.height,
+            ),
+          );
+          if (inTable.length > 0) return inTable[0];
+        }
+        if (tableOnly) return null;
+        return cands[0];
       };
 
       // Cache backend search by key text for THIS target — one network
@@ -667,29 +664,15 @@ export default function Index() {
       };
 
       for (let pg = 1; pg <= totalPgs; pg++) {
+        if (pg % 5 === 0) await new Promise(r => setTimeout(r, 0));
         for (const p of pairs) {
           try {
-            // 1) Fast path: pdfjs — collect ALL candidates, then pick the
-            //    widest. Cross-PDF layouts differ, so we don't score by
-            //    the source key's position; we rely on the search ranking
-            //    plus a "wider box = actual full label, not a stray
-            //    substring" heuristic.
             let match: { x: number; y: number; width: number; height: number } | null = null;
-            const cands = await findAllTextPositionsInPdfPage(file, pg, p.keyText);
-            if (cands.length > 0) {
-              const tables = await getTables(pg);
-              match = pickBest(cands, tables);
-            } else {
-              match = await findTextPositionInPdf(file, pg, p.keyText);
-            }
-            // 2) Backend OCR'd index — handles vector / scanned PDFs.
+            const backendMap = await fetchBackendKey(p.keyText);
+            match = await preferInTable(backendMap.get(pg) ?? [], pg);
             if (!match) {
-              const map = await fetchBackendKey(p.keyText);
-              const list = map.get(pg);
-              if (list && list.length > 0) {
-                const tables = await getTables(pg);
-                match = pickBest(list, tables);
-              }
+              const cands = await findAllTextPositionsInPdfPage(file, pg, p.keyText);
+              match = await preferInTable(cands, pg);
             }
             if (!match) continue;
             const x = clamp01(match.x + p.offsetX);

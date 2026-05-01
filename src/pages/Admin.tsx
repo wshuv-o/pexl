@@ -287,7 +287,8 @@ const UserCard = ({
                   <th className="text-left px-4 py-2 font-medium uppercase tracking-wide text-[10px]">Date & Time</th>
                   <th className="text-right px-3 py-2 font-medium uppercase tracking-wide text-[10px]">Files</th>
                   <th className="text-right px-3 py-2 font-medium uppercase tracking-wide text-[10px]">Extracted</th>
-                  <th className="text-right px-4 py-2 font-medium uppercase tracking-wide text-[10px]">Downloads</th>
+                  <th className="text-right px-3 py-2 font-medium uppercase tracking-wide text-[10px]">Downloads</th>
+                  <th className="text-left px-4 py-2 font-medium uppercase tracking-wide text-[10px]">Doc Types</th>
                 </tr>
               </thead>
               <tbody>
@@ -300,8 +301,13 @@ const UserCard = ({
                     <td className="px-3 py-2 text-right tabular-nums">
                       {r.statements_extracted > 0 ? r.statements_extracted : <span className="text-muted-foreground/50">—</span>}
                     </td>
-                    <td className="px-4 py-2 text-right tabular-nums">
+                    <td className="px-3 py-2 text-right tabular-nums">
                       {r.downloads > 0 ? r.downloads : <span className="text-muted-foreground/50">—</span>}
+                    </td>
+                    <td className="px-4 py-2">
+                      {r.doc_types && r.doc_types.length > 0
+                        ? <span className="text-muted-foreground">{r.doc_types.map(t => t.replace(/_/g, ' ')).join(', ')}</span>
+                        : <span className="text-muted-foreground/50">—</span>}
                     </td>
                   </tr>
                 ))}

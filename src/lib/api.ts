@@ -499,19 +499,26 @@ export async function processFile(
         const data = await res.json();
 
         let convertedPdf: File | undefined;
-        onProgress(2, wordDoc ? 'Fetching converted PDF...' : 'Fetching OCR’d PDF...');
-        const pdf = await fetchConvertedPdf(data.session_id, file.name);
-        if (pdf) {
-          convertedPdf = pdf;
-        } else if (wordDoc) {
-          // Word docs have no browser-renderable fallback — this must succeed.
-          throw new Error(
-            'Backend accepted the Word document but did not expose the converted PDF. '
-            + 'Ask ops to implement GET /api/utility/session/{session_id}/pdf.',
-          );
+        const ocrCount = data.ocr_pages_count ?? 0;
+        // Only fetch the server-rendered PDF when necessary:
+        //   - Word docs always need it (no browser fallback)
+        //   - Native PDFs with OCR pages benefit from the baked-in text layer
+        //   - Native PDFs with 0 OCR pages: original file is identical, skip round-trip
+        if (wordDoc || ocrCount > 0) {
+          onProgress(2, wordDoc ? "Fetching converted PDF..." : `Fetching OCR PDF (${ocrCount} pages)...`);
+          const pdf = await fetchConvertedPdf(data.session_id, file.name);
+          if (pdf) {
+            convertedPdf = pdf;
+          } else if (wordDoc) {
+            // Word docs have no browser-renderable fallback — this must succeed.
+            throw new Error(
+              "Backend accepted the Word document but did not expose the converted PDF. " +
+              "Ask ops to implement GET /api/utility/session/{session_id}/pdf."
+            );
+          }
         }
 
-        onProgress(3, `Ready — ${data.ocr_pages_count ?? 0} pages OCR'd`);
+        onProgress(3, `Ready — ${ocrCount} pages OCR`);
         return {
           session_id: data.session_id,
           total_pages: data.total_pages,

@@ -7,7 +7,7 @@ import HighlightOverlay from './HighlightOverlay';
 import FieldLabelPicker from './FieldLabelPicker';
 import HighlightLegend from './HighlightLegend';
 import { downloadOcrPdf, extractRegions, searchBackend, type SearchMode } from '@/lib/api';
-import { findTextPositionInPdf, findAllTextPositionsInPdfPage, detectTableRegionsInPdfPage, getTextAtRect } from '@/lib/pdf-extract';
+import { findAllTextPositionsInPdfPage, detectTableRegionsInPdfPage, getTextAtRect } from '@/lib/pdf-extract';
 import { toast } from 'sonner';
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
@@ -60,6 +60,7 @@ interface PDFViewerProps {
       sourceKeyX: number;
       sourceKeyY: number;
     }>,
+    tableOnly: boolean,
   ) => void | Promise<void>;
 }
 
@@ -145,6 +146,10 @@ export default function PDFViewer({
   // 'key'   = next drawn box becomes the key for the most-recent pair w/o a key.
   const [autoNextStep, setAutoNextStep] = useState<'value' | 'key'>('value');
 
+  // When true, only place highlights whose key match falls inside a detected
+  // table region — skip keys found in prose / free text areas.
+  const [tableOnly, setTableOnly] = useState(false);
+
   // null = idle; 'pages' = applying to pages; 'pdfs' = applying to all PDFs
   const [applyingTarget, setApplyingTarget] = useState<'pages' | 'pdfs' | null>(null);
   const applyingAuto = applyingTarget !== null;
@@ -154,32 +159,36 @@ export default function PDFViewer({
   // dropped so the apply step doesn't waste search calls.
   const resolveAutoPairs = useCallback(async () => {
     if (!session.file) return [];
+    console.group('[AutoSearch] resolveAutoPairs — building key→value pairs');
+    console.log('pairs to resolve:', autoPairs.length, autoPairs.map(p => p.fieldLabel));
     const out: {
       field: string;
       fieldLabel: string;
       sourcePage: number;
       keyText: string;
-      offsetX: number;       // value.x - key.x
-      offsetY: number;       // value.y - key.y
+      offsetX: number;
+      offsetY: number;
       valueWidth: number;
       valueHeight: number;
-      sourceKeyX: number;    // for spatial scoring on target pages
+      sourceKeyX: number;
       sourceKeyY: number;
     }[] = [];
     let dropped = 0;
     for (const p of autoPairs) {
-      if (!p.key) continue;
+      if (!p.key) { console.warn(`  [${p.fieldLabel}] no key box drawn — skipping`); continue; }
+      console.group(`  [${p.fieldLabel}] page=${p.page}`);
+      console.log('  drawn key box :', p.key);
+      console.log('  drawn value box:', p.value);
       let trimmed = '';
       try {
-        // 1) Fast path: pdfjs text-layer read (works for native-text PDFs).
         const text = await getTextAtRect(session.file, p.page, p.key);
         trimmed = (text ?? '').trim();
+        console.log('  pdfjs key text :', JSON.stringify(trimmed));
       } catch (err) {
-        console.warn('[resolveAutoPairs] pdfjs read failed for', p.fieldLabel, err);
+        console.warn('  pdfjs read failed:', err);
       }
       if (!trimmed || trimmed.length < 2) {
-        // 2) Fallback: ask the backend to OCR the key rect. Works for
-        //    scanned / vector-only PDFs where pdfjs has no text.
+        console.log('  pdfjs empty — trying backend OCR...');
         try {
           const ocr = await extractRegions(
             session.id,
@@ -193,31 +202,77 @@ export default function PDFViewer({
             { strict: true },
           );
           trimmed = ((ocr[0]?.value ?? '') as string).trim();
+          // OCR sometimes renders layered text twice with no separator
+          // e.g. "Beginning BalanceBeginning Balance" → "Beginning Balance"
+          if (trimmed.length >= 4 && trimmed.length % 2 === 0) {
+            const half = trimmed.length / 2;
+            if (trimmed.slice(0, half) === trimmed.slice(half)) trimmed = trimmed.slice(0, half).trim();
+          }
+          console.log('  backend OCR key text:', JSON.stringify(trimmed));
         } catch (err) {
-          console.warn('[resolveAutoPairs] backend OCR fallback failed for', p.fieldLabel, err);
+          console.warn('  backend OCR fallback failed:', err);
         }
       }
       if (!trimmed || trimmed.length < 2) {
+        console.warn('  DROPPED — could not read any key text');
+        console.groupEnd();
         dropped++;
         continue;
       }
-      // Multi-line / wrapped key text matches poorly on pages where the
-      // wrap point differs. Use the first ~4 words as a search anchor.
       const words = trimmed.split(/\s+/).filter(Boolean);
-      const anchor = words.slice(0, 4).join(' ');
-      out.push({
+      // Skip leading purely-numeric tokens (e.g. "75 Debit(s) This Period" → skip "75")
+      // so the anchor stays stable across pages where that count changes.
+      let anchorStart = 0;
+      while (anchorStart < words.length && /^\d+[.,]?\d*$/.test(words[anchorStart])) anchorStart++;
+      const anchorWords = words.slice(anchorStart, anchorStart + 4);
+      const anchor = (anchorWords.length > 0 ? anchorWords : words.slice(0, 4)).join(' ');
+      console.log('  anchor (first 4 words):', JSON.stringify(anchor));
+
+      let keyTextX = p.key.x;
+      let keyTextY = p.key.y;
+      try {
+        const srcMatches = await findAllTextPositionsInPdfPage(session.file, p.page, anchor);
+        console.log(`  tight search on source page → ${srcMatches.length} hit(s):`, srcMatches);
+        if (srcMatches.length > 0) {
+          const boxCx = p.key.x + p.key.width  / 2;
+          const boxCy = p.key.y + p.key.height / 2;
+          let best = srcMatches[0];
+          let bestD = (best.x + best.width / 2 - boxCx) ** 2 + (best.y + best.height / 2 - boxCy) ** 2;
+          for (const m of srcMatches) {
+            const d = (m.x + m.width / 2 - boxCx) ** 2 + (m.y + m.height / 2 - boxCy) ** 2;
+            if (d < bestD) { bestD = d; best = m; }
+          }
+          keyTextX = best.x;
+          keyTextY = best.y;
+          console.log('  tight key bbox (closest to drawn box):', best);
+        } else {
+          console.warn('  tight search found nothing — using drawn box coords for offset');
+        }
+      } catch (err) {
+        console.warn('  tight key position lookup failed:', err);
+      }
+
+      const entry = {
         field:       p.field,
         fieldLabel:  p.fieldLabel,
         sourcePage:  p.page,
         keyText:     anchor,
-        offsetX:     p.value.x - p.key.x,
-        offsetY:     p.value.y - p.key.y,
+        offsetX:     p.value.x - keyTextX,
+        offsetY:     p.value.y - keyTextY,
         valueWidth:  p.value.width,
         valueHeight: p.value.height,
-        sourceKeyX:  p.key.x,
-        sourceKeyY:  p.key.y,
-      });
+        sourceKeyX:  keyTextX,
+        sourceKeyY:  keyTextY,
+      };
+      console.log('  resolved pair:', entry);
+      console.log(`  layout: offsetX=${entry.offsetX.toFixed(3)} offsetY=${entry.offsetY.toFixed(3)}`,
+        Math.abs(entry.offsetX) > Math.abs(entry.offsetY) * 2 ? '→ HORIZONTAL' :
+        Math.abs(entry.offsetY) > Math.abs(entry.offsetX) * 2 ? '→ VERTICAL'   : '→ DIAGONAL');
+      console.groupEnd();
+      out.push(entry);
     }
+    console.log('resolved pairs:', out.length, '| dropped:', dropped);
+    console.groupEnd();
     if (dropped > 0) {
       toast(
         `Couldn't read ${dropped} key${dropped !== 1 ? 's' : ''} — try a larger key box around the label text.`,
@@ -289,37 +344,13 @@ export default function PDFViewer({
         return map;
       };
 
+      console.group(`[AutoSearch] applyAllPages — ${resolved.length} pair(s), ${lastPage} page(s)`);
+      console.log('pairs:', resolved.map(r => `"${r.keyText}" offset(${r.offsetX.toFixed(3)},${r.offsetY.toFixed(3)})`));
+
       // Skip every page that was a source for any pair, not just the first.
       const sourcePages = new Set(resolved.map(r => r.sourcePage));
 
-      // Pick the candidate closest to the source key's normalized (x, y).
-      // Same labels typically appear in the same spot across a PDF's pages,
-      // so this disambiguates header vs. footnote vs. repeated rows.
-      const pickBest = (
-        cands: Array<{ x: number; y: number; width: number; height: number }>,
-        r: typeof resolved[number],
-        tables: Array<{ x: number; y: number; width: number; height: number }>,
-      ) => {
-        if (cands.length === 0) return null;
-        // Prefer candidates inside a detected table region.
-        const inTable = tables.length > 0
-          ? cands.filter(c => tables.some(t =>
-              c.x >= t.x - 0.01 && c.x + c.width  <= t.x + t.width  + 0.01 &&
-              c.y >= t.y - 0.01 && c.y + c.height <= t.y + t.height + 0.01))
-          : [];
-        const pool = inTable.length > 0 ? inTable : cands;
-        // Among the pool, pick closest to source key position (same-PDF layout repeats).
-        let best = pool[0];
-        let bestD = (best.x - r.sourceKeyX) ** 2 + (best.y - r.sourceKeyY) ** 2;
-        for (let i = 1; i < pool.length; i++) {
-          const c = pool[i];
-          const d = (c.x - r.sourceKeyX) ** 2 + (c.y - r.sourceKeyY) ** 2;
-          if (d < bestD) { best = c; bestD = d; }
-        }
-        return best;
-      };
-
-      // Per-page table region cache so we detect once per page not once per pair.
+      // Per-page table region cache — detect once per page, reuse across pairs.
       const tableCache = new Map<number, Array<{ x: number; y: number; width: number; height: number }>>();
       const getTables = async (pg: number) => {
         if (tableCache.has(pg)) return tableCache.get(pg)!;
@@ -327,36 +358,63 @@ export default function PDFViewer({
         tableCache.set(pg, t);
         return t;
       };
+      // Return the first candidate whose centre lies inside a detected table region.
+      // When tableOnly=true, return null for any candidate not in a table so the
+      // highlight is skipped entirely on that page.
+      const preferInTable = async (
+        cands: Array<{ x: number; y: number; width: number; height: number }>,
+        pg: number,
+      ) => {
+        if (cands.length === 0) return null;
+        const tables = await getTables(pg);
+        console.log(`  detected tables (${tables.length}):`, tables);
+        if (tables.length > 0) {
+          const inTable = cands.filter(c =>
+            tables.some(t =>
+              c.x + c.width  / 2 >= t.x && c.x + c.width  / 2 <= t.x + t.width &&
+              c.y + c.height / 2 >= t.y && c.y + c.height / 2 <= t.y + t.height,
+            ),
+          );
+          if (inTable.length > 0) {
+            console.log(`  table match →`, inTable[0]);
+            return inTable[0];
+          }
+        }
+        if (tableOnly) {
+          console.log(`  no table match — SKIPPED (table-only mode)`);
+          return null;
+        }
+        console.log(`  no table match — using first candidate →`, cands[0]);
+        return cands[0];
+      };
 
       for (let pg = 1; pg <= lastPage; pg++) {
+        if (pg % 5 === 0) await new Promise(r => setTimeout(r, 0));
         if (sourcePages.has(pg)) continue;
         pagesScanned++;
 
         for (const r of resolved) {
           try {
-            // 1) Fast path: pdfjs — get ALL matches, table-filter, then spatial-score.
+            console.group(`  pg=${pg} field="${r.field}" key="${r.keyText}"`);
             let match: { x: number; y: number; width: number; height: number } | null = null;
-            const cands = await findAllTextPositionsInPdfPage(file, pg, r.keyText);
-            if (cands.length > 0) {
-              const tables = await getTables(pg);
-              match = pickBest(cands, r, tables);
-            } else {
-              match = await findTextPositionInPdf(file, pg, r.keyText);
-            }
-            // 2) Backend fallback for scanned / vector pages.
+            // Backend OCR index first (same order as the normal search bar).
+            const map = await fetchBackendKey(r.keyText);
+            const backendList = map.get(pg) ?? [];
+            console.log(`  backend hits on pg ${pg} (${backendList.length}):`, backendList);
+            match = await preferInTable(backendList, pg);
+            // Fallback: pdfjs text layer (digital PDFs without OCR index).
             if (!match) {
-              const map = await fetchBackendKey(r.keyText);
-              const list = map.get(pg);
-              if (list && list.length > 0) {
-                const tables = await getTables(pg);
-                match = pickBest(list, r, tables);
-              }
+              const cands = await findAllTextPositionsInPdfPage(file, pg, r.keyText);
+              console.log(`  pdfjs candidates (${cands.length}):`, cands);
+              match = await preferInTable(cands, pg);
             }
-            if (!match) continue;
+            if (!match) { console.log('  SKIPPED — no key found on this page'); console.groupEnd(); continue; }
             const x = clamp01(match.x + r.offsetX);
             const y = clamp01(match.y + r.offsetY);
             const w = Math.min(r.valueWidth,  0.999 - x);
             const h = Math.min(r.valueHeight, 0.999 - y);
+            console.log(`  placed value → x=${x.toFixed(3)} y=${y.toFixed(3)} w=${w.toFixed(3)} h=${h.toFixed(3)}`);
+            console.groupEnd();
             if (w <= 0 || h <= 0) continue;
             const hl: Highlight = {
               id: `auto-${Date.now()}-${pg}-${r.field}-${Math.random().toString(36).slice(2, 5)}`,
@@ -369,10 +427,13 @@ export default function PDFViewer({
             added++;
           } catch (err) {
             console.warn('[applyAllPages] place failed:', err);
+            console.groupEnd();
           }
         }
       }
 
+      console.log(`[AutoSearch] applyAllPages done — added=${added} pagesScanned=${pagesScanned}`);
+      console.groupEnd();
       onHighlightsChange(session.id, merged);
       if (added > 0) {
         toast.success(`Placed ${added} highlight${added !== 1 ? 's' : ''} across ${pagesScanned} page${pagesScanned !== 1 ? 's' : ''}.`);
@@ -386,7 +447,7 @@ export default function PDFViewer({
       setApplyingTarget(null);
     }
   }, [
-    autoPairs, session.file, session.highlights, session.id, session.total_pages,
+    autoPairs, tableOnly, session.file, session.highlights, session.id, session.total_pages,
     numPages, onHighlightsChange, resolveAutoPairs,
   ]);
 
@@ -414,14 +475,14 @@ export default function PDFViewer({
         toast.error('Could not read any key text — try larger key boxes.');
         return;
       }
-      await onAutoApplyAllPdfs(resolved);
+      await onAutoApplyAllPdfs(resolved, tableOnly);
       // Keep banner open — user may still want to Apply to all pages too.
     } catch (err) {
       toast.error('Apply failed: ' + (err instanceof Error ? err.message : 'unknown'));
     } finally {
       setApplyingTarget(null);
     }
-  }, [autoPairs, resolveAutoPairs, onAutoApplyAllPdfs]);
+  }, [autoPairs, tableOnly, resolveAutoPairs, onAutoApplyAllPdfs]);
 
   // Magic-wand button — entering setup mode. While setup is active a second
   // click is a no-op; use the Cancel button in the banner to exit.
@@ -1362,6 +1423,18 @@ export default function PDFViewer({
                 : `Now draw the KEY (label) box for "${autoPairs[autoPairs.length - 1]?.fieldLabel ?? '…'}".`}
             </span>
             <span className="ml-auto" />
+            <button
+              onClick={() => setTableOnly(v => !v)}
+              disabled={applyingAuto}
+              title={tableOnly ? 'Table-only: highlights placed only inside tables' : 'Table-only: off — highlights placed anywhere'}
+              className={`flex items-center gap-1 px-2 py-1 rounded-md text-xs border transition-colors
+                ${tableOnly
+                  ? 'bg-primary/15 border-primary/40 text-primary font-semibold'
+                  : 'bg-transparent border-border text-muted-foreground hover:bg-muted'}`}
+            >
+              ⊞ Tables only
+            </button>
+            <span className="text-border select-none">|</span>
             <button
               onClick={handleAutoApplyAllPages}
               disabled={autoPairs.length === 0 || applyingAuto}

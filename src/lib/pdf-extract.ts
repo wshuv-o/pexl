@@ -11,11 +11,58 @@ pdfjs.GlobalWorkerOptions.workerSrc = new URL(
 ).toString();
 
 // ---------------------------------------------------------------------------
+// Document-proxy cache — parse each PDF only once per session.
+//
+// Without this, a 310-page PDF with 5 auto-extract pairs would call
+// file.arrayBuffer() + pdfjs.getDocument() ~1 600 times (≈17 GB of reads)
+// and crash the browser. With the cache the PDF is parsed once (~11 MB) and
+// all subsequent page operations reuse the same PDFDocumentProxy.
+// ---------------------------------------------------------------------------
+const _docCache = new Map<string, { proxy: any; ts: number; blobUrl: string }>();
+
+async function getDocumentCached(file: File): Promise<any> {
+  const key = `${file.name}::${file.size}::${file.lastModified}`;
+  const hit = _docCache.get(key);
+  if (hit) { hit.ts = Date.now(); return hit.proxy; }
+
+  // Use a blob URL so the worker fetches pages on demand via range requests
+  // instead of receiving the entire ArrayBuffer via postMessage (which stalls
+  // the browser for large PDFs and can OOM the worker for 200-300 page files).
+  const blobUrl = URL.createObjectURL(file);
+  const proxy = await pdfjs.getDocument({
+    url: blobUrl,
+    standardFontDataUrl: '/standard_fonts/',
+  }).promise;
+  _docCache.set(key, { proxy, ts: Date.now(), blobUrl });
+  // Evict entries older than 10 minutes so stale large PDFs don't hold memory.
+  const cutoff = Date.now() - 10 * 60 * 1000;
+  for (const [k, v] of _docCache) {
+    if (k !== key && v.ts < cutoff) {
+      URL.revokeObjectURL(v.blobUrl);
+      _docCache.delete(k);
+    }
+  }
+  return proxy;
+}
+
+/** Call this when a session is closed to free the cached document. */
+export function clearDocumentCache(file?: File): void {
+  if (file) {
+    const key = `${file.name}::${file.size}::${file.lastModified}`;
+    const entry = _docCache.get(key);
+    if (entry) URL.revokeObjectURL(entry.blobUrl);
+    _docCache.delete(key);
+  } else {
+    for (const v of _docCache.values()) URL.revokeObjectURL(v.blobUrl);
+    _docCache.clear();
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Extract all text from a PDF file, page by page
 // ---------------------------------------------------------------------------
 export async function extractTextFromPdf(file: File): Promise<Map<number, string>> {
-  const arrayBuffer = await file.arrayBuffer();
-  const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
+  const pdf = await getDocumentCached(file);
   const pageTexts = new Map<number, string>();
 
   for (let i = 1; i <= pdf.numPages; i++) {
@@ -181,14 +228,14 @@ export async function findValueCandidates(
   startPage = 1,
   endPage?: number,
 ): Promise<ValueCandidate[]> {
-  const arrayBuffer = await file.arrayBuffer();
-  const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
+  const pdf = await getDocumentCached(file);
   const last = endPage ?? pdf.numPages;
   const out: ValueCandidate[] = [];
 
   for (let p = startPage; p <= last; p++) {
+    if (p % 10 === 0) await new Promise(r => setTimeout(r, 0));
     const page = await pdf.getPage(p);
-    const content = await page.getTextContent();
+    const content = await page.getTextContent({ includeMarkedContent: false });
     const vp = page.getViewport({ scale: 1 });
     const items = content.items as any[];
     if (isScannedPage(items)) continue;
@@ -279,8 +326,7 @@ export async function autoExtractWithHighlights(
   file: File,
   provider: string,
 ): Promise<{ rows: ExtractedRow[]; highlights: Record<number, Highlight[]> }> {
-  const arrayBuffer = await file.arrayBuffer();
-  const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
+  const pdf = await getDocumentCached(file);
   const patterns = PROVIDER_PATTERNS[provider] || PROVIDER_PATTERNS['National Grid Gas'];
   const rows: ExtractedRow[] = [];
   const highlights: Record<number, Highlight[]> = {};
@@ -290,8 +336,9 @@ export async function autoExtractWithHighlights(
   let lastAddress: string | null = null;
 
   for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+    if (pageNum % 10 === 0) await new Promise(r => setTimeout(r, 0));
     const page = await pdf.getPage(pageNum);
-    const content = await page.getTextContent();
+    const content = await page.getTextContent({ includeMarkedContent: false });
     const viewport = page.getViewport({ scale: 1 });
     const pageWidth = viewport.width;
     const pageHeight = viewport.height;
@@ -446,8 +493,7 @@ export async function extractFromRegions(
   file: File,
   highlights: { page: number; field: string; x: number; y: number; width: number; height: number }[],
 ): Promise<ExtractedRow[]> {
-  const arrayBuffer = await file.arrayBuffer();
-  const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
+  const pdf = await getDocumentCached(file);
   const results: ExtractedRow[] = [];
 
   // Group highlights by page so we open each page only once
@@ -561,40 +607,168 @@ export async function extractFromRegions(
 }
 
 /**
- * Detect table regions on a single page using text-layout heuristics.
- * Works for both bordered and borderless tables — detection is purely
- * text-based (consistent column alignment across 3+ consecutive rows).
+ * Merge overlapping or touching table region bboxes into the smallest set
+ * of non-overlapping bboxes.
+ */
+function mergeTableRegions(
+  regions: Array<{ x: number; y: number; width: number; height: number }>,
+): Array<{ x: number; y: number; width: number; height: number }> {
+  if (regions.length <= 1) return regions;
+  const TOL = 0.01;
+  let arr = [...regions];
+  let changed = true;
+  while (changed) {
+    changed = false;
+    const out: typeof arr = [];
+    const used = new Uint8Array(arr.length);
+    for (let i = 0; i < arr.length; i++) {
+      if (used[i]) continue;
+      let r = arr[i];
+      for (let j = i + 1; j < arr.length; j++) {
+        if (used[j]) continue;
+        const s = arr[j];
+        if (r.x <= s.x + s.width + TOL && r.x + r.width >= s.x - TOL &&
+            r.y <= s.y + s.height + TOL && r.y + r.height >= s.y - TOL) {
+          const x  = Math.min(r.x, s.x);
+          const y  = Math.min(r.y, s.y);
+          const x2 = Math.max(r.x + r.width,  s.x + s.width);
+          const y2 = Math.max(r.y + r.height, s.y + s.height);
+          r = { x, y, width: x2 - x, height: y2 - y };
+          used[j] = 1; changed = true;
+        }
+      }
+      out.push(r);
+    }
+    arr = out;
+  }
+  return arr;
+}
+
+/**
+ * Detect table regions on a single page using two complementary methods:
  *
- * Algorithm:
- *   1. Cluster items into rows (items within ~3 pt vertically).
- *   2. A row is "multi-column" when it has ≥2 items.
- *   3. Two adjacent rows "align" when they share at least one X-start
- *      position within a 3% page-width tolerance.
- *   4. Chains of ≥3 aligning rows → table bounding box.
+ * 1. Border-based (bordered tables): scan the PDF graphics operator list for
+ *    rectangle ('re') operations. Cell borders drawn as rectangles cluster
+ *    into table bounding boxes. Works regardless of text alignment.
+ *
+ * 2. Text-alignment (borderless tables): group text items into rows, then
+ *    find chains of ≥2 consecutive rows that share column X positions.
+ *    Catches whitespace-separated columnar layouts with no visible borders.
+ *
+ * Results from both methods are merged and deduplicated.
  */
 export async function detectTableRegionsInPdfPage(
   file: File,
   pageNumber: number,
 ): Promise<Array<{ x: number; y: number; width: number; height: number }>> {
   try {
-    const buf = await file.arrayBuffer();
-    const pdf = await pdfjs.getDocument({ data: buf }).promise;
+    const pdf = await getDocumentCached(file);
     if (pageNumber < 1 || pageNumber > pdf.numPages) return [];
-    const page    = await pdf.getPage(pageNumber);
-    const content = await page.getTextContent();
-    const vp      = page.getViewport({ scale: 1 });
+    const page = await pdf.getPage(pageNumber);
+    const vp   = page.getViewport({ scale: 1 });
+    const W = vp.width, H = vp.height;
+    const regions: Array<{ x: number; y: number; width: number; height: number }> = [];
+
+    // -----------------------------------------------------------------------
+    // 1. Border-based: find rectangles in the PDF graphics stream.
+    //    PDF 're' op → pdfjs OPS.rectangle (19), or batched in
+    //    OPS.constructPath (91) with sub-op code 19.
+    // -----------------------------------------------------------------------
+    try {
+      const opList = await page.getOperatorList();
+      const { fnArray, argsArray } = opList as { fnArray: Uint8Array; argsArray: any[] };
+
+      // pdfjs-dist OPS constants (verified from build/pdf.min.mjs):
+      const OP_RECT  = 19; // standalone rectangle op
+      const OP_CPATH = 91; // constructPath — batches moveTo/lineTo/rect
+      // sub-op codes within constructPath args[0]:
+      const SUB_MOVE = 13; const SUB_LINE = 14; const SUB_CURV = 15;
+      const SUB_RECT = 19; // rectangle (same value as top-level)
+      // closePath = 18, curveTo1 = 16, curveTo2 = 17 (no coord extraction needed)
+
+      type RBox = { x: number; y: number; x2: number; y2: number };
+      const rects: RBox[] = [];
+
+      const pushRect = (rx: number, ry: number, rw: number, rh: number) => {
+        rw = Math.abs(rw); rh = Math.abs(rh);
+        if (rw < W * 0.015 || rh < H * 0.003) return; // skip tiny decorative elements
+        const top = H - ry - rh; // PDF y-origin is bottom-left; flip to viewport
+        rects.push({ x: rx, y: top, x2: rx + rw, y2: top + rh });
+      };
+
+      for (let i = 0; i < fnArray.length; i++) {
+        const fn = fnArray[i];
+        if (fn === OP_RECT) {
+          const a = argsArray[i];
+          if (Array.isArray(a) && a.length >= 4) pushRect(a[0], a[1], a[2], a[3]);
+        } else if (fn === OP_CPATH) {
+          const [cmds, coords] = argsArray[i] as [number[], number[]];
+          if (!Array.isArray(cmds) || !Array.isArray(coords)) continue;
+          let ci = 0;
+          for (const cmd of cmds) {
+            if (cmd === SUB_RECT) {
+              if (ci + 3 < coords.length) { pushRect(coords[ci], coords[ci+1], coords[ci+2], coords[ci+3]); ci += 4; }
+            } else if (cmd === SUB_MOVE || cmd === SUB_LINE) { ci += 2; }
+            else if (cmd === SUB_CURV)  { ci += 6; }
+            else if (cmd === 16 || cmd === 17) { ci += 4; } // curveTo1/2
+            // closePath (18): no coords consumed
+          }
+        }
+      }
+
+      // Cluster adjacent/overlapping rects into table regions.
+      if (rects.length >= 2) {
+        const GAP  = W * 0.025;
+        const used = new Uint8Array(rects.length);
+        for (let i = 0; i < rects.length; i++) {
+          if (used[i]) continue;
+          const grp = [i];
+          let changed = true;
+          while (changed) {
+            changed = false;
+            let gx1 = Infinity, gy1 = Infinity, gx2 = -Infinity, gy2 = -Infinity;
+            for (const gi of grp) {
+              gx1 = Math.min(gx1, rects[gi].x);  gy1 = Math.min(gy1, rects[gi].y);
+              gx2 = Math.max(gx2, rects[gi].x2); gy2 = Math.max(gy2, rects[gi].y2);
+            }
+            for (let j = 0; j < rects.length; j++) {
+              if (used[j] || grp.includes(j)) continue;
+              const r = rects[j];
+              if (r.x <= gx2 + GAP && r.x2 >= gx1 - GAP && r.y <= gy2 + GAP && r.y2 >= gy1 - GAP) {
+                grp.push(j); used[j] = 1; changed = true;
+              }
+            }
+          }
+          if (grp.length < 2) continue;
+          used[i] = 1;
+          let x1 = Infinity, y1 = Infinity, x2 = -Infinity, y2 = -Infinity;
+          for (const gi of grp) {
+            x1 = Math.min(x1, rects[gi].x);  y1 = Math.min(y1, rects[gi].y);
+            x2 = Math.max(x2, rects[gi].x2); y2 = Math.max(y2, rects[gi].y2);
+          }
+          regions.push({
+            x: clamp01(x1 / W), y: clamp01(y1 / H),
+            width: clamp01((x2 - x1) / W), height: clamp01((y2 - y1) / H),
+          });
+        }
+      }
+    } catch { /* operator list unavailable — graphics-based detection skipped */ }
+
+    // -----------------------------------------------------------------------
+    // 2. Text-alignment: rows with ≥2 items sharing column X positions.
+    //    Reduced minimum chain length to 2 (from 3) and widened X tolerance
+    //    to 4% so more real-world borderless tables are captured.
+    // -----------------------------------------------------------------------
+    const content = await page.getTextContent({ includeMarkedContent: false });
     const items   = content.items as any[];
-    if (isScannedPage(items)) return [];
 
     type Row = { top: number; bottom: number; xs: number[] };
-
-    // Build rows (group by Y, tolerance = 3 PDF pts)
     const TOL_Y = 3;
     const enriched = items
       .filter((it: any) => it.str?.trim() && it.transform)
       .map((it: any) => {
         const h  = it.height || Math.abs(it.transform[3]) || 12;
-        const tp = vp.height - it.transform[5] - h;
+        const tp = H - it.transform[5] - h;
         return { x: it.transform[4], top: tp, bottom: tp + h };
       })
       .sort((a, b) => a.top - b.top);
@@ -611,49 +785,39 @@ export async function detectTableRegionsInPdfPage(
       }
     }
     if (cur && cur.xs.length >= 2) rows.push(cur);
-    if (rows.length < 3) return [];
 
-    // Check if two rows share a column X within 3% page width
-    const TOL_X = vp.width * 0.03;
-    const aligns = (a: Row, b: Row) =>
-      a.xs.some(ax => b.xs.some(bx => Math.abs(ax - bx) < TOL_X));
-
-    // Group consecutive aligning rows into chains
-    const used = new Uint8Array(rows.length);
-    const tables: Array<{ x: number; y: number; width: number; height: number }> = [];
-
-    for (let i = 0; i < rows.length; i++) {
-      if (used[i]) continue;
-      const group: number[] = [i];
-      for (let j = i + 1; j < rows.length; j++) {
-        if (used[j]) break;
-        // Stop if the gap to the next row is more than 5% page height
-        if (rows[j].top - rows[group[group.length - 1]].bottom > vp.height * 0.05) break;
-        if (aligns(rows[group[group.length - 1]], rows[j])) {
-          group.push(j);
-          used[j] = 1;
-        } else {
-          break;
+    if (rows.length >= 2) {
+      const TOL_X = W * 0.04;
+      const aligns = (a: Row, b: Row) =>
+        a.xs.some(ax => b.xs.some(bx => Math.abs(ax - bx) < TOL_X));
+      const usedR = new Uint8Array(rows.length);
+      for (let i = 0; i < rows.length; i++) {
+        if (usedR[i]) continue;
+        const grp: number[] = [i];
+        for (let j = i + 1; j < rows.length; j++) {
+          if (usedR[j]) continue;
+          if (rows[j].top - rows[grp[grp.length - 1]].bottom > H * 0.06) break;
+          if (aligns(rows[grp[grp.length - 1]], rows[j])) { grp.push(j); usedR[j] = 1; }
+          else break;
         }
+        if (grp.length < 2) continue;
+        usedR[i] = 1;
+        const allXs = grp.flatMap(gi => rows[gi].xs);
+        const minX  = Math.min(...allXs);
+        const maxX  = Math.max(...allXs) + W * 0.15;
+        const minY  = rows[grp[0]].top;
+        const maxY  = rows[grp[grp.length - 1]].bottom;
+        const pad   = W * 0.01;
+        regions.push({
+          x:      clamp01((minX - pad) / W),
+          y:      clamp01((minY - pad) / H),
+          width:  clamp01((Math.min(maxX, W) - minX + 2 * pad) / W),
+          height: clamp01((maxY - minY + 2 * pad) / H),
+        });
       }
-      if (group.length < 3) continue;
-      used[i] = 1;
-      const allXs  = group.flatMap(gi => rows[gi].xs);
-      const minX   = Math.min(...allXs);
-      const maxXraw = group.flatMap(gi => rows[gi].xs).reduce((m, x) => Math.max(m, x), 0);
-      // Right edge: approximate from the rightmost item + average char width
-      const maxX = maxXraw + vp.width * 0.15;
-      const minY  = rows[group[0]].top;
-      const maxY  = rows[group[group.length - 1]].bottom;
-      const pad   = vp.width * 0.01;
-      tables.push({
-        x:      clamp01((minX - pad)           / vp.width),
-        y:      clamp01((minY - pad)            / vp.height),
-        width:  clamp01((Math.min(maxX, vp.width) - minX + 2 * pad) / vp.width),
-        height: clamp01((maxY - minY + 2 * pad) / vp.height),
-      });
     }
-    return tables;
+
+    return mergeTableRegions(regions);
   } catch {
     return [];
   }
@@ -678,14 +842,14 @@ export async function findAllTextPositionsInPdfPage(
   if (!searchText || !searchText.trim()) return [];
 
   try {
-    const arrayBuffer = await file.arrayBuffer();
-    const pdf  = await pdfjs.getDocument({ data: arrayBuffer }).promise;
+    const pdf = await getDocumentCached(file);
     if (pageNumber < 1 || pageNumber > pdf.numPages) return [];
     const page    = await pdf.getPage(pageNumber);
-    const content = await page.getTextContent();
+    const content = await page.getTextContent({ includeMarkedContent: false });
     const vp      = page.getViewport({ scale: 1 });
     const items   = content.items as any[];
-    if (isScannedPage(items)) return [];
+    // Don't skip pages with few items — appraisal/floor-plan pages legitimately
+    // have sparse text (labels + numbers) and should still be searchable.
 
     const normalize = (s: string) => s
       .toLowerCase()
@@ -766,17 +930,12 @@ export async function findTextPositionInPdf(
   if (!searchText || !searchText.trim()) return null;
 
   try {
-    const arrayBuffer = await file.arrayBuffer();
-    const loadingTask = pdfjs.getDocument({ data: arrayBuffer });
-    const pdf = await loadingTask.promise;
-
+    const pdf = await getDocumentCached(file);
     if (pageNumber < 1 || pageNumber > pdf.numPages) return null;
 
     const page    = await pdf.getPage(pageNumber);
-    const content = await page.getTextContent();
+    const content = await page.getTextContent({ includeMarkedContent: false });
     const vp      = page.getViewport({ scale: 1 });
-
-    if (isScannedPage(content.items as any[])) return null;
 
     const cleanedSearch = searchText
       .replace(/\$\s*/g, '')   // remove $ signs
@@ -806,11 +965,10 @@ export async function getTextAtRect(
   rect: { x: number; y: number; width: number; height: number },
 ): Promise<string> {
   try {
-    const arrayBuffer = await file.arrayBuffer();
-    const pdf  = await pdfjs.getDocument({ data: arrayBuffer }).promise;
+    const pdf = await getDocumentCached(file);
     if (pageNumber < 1 || pageNumber > pdf.numPages) return '';
     const page = await pdf.getPage(pageNumber);
-    const content = await page.getTextContent();
+    const content = await page.getTextContent({ includeMarkedContent: false });
     const vp = page.getViewport({ scale: 1 });
     const items = content.items as any[];
     if (isScannedPage(items)) return '';
@@ -855,30 +1013,79 @@ export async function autoSearchFieldValues(
   const out: Record<number, Highlight[]> = {};
   if (fieldLabels.length === 0) return out;
 
+  // Same normalizer used by the search bar / findAllTextPositionsInPdfPage.
+  const normalize = (s: string) =>
+    s.toLowerCase()
+     .normalize('NFKD')
+     .replace(/\p{M}+/gu, '')
+     .replace(/[^a-z0-9 ]/g, ' ')
+     .replace(/\s+/g, ' ')
+     .trim();
+
+  const isSep = (s: string) => /^[\s:|\-–—•\.]+$/.test(s.trim());
+
   try {
-    const arrayBuffer = await file.arrayBuffer();
-    const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
+    const pdf = await getDocumentCached(file);
 
     for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
-      const page = await pdf.getPage(pageNum);
-      const content = await page.getTextContent();
-      const items = content.items as any[];
+      if (pageNum % 10 === 0) await new Promise(r => setTimeout(r, 0));
+      const page    = await pdf.getPage(pageNum);
+      const content = await page.getTextContent({ includeMarkedContent: false });
+      const items   = content.items as any[];
       if (isScannedPage(items)) continue;
       const vp = page.getViewport({ scale: 1 });
       const pageWidth = vp.width, pageHeight = vp.height;
 
-      // Convert to a richer representation we can do spatial queries on.
-      type Item = { str: string; x: number; y: number; w: number; h: number; cy: number };
-      const enriched: Item[] = [];
+      // ── Build page-level slot map (same as findAllTextPositionsInPdfPage) ──
+      // One pass per page; all label searches reuse this.
+      type Slot = { item: any; itemW: number; itemH: number; itemTop: number; start: number; end: number; normLen: number };
+      const slots: Slot[] = [];
+      let pageText = '';
       for (const it of items) {
         if (!it.str || !it.transform) continue;
-        const s = String(it.str);
-        if (!s.trim()) continue;
-        const x = it.transform[4];
-        const h = it.height || Math.abs(it.transform[3]) || 12;
-        const w = it.width  || s.length * 6;
-        const top = pageHeight - it.transform[5];
-        enriched.push({ str: s, x, y: top, w, h, cy: top + h / 2 });
+        const nText = normalize(it.str);
+        if (!nText) continue;
+        if (pageText.length > 0 && !pageText.endsWith(' ')) pageText += ' ';
+        const start  = pageText.length;
+        pageText    += nText;
+        const end    = pageText.length;
+        const itemW  = it.width  || it.str.length * 6;
+        const itemH  = it.height || Math.abs(it.transform[3]) || 12;
+        const itemTop = pageHeight - it.transform[5] - itemH;
+        slots.push({ item: it, itemW, itemH, itemTop, start, end, normLen: end - start });
+      }
+
+      // Returns the tight bbox (PDF units) for text matched at [matchIdx, matchEnd).
+      function labelBboxPx(matchIdx: number, matchEnd: number) {
+        let left = Infinity, right = -Infinity, top = Infinity, bottom = -Infinity;
+        for (const sl of slots) {
+          const oS = Math.max(sl.start, matchIdx);
+          const oE = Math.min(sl.end,   matchEnd);
+          if (oS >= oE) continue;
+          const pS = (oS - sl.start) / sl.normLen;
+          const pE = (oE - sl.start) / sl.normLen;
+          const x  = sl.item.transform[4];
+          left   = Math.min(left,   x + pS * sl.itemW);
+          right  = Math.max(right,  x + pE * sl.itemW);
+          top    = Math.min(top,    sl.itemTop);
+          bottom = Math.max(bottom, sl.itemTop + sl.itemH);
+        }
+        if (!isFinite(left)) return null;
+        return { left, right, top, bottom, height: bottom - top };
+      }
+
+      // All items in a band (PDF units): same-line check uses centre-Y.
+      function itemsInBand(xMin: number, xMax: number, yMin: number, yMax: number) {
+        return items.filter(it => {
+          if (!it.str?.trim() || !it.transform) return false;
+          const h   = it.height || Math.abs(it.transform[3]) || 12;
+          const w   = it.width  || it.str.length * 6;
+          const itX = it.transform[4];
+          const itTop = pageHeight - it.transform[5] - h;
+          const cy  = itTop + h / 2;
+          const xOverlap = Math.min(itX + w, xMax) - Math.max(itX, xMin);
+          return cy >= yMin && cy <= yMax && w > 0 && xOverlap / w >= 0.25;
+        });
       }
 
       const pageHls: Highlight[] = [];
@@ -886,68 +1093,83 @@ export async function autoSearchFieldValues(
 
       for (const { fieldKey, label } of fieldLabels) {
         if (usedFields.has(fieldKey)) continue;
-        const needle = label.toLowerCase();
+        const q = normalize(label);
+        if (!q) continue;
 
-        let hit: Item | null = null;
-        for (let i = 0; i < enriched.length; i++) {
-          const it = enriched[i];
-          if (it.str.toLowerCase().includes(needle)) {
-            hit = it;
-            break;
+        // ── Search for the label via normalised text ─────────────────────
+        const labelIdx = pageText.indexOf(q);
+        if (labelIdx === -1) continue;
+
+        const lb = labelBboxPx(labelIdx, labelIdx + q.length);
+        if (!lb) continue;
+
+        // ── Collect value items to the right on the same line ────────────
+        const sameLineTolerance = lb.height * 0.65;
+        const cy = lb.top + lb.height / 2;
+
+        const rightCandidates = itemsInBand(
+          lb.right + 1, pageWidth,
+          cy - sameLineTolerance, cy + sameLineTolerance,
+        ).sort((a: any, b: any) => a.transform[4] - b.transform[4]);
+
+        // Skip leading separators (:  |  —  etc.)
+        let fi = 0;
+        while (fi < rightCandidates.length && isSep(rightCandidates[fi].str)) fi++;
+
+        let valueItems: any[] = [];
+
+        if (fi < rightCandidates.length) {
+          // Build a tight chain: stop on gap > 30px or next-label item (ends with ":")
+          const first = rightCandidates[fi];
+          const fX   = first.transform[4];
+          const fH   = first.height || Math.abs(first.transform[3]) || 12;
+          const fTop = pageHeight - first.transform[5] - fH;
+          const fCy  = fTop + fH / 2;
+
+          const lineItems = itemsInBand(
+            fX - 1, pageWidth,
+            fCy - fH * 0.65, fCy + fH * 0.65,
+          ).sort((a: any, b: any) => a.transform[4] - b.transform[4]);
+
+          for (const it of lineItems) {
+            const itX = it.transform[4];
+            if (valueItems.length === 0) { valueItems.push(it); continue; }
+            const lastIt  = valueItems[valueItems.length - 1];
+            const lastRight = lastIt.transform[4] + (lastIt.width || lastIt.str.length * 6);
+            if (itX - lastRight > 30) break;               // column gap
+            if (/[:\|]\s*$/.test(it.str.trim())) break;    // next label
+            valueItems.push(it);
+            if (valueItems.length >= 6) break;
           }
-          // Try joining 2-4 items on the same line
-          for (let n = 2; n <= 4 && i + n <= enriched.length; n++) {
-            const joined = enriched.slice(i, i + n);
-            const sameLine = joined.every(j => Math.abs(j.cy - joined[0].cy) < 4);
-            if (!sameLine) continue;
-            const combined = joined.map(j => j.str).join(' ').toLowerCase().replace(/\s+/g, ' ');
-            if (combined.includes(needle)) {
-              hit = joined[joined.length - 1];     // anchor on the LAST item so we look to its right
-              break;
-            }
-          }
-          if (hit) break;
+        } else {
+          // Nothing to the right — look directly below the label
+          const belowItems = itemsInBand(
+            lb.left - 5, lb.right + lb.height * 4,
+            lb.bottom + 1, lb.bottom + lb.height * 3,
+          ).sort((a: any, b: any) => {
+            const aT = pageHeight - a.transform[5] - (a.height || 12);
+            const bT = pageHeight - b.transform[5] - (b.height || 12);
+            return aT - bT;
+          });
+          if (belowItems[0] && !isSep(belowItems[0].str)) valueItems = [belowItems[0]];
         }
-        if (!hit) continue;
 
-        const labelRight = hit.x + hit.w;
-        const sameLine = enriched
-          .filter(it => it !== hit && Math.abs(it.cy - hit.cy) < 6 && it.x >= labelRight - 1)
-          .sort((a, b) => a.x - b.x);
+        if (valueItems.length === 0) continue;
 
-        let value: Item | null = sameLine[0] ?? null;
-        if (!value) {
-          // Look below — first line that has an item under the label's horizontal span
-          const below = enriched
-            .filter(it => it.y > hit.y + hit.h - 1 && it.y < hit.y + hit.h + 60)
-            .sort((a, b) => a.y - b.y || Math.abs(a.x - hit.x) - Math.abs(b.x - hit.x));
-          value = below[0] ?? null;
+        // Compute tight bbox over the value items
+        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+        for (const it of valueItems) {
+          const itX = it.transform[4];
+          const itW = it.width || it.str.length * 6;
+          const itH = it.height || Math.abs(it.transform[3]) || 12;
+          const itTop = pageHeight - it.transform[5] - itH;
+          minX = Math.min(minX, itX);
+          maxX = Math.max(maxX, itX + itW);
+          minY = Math.min(minY, itTop);
+          maxY = Math.max(maxY, itTop + itH);
         }
-        if (!value) continue;
-
-        const sameLineAll = enriched
-          .filter(it => Math.abs(it.cy - value!.cy) < 4 && it.x >= value!.x - 1)
-          .sort((a, b) => a.x - b.x);
-        const chain: Item[] = [];
-        for (const it of sameLineAll) {
-          if (chain.length === 0) { chain.push(it); continue; }
-          const last = chain[chain.length - 1];
-          const gap = it.x - (last.x + last.w);
-          if (gap > 20) break;                 // too far — different value
-          chain.push(it);
-          if (chain.length >= 5) break;        // cap
-        }
-        const minX = Math.min(...chain.map(c => c.x));
-        const maxX = Math.max(...chain.map(c => c.x + c.w));
-        const minY = Math.min(...chain.map(c => c.y));
-        const maxY = Math.max(...chain.map(c => c.y + c.h));
         const pad = 2;
 
-        // Leave extractedValue / confidence / wasOcr UNSET and isAutoExtracted
-        // off — the caller (handleAutoSearch) kicks off the regular Extract
-        // flow right after, which runs the backend's smart detection over
-        // these boxes and produces canonical values. Treating them as fresh
-        // user-drawn highlights gives us the same accuracy as manual draws.
         pageHls.push({
           id: `auto-${Date.now()}-${pageNum}-${fieldKey}-${Math.random().toString(36).slice(2, 5)}`,
           page: pageNum,
@@ -957,7 +1179,7 @@ export async function autoSearchFieldValues(
           width:  (Math.min(pageWidth,  maxX + pad) - Math.max(0, minX - pad)) / pageWidth,
           height: (Math.min(pageHeight, maxY + pad) - Math.max(0, minY - pad)) / pageHeight,
         });
-        usedFields.add(fieldKey);              // don't double-match the same field on this page
+        usedFields.add(fieldKey);
       }
 
       if (pageHls.length > 0) out[pageNum] = pageHls;
