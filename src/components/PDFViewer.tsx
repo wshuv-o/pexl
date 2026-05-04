@@ -53,12 +53,13 @@ interface PDFViewerProps {
       offsetY: number;
       valueWidth: number;
       valueHeight: number;
-      // Source-page position of the key (normalized 0-1). Used by the apply
-      // step to spatially score multiple key candidates on the target page —
-      // when the same label appears more than once, we pick the match
-      // closest to where the user originally drew the key.
       sourceKeyX: number;
       sourceKeyY: number;
+      // When key text couldn't be read, skip the search and place the value
+      // box at these absolute normalized coordinates on every target page.
+      useAbsoluteCoords?: boolean;
+      absoluteValueX?: number;
+      absoluteValueY?: number;
     }>,
     tableOnly: boolean,
   ) => void | Promise<void>;
@@ -130,6 +131,9 @@ export default function PDFViewer({
   // the value highlight is propagated to those locations using the
   // captured key-to-value offset.
   const [autoSetupActive, setAutoSetupActive] = useState(false);
+  // Controls bar visibility independently of whether setup has been started.
+  // The bar can be hidden/shown by clicking the wand icon while pairs exist.
+  const [autoBarVisible, setAutoBarVisible] = useState(false);
   // Pairs being collected. Each entry has a value highlight (already
   // labeled with a field) and an optional key highlight that the user
   // draws right after.
@@ -172,6 +176,9 @@ export default function PDFViewer({
       valueHeight: number;
       sourceKeyX: number;
       sourceKeyY: number;
+      useAbsoluteCoords?: boolean;
+      absoluteValueX?: number;
+      absoluteValueY?: number;
     }[] = [];
     let dropped = 0;
     for (const p of autoPairs) {
@@ -191,7 +198,7 @@ export default function PDFViewer({
         console.log('  pdfjs empty — trying backend OCR...');
         try {
           const ocr = await extractRegions(
-            session.id,
+            sessionIdRef.current,
             [{
               id: `__autokey_${Date.now()}`,
               page:   p.page,
@@ -199,7 +206,13 @@ export default function PDFViewer({
               x: p.key.x, y: p.key.y, width: p.key.width, height: p.key.height,
             }],
             session.file,
-            { strict: true },
+            {
+              strict: true,
+              onSessionRenewed: (oldId, newId) => {
+                sessionIdRef.current = newId;
+                onSessionRenewed?.(oldId, newId);
+              },
+            },
           );
           trimmed = ((ocr[0]?.value ?? '') as string).trim();
           // OCR sometimes renders layered text twice with no separator
@@ -214,9 +227,26 @@ export default function PDFViewer({
         }
       }
       if (!trimmed || trimmed.length < 2) {
-        console.warn('  DROPPED — could not read any key text');
+        // Key text unreadable — keep the pair but flag it for absolute-coordinate
+        // placement so the value box still lands on every target page/PDF.
+        console.warn('  key unreadable — falling back to absolute coordinates');
         console.groupEnd();
         dropped++;
+        out.push({
+          field:       p.field,
+          fieldLabel:  p.fieldLabel,
+          sourcePage:  p.page,
+          keyText:     '',
+          offsetX:     0,
+          offsetY:     0,
+          valueWidth:  p.value.width,
+          valueHeight: p.value.height,
+          sourceKeyX:  p.key.x,
+          sourceKeyY:  p.key.y,
+          useAbsoluteCoords: true,
+          absoluteValueX:    p.value.x,
+          absoluteValueY:    p.value.y,
+        });
         continue;
       }
       const words = trimmed.split(/\s+/).filter(Boolean);
@@ -275,7 +305,7 @@ export default function PDFViewer({
     console.groupEnd();
     if (dropped > 0) {
       toast(
-        `Couldn't read ${dropped} key${dropped !== 1 ? 's' : ''} — try a larger key box around the label text.`,
+        `${dropped} key${dropped !== 1 ? 's' : ''} couldn't be read — placing those fields at original coordinates.`,
         { icon: '⚠️' },
       );
     }
@@ -284,6 +314,7 @@ export default function PDFViewer({
 
   const exitAutoSetup = useCallback(() => {
     setAutoSetupActive(false);
+    setAutoBarVisible(false);
     setAutoPairs([]);
     setAutoNextStep('value');
   }, []);
@@ -322,7 +353,16 @@ export default function PDFViewer({
         if (backendByKey.has(q)) return backendByKey.get(q)!;
         const map = new Map<number, { x: number; y: number; width: number; height: number }[]>();
         for (const mode of ['exact', 'partial', 'fuzzy'] as const) {
-          const r = await searchBackend(session.id, q, mode);
+          // Use sessionIdRef so we pick up any id renewed during resolveAutoPairs.
+          // Cap wait at 20 s — a freshly-renewed session won't have its OCR index
+          // ready yet; the source-page fallback handles it and the index is cached
+          // for the next run.
+          const ctrl = new AbortController();
+          const timer = setTimeout(() => ctrl.abort(), 20_000);
+          let r: Awaited<ReturnType<typeof searchBackend>>;
+          try {
+            r = await searchBackend(sessionIdRef.current, q, mode, { signal: ctrl.signal });
+          } catch { r = null; } finally { clearTimeout(timer); }
           if (!r || r.results.length === 0) continue;
           for (const m of r.results) {
             const dims = r.page_sizes[String(m.page)];
@@ -395,25 +435,47 @@ export default function PDFViewer({
 
         for (const r of resolved) {
           try {
-            console.group(`  pg=${pg} field="${r.field}" key="${r.keyText}"`);
-            let match: { x: number; y: number; width: number; height: number } | null = null;
-            // Backend OCR index first (same order as the normal search bar).
-            const map = await fetchBackendKey(r.keyText);
-            const backendList = map.get(pg) ?? [];
-            console.log(`  backend hits on pg ${pg} (${backendList.length}):`, backendList);
-            match = await preferInTable(backendList, pg);
-            // Fallback: pdfjs text layer (digital PDFs without OCR index).
-            if (!match) {
-              const cands = await findAllTextPositionsInPdfPage(file, pg, r.keyText);
-              console.log(`  pdfjs candidates (${cands.length}):`, cands);
-              match = await preferInTable(cands, pg);
+            console.group(`  pg=${pg} field="${r.field}" key="${r.keyText || '(abs)'}"`);
+
+            let x: number, y: number, w: number, h: number;
+
+            if (r.useAbsoluteCoords) {
+              // Key text unreadable on source — only valid on the source page layout.
+              if (pg !== r.sourcePage) { console.log('  abs-coords: non-source page — skipping'); console.groupEnd(); continue; }
+              x = r.absoluteValueX!;
+              y = r.absoluteValueY!;
+              w = r.valueWidth;
+              h = r.valueHeight;
+              console.log(`  absolute-coords fallback → x=${x.toFixed(3)} y=${y.toFixed(3)}`);
+            } else {
+              let match: { x: number; y: number; width: number; height: number } | null = null;
+              const map = await fetchBackendKey(r.keyText);
+              const backendList = map.get(pg) ?? [];
+              console.log(`  backend hits (${backendList.length}):`, backendList);
+              match = await preferInTable(backendList, pg);
+              if (!match) {
+                const cands = await findAllTextPositionsInPdfPage(file, pg, r.keyText);
+                console.log(`  pdfjs candidates (${cands.length}):`, cands);
+                match = await preferInTable(cands, pg);
+              }
+              if (!match) {
+                // Label is image-embedded (not in text/search index). Fall back to
+                // drawn coordinates on the source page; skip all other pages.
+                if (pg !== r.sourcePage) { console.log('  SKIPPED — key not found'); console.groupEnd(); continue; }
+                x = clamp01(r.sourceKeyX + r.offsetX);
+                y = clamp01(r.sourceKeyY + r.offsetY);
+                w = r.valueWidth;
+                h = r.valueHeight;
+                console.log(`  drawn-coords fallback → x=${x.toFixed(3)} y=${y.toFixed(3)}`);
+              } else {
+                x = clamp01(match.x + r.offsetX);
+                y = clamp01(match.y + r.offsetY);
+                w = Math.min(r.valueWidth,  0.999 - x);
+                h = Math.min(r.valueHeight, 0.999 - y);
+                console.log(`  placed → x=${x.toFixed(3)} y=${y.toFixed(3)} w=${w.toFixed(3)} h=${h.toFixed(3)}`);
+              }
             }
-            if (!match) { console.log('  SKIPPED — no key found on this page'); console.groupEnd(); continue; }
-            const x = clamp01(match.x + r.offsetX);
-            const y = clamp01(match.y + r.offsetY);
-            const w = Math.min(r.valueWidth,  0.999 - x);
-            const h = Math.min(r.valueHeight, 0.999 - y);
-            console.log(`  placed value → x=${x.toFixed(3)} y=${y.toFixed(3)} w=${w.toFixed(3)} h=${h.toFixed(3)}`);
+
             console.groupEnd();
             if (w <= 0 || h <= 0) continue;
             const hl: Highlight = {
@@ -489,11 +551,13 @@ export default function PDFViewer({
   const handleAutoSearch = useCallback(() => {
     if (!session.file) { toast.error('PDF file not loaded'); return; }
     if (autoSetupActive) {
-      // Setup already running — just scroll the banner into view with a toast.
-      toast('Auto-extract is active — use the banner above to apply or cancel.', { icon: '✨' });
+      // Already active — toggle the bar's visibility without losing pairs.
+      setAutoBarVisible(v => !v);
       return;
     }
+    // Fresh start.
     setAutoSetupActive(true);
+    setAutoBarVisible(true);
     setAutoPairs([]);
     setAutoNextStep('value');
     setTool('highlight');
@@ -524,6 +588,11 @@ export default function PDFViewer({
   const clipboardRef = useRef<Highlight[] | null>(null);
   // Always-fresh ref for the current page (for paste-anywhere)
   const currentPageRef = useRef<number>(session.startPage || 1);
+  // Always-fresh ref for the current backend session_id. Updated immediately
+  // when extractRegions detects a stale session and re-uploads the file, so
+  // subsequent search calls in the same async flow see the renewed id.
+  const sessionIdRef = useRef<string>(session.id);
+  useEffect(() => { sessionIdRef.current = session.id; }, [session.id]);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const pdfDocRef = useRef<any>(null);
 
@@ -986,20 +1055,16 @@ export default function PDFViewer({
   // Bulk highlight actions
   // -----------------------------------------------------------------------
   const handleApplyToAllPages = useCallback((idsFilter?: Set<string>) => {
-    // When the user picks specific highlights from the "Selected & Apply"
-    // popover, those picks may live on any page — not just the current one.
-    // Pull from the full session-wide highlight list so cross-page picks
-    // aren't silently dropped.
+    // Always pull from the full session-wide highlight list so highlights
+    // drawn on any page (not just the current one) are included in the template.
     const source = idsFilter
       ? allHighlights.filter(h => idsFilter.has(h.id))
-      : pageHighlights;
+      : allHighlights;
     if (source.length === 0) return;
     const next = { ...session.highlights };
-    // Skip the source pages of the picked highlights so we don't duplicate
-    // them on top of themselves.
-    const skipPages = new Set<number>(
-      idsFilter ? source.map(h => h.page) : [currentPage],
-    );
+    // Skip every page that already contributes a highlight to the source
+    // so we don't duplicate highlights on top of themselves.
+    const skipPages = new Set<number>(source.map(h => h.page));
     for (let p = 1; p <= totalPages; p++) {
       if (skipPages.has(p)) continue;
       // Append, don't replace — selecting a subset shouldn't wipe other highlights.
@@ -1014,7 +1079,7 @@ export default function PDFViewer({
       next[p] = idsFilter ? [...existing, ...cloned] : cloned;
     }
     onHighlightsChange(session.id, next);
-  }, [allHighlights, pageHighlights, session, totalPages, currentPage, onHighlightsChange]);
+  }, [allHighlights, session, totalPages, onHighlightsChange]);
 
   const handleApplyToPageRange = useCallback((pages: number[]) => {
     if (pageHighlights.length === 0 || pages.length === 0) return;
@@ -1380,7 +1445,7 @@ export default function PDFViewer({
         zoom={zoom ?? 1}
         tool={tool}
         isOcr={currentPageInfo?.is_ocr ?? false}
-        hasHighlightsOnPage={pageHighlights.length > 0}
+        hasHighlightsOnPage={allHighlights.length > 0}
         onPageChange={scrollToPage}
         onZoomChange={setZoom}
         onToolChange={handleToolChange}
@@ -1409,8 +1474,8 @@ export default function PDFViewer({
         selectedIds={selectedIds}
       />
 
-      {/* Auto-extract setup banner — only visible while collecting pairs */}
-      {autoSetupActive && (
+      {/* Auto-extract setup banner — visible while setup active AND bar not toggled off */}
+      {autoSetupActive && autoBarVisible && (
         <div className="bg-primary/5 border-b border-primary/30 shrink-0 px-3 py-2">
           <div className="flex items-center gap-2 text-xs">
             <span className="font-semibold text-primary">✨ Auto-extract setup</span>
@@ -1466,12 +1531,28 @@ export default function PDFViewer({
               {autoPairs.map((p, i) => (
                 <span
                   key={i}
-                  className={`px-2 py-0.5 rounded-md border
+                  className={`inline-flex items-center gap-1 pl-2 pr-1 py-0.5 rounded-md border
                     ${p.key
                       ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-600'
                       : 'bg-amber-500/10 border-amber-500/30 text-amber-600'}`}
                 >
                   {p.fieldLabel} {p.key ? '✓ value + key' : '✓ value · key…'}
+                  <button
+                    onClick={() => {
+                      setAutoPairs(prev => {
+                        const next = prev.filter((_, idx) => idx !== i);
+                        return next;
+                      });
+                      // If we were waiting for this pair's key, step back to 'value'.
+                      if (!p.key && autoNextStep === 'key') {
+                        setAutoNextStep('value');
+                      }
+                    }}
+                    title="Remove this pair"
+                    className="ml-0.5 opacity-60 hover:opacity-100 leading-none"
+                  >
+                    ×
+                  </button>
                 </span>
               ))}
             </div>

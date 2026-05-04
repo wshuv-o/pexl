@@ -32,7 +32,9 @@ export const FIELD_LABEL_SYNONYMS: Record<string, string[]> = {
 
   // ── Lease contract ────────────────────────────────────────────────
   lease_date:                 ['contract date', 'lease date', 'agreement date'],
-  parties:                    ['tenant name', 'tenant', 'lessee', 'renter', 'resident' ],
+  parties:                    ['tenant name', 'tenant', 'lessee', 'renter', 'resident'],
+  landlord_name:              ['landlord', 'landlord name', 'owner', 'lessor', 'property owner', 'management company'],
+  property_address:           ['property address', 'property', 'building address', 'premises', 'rental address', 'location'],
   utilities_included:         ['utilities included', 'utilities', 'included utilities'],
   lease_begin_date:           ['lease start', 'lease begin', 'lease commencement', 'start date'],
   lease_end_date:             ['lease end', 'lease expiration', 'end date', 'termination date', 'expiry date'],

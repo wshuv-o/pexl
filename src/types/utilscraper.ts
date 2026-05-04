@@ -71,6 +71,9 @@ export type FieldLabel =
   // Lease contract fields
   | 'lease_date'
   | 'parties'
+  | 'landlord_name'
+  | 'property_address'
+  | 'unit_number'
   | 'utilities_included'
   | 'lease_begin_date'
   | 'lease_end_date'
@@ -116,7 +119,7 @@ export const FIELD_LABELS: FieldLabelOption[] = [
   { value: 'provider_name',         label: 'Provider Name',       color: '#1d4ed8', bgColor: 'rgba(29,78,216,0.18)',   docTypes: ['utility_bill'] },
   { value: 'property_name',         label: 'Property Name',       color: '#2563eb', bgColor: 'rgba(37,99,235,0.18)',   docTypes: ['utility_bill', 'bank_statement', 'appraisal', 'tax'] },
   { value: 'account_number',        label: 'Account Number',      color: '#0891b2', bgColor: 'rgba(8,145,178,0.18)',   docTypes: ['utility_bill', 'bank_statement', 'tax'] },
-  { value: 'address',               label: 'Address',             color: '#0284c7', bgColor: 'rgba(2,132,199,0.18)',   docTypes: ['utility_bill', 'bank_statement', 'tax'] },
+  { value: 'address',               label: 'Address',             color: '#0284c7', bgColor: 'rgba(2,132,199,0.18)',   docTypes: ['utility_bill', 'bank_statement', 'tax', 'lease_contract'] },
   { value: 'billing_date',          label: 'Billing Date',        color: '#7c3aed', bgColor: 'rgba(124,58,237,0.18)',  docTypes: ['utility_bill'] },
   { value: 'total_gas_bill',        label: 'Total Gas',           color: '#dc2626', bgColor: 'rgba(220,38,38,0.18)',   docTypes: ['utility_bill'] },
   { value: 'total_electricity_bill',label: 'Total Electricity',   color: '#d97706', bgColor: 'rgba(217,119,6,0.18)',   docTypes: ['utility_bill'] },
@@ -140,6 +143,9 @@ export const FIELD_LABELS: FieldLabelOption[] = [
   // ── Lease contract fields ───────────────────────────────────────────
   { value: 'lease_date',                label: 'Contract Date',            color: '#7c3aed', bgColor: 'rgba(124,58,237,0.18)',  docTypes: ['lease_contract'] },
   { value: 'parties',                   label: 'Tenant Name(s)',           color: '#1d4ed8', bgColor: 'rgba(29,78,216,0.18)',   docTypes: ['lease_contract'] },
+  { value: 'landlord_name',             label: 'Landlord Name',            color: '#0891b2', bgColor: 'rgba(8,145,178,0.18)',   docTypes: ['lease_contract'] },
+  { value: 'property_address',          label: 'Property Address',         color: '#0369a1', bgColor: 'rgba(3,105,161,0.18)',   docTypes: ['lease_contract'] },
+  { value: 'unit_number',               label: 'Unit / Apt Number',        color: '#4f46e5', bgColor: 'rgba(79,70,229,0.18)',   docTypes: ['lease_contract'] },
   { value: 'utilities_included',        label: 'Utilities included in Rent', color: '#b45309', bgColor: 'rgba(180,83,9,0.18)', docTypes: ['lease_contract'] },
   { value: 'lease_begin_date',          label: 'Lease Start',              color: '#0891b2', bgColor: 'rgba(8,145,178,0.18)',   docTypes: ['lease_contract'] },
   { value: 'lease_end_date',            label: 'Lease End',                color: '#0284c7', bgColor: 'rgba(2,132,199,0.18)',   docTypes: ['lease_contract'] },

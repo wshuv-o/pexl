@@ -10,6 +10,7 @@ export default defineConfig(() => ({
     port: 8080,
     hmr: {
       overlay: false,
+      port: 8081,
     },
     allowedHosts: true as const,
   },

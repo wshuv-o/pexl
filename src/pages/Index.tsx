@@ -580,6 +580,9 @@ export default function Index() {
       valueHeight: number;
       sourceKeyX: number;
       sourceKeyY: number;
+      useAbsoluteCoords?: boolean;
+      absoluteValueX?: number;
+      absoluteValueY?: number;
     }>,
     tableOnly: boolean,
   ) => {
@@ -637,11 +640,37 @@ export default function Index() {
       // Cache backend search by key text for THIS target — one network
       // round-trip per key, then per-page lookup is local.
       const backendByKey = new Map<string, Map<number, { x: number; y: number; width: number; height: number }[]>>();
+      // Track the live session id for this target — may be renewed once if the
+      // original session expired (e.g. server restarted since upload).
+      let liveTargetId = target.id;
+      let targetSessionRenewed = false;
       const fetchBackendKey = async (q: string) => {
         if (backendByKey.has(q)) return backendByKey.get(q)!;
         const map = new Map<number, { x: number; y: number; width: number; height: number }[]>();
         for (const mode of ['exact', 'partial', 'fuzzy'] as const) {
-          const r = await searchBackend(target.id, q, mode);
+          let r = await searchBackend(liveTargetId, q, mode);
+          // null means HTTP error (likely 404 = session expired). Try re-uploading once.
+          if (r === null && !targetSessionRenewed && file) {
+            targetSessionRenewed = true;
+            console.warn(`[AutoApply] "${target.filename}" session expired — re-uploading…`);
+            try {
+              const { reprocessFile } = await import('@/lib/api');
+              const newId = await reprocessFile(file);
+              if (newId) {
+                liveTargetId = newId;
+                console.log(`[AutoApply] "${target.filename}" re-uploaded → session ${newId.slice(-6)}`);
+                // The re-upload creates a fresh session whose search index is not yet
+                // built. Building it (OCR on all pages) can take minutes for large
+                // scanned PDFs. Apply a timeout so we fall through to the source-page
+                // coordinate fallback quickly — the index will be cached for next time.
+                const ctrl = new AbortController();
+                const timer = setTimeout(() => ctrl.abort(), 20_000);
+                try {
+                  r = await searchBackend(liveTargetId, q, mode, { signal: ctrl.signal });
+                } catch { r = null; } finally { clearTimeout(timer); }
+              }
+            } catch { /* fall through to pdfjs */ }
+          }
           if (!r || r.results.length === 0) continue;
           for (const m of r.results) {
             const dims = r.page_sizes[String(m.page)];
@@ -667,18 +696,41 @@ export default function Index() {
         if (pg % 5 === 0) await new Promise(r => setTimeout(r, 0));
         for (const p of pairs) {
           try {
-            let match: { x: number; y: number; width: number; height: number } | null = null;
-            const backendMap = await fetchBackendKey(p.keyText);
-            match = await preferInTable(backendMap.get(pg) ?? [], pg);
-            if (!match) {
-              const cands = await findAllTextPositionsInPdfPage(file, pg, p.keyText);
-              match = await preferInTable(cands, pg);
+            let x: number, y: number, w: number, h: number;
+
+            if (p.useAbsoluteCoords) {
+              // Key was completely unreadable — apply only to the same page as the
+              // source drawing; placing at absolute coords on every page is wrong.
+              if (pg !== p.sourcePage) continue;
+              x = p.absoluteValueX!;
+              y = p.absoluteValueY!;
+              w = p.valueWidth;
+              h = p.valueHeight;
+            } else {
+              let match: { x: number; y: number; width: number; height: number } | null = null;
+              const backendMap = await fetchBackendKey(p.keyText);
+              match = await preferInTable(backendMap.get(pg) ?? [], pg);
+              if (!match) {
+                const cands = await findAllTextPositionsInPdfPage(file, pg, p.keyText);
+                match = await preferInTable(cands, pg);
+              }
+              if (!match) {
+                // Key readable (OCR got text) but not in the search index — the label
+                // is image-embedded (e.g. DocuSign form background). Fall back to the
+                // drawn box coordinates, but only for the matching source page.
+                if (pg !== p.sourcePage) continue;
+                x = clamp01(p.sourceKeyX + p.offsetX);
+                y = clamp01(p.sourceKeyY + p.offsetY);
+                w = p.valueWidth;
+                h = p.valueHeight;
+              } else {
+                x = clamp01(match.x + p.offsetX);
+                y = clamp01(match.y + p.offsetY);
+                w = Math.min(p.valueWidth,  0.999 - x);
+                h = Math.min(p.valueHeight, 0.999 - y);
+              }
             }
-            if (!match) continue;
-            const x = clamp01(match.x + p.offsetX);
-            const y = clamp01(match.y + p.offsetY);
-            const w = Math.min(p.valueWidth,  0.999 - x);
-            const h = Math.min(p.valueHeight, 0.999 - y);
+
             if (w <= 0 || h <= 0) continue;
             const hl: Highlight = {
               id: `auto-${Date.now()}-${target.id.slice(-4)}-${pg}-${p.field}-${Math.random().toString(36).slice(2, 5)}`,

@@ -4,15 +4,49 @@ import { extractFromRegions } from './pdf-extract';
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000' ;
 
-// Strip emoji, dingbats, decorative symbols, and hidden binary strings from extracted text
+// Strip emoji, dingbats, decorative symbols, hidden binary strings, and
+// e-signature platform artifacts (DocuSign, Adobe Sign, etc.) from extracted text.
 function sanitizeValue(val: string | null | undefined): string | null {
   if (!val) return val ?? null;
   const cleaned = val
+    // DocuSign / Adobe Sign placeholder tags: [text|req|signer1 ...], [sig|req|signer2], etc.
+    .replace(/\[(?:text|sig|date|initial|checkbox|radio|attachment|note)[^\]]*\]/gi, '')
+    // "Doc ID: <hash>" footers injected on every page by DocuSign
+    .replace(/\bDoc(?:ument)?\s*ID\s*:\s*\S+/gi, '')
+    // Generic e-sig annotation brackets that survived (any remaining [word|...] pattern)
+    .replace(/\[[a-z]+\|[^\]]{0,120}\]/gi, '')
     .replace(/[^\p{L}\p{N}\p{P}\p{Z}\p{Sc}\p{Sm}]/gu, '')
     .replace(/\b[01]{8,}\b/g, '')       // strip binary-encoded hidden numbers (8+ digits of only 0/1)
     .replace(/\s+/g, ' ')
     .trim();
-  return cleaned || null;
+  // Deduplicate exact doubled strings: "3450 3450" → "3450", "Hello Hello" → "Hello".
+  // Caused by image + text layer both being extracted for the same region.
+  const deduped = (() => {
+    if (cleaned.length < 2) return cleaned;
+    // Word-level dedup (with space separator)
+    const spaceHalf = Math.floor(cleaned.length / 2);
+    if (cleaned.length % 2 === 1) {
+      // odd length — check if there's a space in the middle
+      const mid = (cleaned.length - 1) / 2;
+      if (cleaned[mid] === ' ') {
+        const a = cleaned.slice(0, mid);
+        const b = cleaned.slice(mid + 1);
+        if (a === b) return a;
+      }
+    } else {
+      const a = cleaned.slice(0, spaceHalf);
+      const b = cleaned.slice(spaceHalf);
+      if (a === b) return a;
+      // also check with space separator at midpoint
+      if (cleaned[spaceHalf] === ' ') {
+        const a2 = cleaned.slice(0, spaceHalf);
+        const b2 = cleaned.slice(spaceHalf + 1);
+        if (a2 === b2) return a2;
+      }
+    }
+    return cleaned;
+  })();
+  return deduped || null;
 }
 
 const MONTH_MAP: Record<string, number> = {
@@ -53,6 +87,13 @@ function normalizeDateValue(raw: string): string {
   // --- Normalise whitespace ---
   s = s.replace(/[,]+/g, ' ');
   s = s.replace(/\s+/g, ' ').trim();
+
+  // --- Numeric date with spaces around separators: "01 / 31 / 2026" or "1-31-2026" ---
+  // DocuSign date fields often insert spaces around the slash separator.
+  const numericSpaced = s.replace(/\s*[/-]\s*/g, '/').match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (numericSpaced) {
+    return `${numericSpaced[1].padStart(2, '0')}/${numericSpaced[2].padStart(2, '0')}/${numericSpaced[3]}`;
+  }
 
   // --- Try to parse "D Month YYYY" or "Month D YYYY" ---
   const patA = s.match(/^(\d{1,2})\s+([a-zA-Z]+)\s+(\d{4})$/);
@@ -124,6 +165,14 @@ function normalizeYearValue(raw: string): string {
 function normalizeAmountValue(raw: string): string {
   let s = raw.replace(/[^0-9.,$-]/g, '').trim();
   s = s.replace(/[$,]/g, '');
+
+  // OCR/text-layer duplication: "34503450" → "3450", "1234.561234.56" → "1234.56".
+  // Happens when the image layer and the text layer both contain the same number
+  // and both are picked up by the extractor.
+  if (s.length >= 2 && s.length % 2 === 0) {
+    const half = s.length / 2;
+    if (s.slice(0, half) === s.slice(half)) s = s.slice(0, half);
+  }
 
   const concatMatch = s.match(/^(-?\d+\.\d{2})(\d+\.\d{2})$/);
   if (concatMatch) s = concatMatch[1];
@@ -599,11 +648,28 @@ export async function processFile(
   }
 }
 
+/**
+ * Re-upload a file to the backend and return the new session_id.
+ * Returns null on failure. Used by consumers that detect a stale session.
+ */
+export async function reprocessFile(file: File): Promise<string | null> {
+  try {
+    const formData = new FormData();
+    formData.append('file', file);
+    const resp = await fetch(`${BACKEND_URL}/api/utility/process`, { method: 'POST', body: formData });
+    if (resp.ok) {
+      const data = await resp.json();
+      return data.session_id as string;
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
 export async function extractRegions(
   sessionId: string,
   highlights: Highlight[],
   file?: File,
-  opts: { strict?: boolean } = {},
+  opts: { strict?: boolean; onSessionRenewed?: (oldId: string, newId: string) => void } = {},
 ): Promise<ExtractedRow[]> {
 
   // Must have at least one highlight
@@ -636,16 +702,13 @@ export async function extractRegions(
       // 404 = session expired — re-process the file and retry once
       if (res.status === 404 && file) {
         console.warn('Session expired — re-uploading file and retrying...');
-        const formData = new FormData();
-        formData.append('file', file);
-        const reprocess = await fetch(`${BACKEND_URL}/api/utility/process`, {
-          method: 'POST',
-          body: formData,
-        });
-        if (reprocess.ok) {
-          const redata = await reprocess.json();
+        const newSessionId = await reprocessFile(file);
+        if (newSessionId) {
+          // Notify caller so it can update its session reference before
+          // making any further backend calls with the same session_id.
+          opts.onSessionRenewed?.(sessionId, newSessionId);
           const retryBody = JSON.stringify({
-            session_id: redata.session_id,
+            session_id: newSessionId,
             strict,
             highlights: highlights.map(h => ({
               page: h.page, field: h.field,
