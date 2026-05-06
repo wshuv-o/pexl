@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import * as XLSX from 'xlsx-js-style';
 import type { ExtractedRow } from '@/types/utilscraper';
-import { getFieldLabelsForType, DOCUMENT_TYPES, type DocumentType } from '@/types/utilscraper';
+import { getFieldLabelsForType, FIELD_LABELS, type DocumentType } from '@/types/utilscraper';
 import { downloadBankStatementExcel } from './bank-excel-export';
 
 const C = {
@@ -188,10 +188,14 @@ function applyStyles(
 }
 
 function detectDocType(rows: ExtractedRow[]): DocumentType {
+  // Only count fields exclusive to one doc type. Shared fields like
+  // property_name / account_number / address appear in multiple types and
+  // were previously mapped to whichever type came last in DOCUMENT_TYPES
+  // ('tax'), causing utility bills to be misidentified as tax documents.
   const fieldToType: Record<string, DocumentType> = {};
-  for (const dt of DOCUMENT_TYPES) {
-    for (const f of getFieldLabelsForType(dt.value)) {
-      if (f.value !== 'custom') fieldToType[f.value] = dt.value;
+  for (const f of FIELD_LABELS) {
+    if (f.value !== 'custom' && f.docTypes.length === 1) {
+      fieldToType[f.value] = f.docTypes[0];
     }
   }
   const typeCounts: Record<string, number> = {};

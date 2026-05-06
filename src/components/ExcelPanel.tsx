@@ -11,7 +11,7 @@ import {
   type MergeGroup, type MergeChoice,
 } from '@/lib/bank-excel-export';
 import MergeDialog from '@/components/bank/MergeDialog';
-import { DOCUMENT_TYPES, getFieldLabelsForType } from '@/types/utilscraper';
+import { FIELD_LABELS } from '@/types/utilscraper';
 
 interface Props {
   data: ExtractedRow[];
@@ -22,8 +22,8 @@ interface Props {
   onDataChange: (data: ExtractedRow[]) => void;
   multiFile?: boolean;
   onDownload?: () => void;
-  // Clicking a row jumps the PDF viewer to that sessionId/page.
   onRowClick?: (sessionId: string, page: number) => void;
+  onDeleteRow?: (sessionId: string, page: number) => void;
 }
 
 const CONF_PCT: Record<string, number> = { high: 95, medium: 65, low: 25 };
@@ -32,9 +32,9 @@ const CONF_PCT: Record<string, number> = { high: 95, medium: 65, low: 25 };
 // doc type for this batch is utility_bill.
 function isUtilityExport(rows: ExtractedRow[]): boolean {
   const fieldToType: Record<string, string> = {};
-  for (const dt of DOCUMENT_TYPES) {
-    for (const f of getFieldLabelsForType(dt.value)) {
-      if (f.value !== 'custom') fieldToType[f.value] = dt.value;
+  for (const f of FIELD_LABELS) {
+    if (f.value !== 'custom' && f.docTypes.length === 1) {
+      fieldToType[f.value] = f.docTypes[0];
     }
   }
   const counts: Record<string, number> = {};
@@ -142,7 +142,7 @@ const parseDateValue = (val: string): number => {
 const isDateField = (field: string): boolean => /date$/i.test(field);
 
 export default function ExcelPanel({
-  data, filename, provider, onClose, onReExtract, onDataChange, multiFile, onDownload, onRowClick,
+  data, filename, provider, onClose, onReExtract, onDataChange, multiFile, onDownload, onRowClick, onDeleteRow,
 }: Props) {
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const [mergeGroups, setMergeGroups] = useState<MergeGroup[] | null>(null);
@@ -322,6 +322,7 @@ export default function ExcelPanel({
   const handleDeleteRow = (row: DisplayRow) => {
     const next = data.filter(r => !(r.sessionId === row.sessionId && r.page === row.page));
     onDataChange(next);
+    onDeleteRow?.(row.sessionId, row.page);
     if (selectedRowKey === `${row.sessionId}-${row.page}-${row.subIndex}`) setSelectedRowKey(null);
   };
 
@@ -537,7 +538,43 @@ export default function ExcelPanel({
                           const cell = row.cells[f];
                           const cellKey = `${g.sessionId}-${row.page}-${row.subIndex}-${f}`;
                           if (!cell) {
-                            return <td key={f} className="px-3 py-2 text-muted-foreground/30 italic border-l border-border/40 whitespace-nowrap">—</td>;
+                            const emptyCellKey = `${g.sessionId}-${row.page}-${row.subIndex}-${f}`;
+                            const isEditingEmpty = editingKey === emptyCellKey;
+                            return (
+                              <td
+                                key={f}
+                                className="px-3 py-2 border-l border-border/40 min-w-[120px] cursor-text"
+                                onDoubleClick={() => setEditingKey(emptyCellKey)}
+                                title="Double-click to add value"
+                              >
+                                {isEditingEmpty ? (
+                                  <input
+                                    className="w-full bg-card border border-primary rounded px-2 py-1 text-xs outline-none shadow-sm text-foreground"
+                                    defaultValue=""
+                                    autoFocus
+                                    onClick={e => e.stopPropagation()}
+                                    onBlur={e => {
+                                      const val = e.target.value.trim();
+                                      if (val) {
+                                        onDataChange([...data, {
+                                          page: row.page, field: f, value: val,
+                                          confidence: 'high', wasOcr: false,
+                                          filename: row.filename, sessionId: row.sessionId,
+                                          edited: true,
+                                        }]);
+                                      }
+                                      setEditingKey(null);
+                                    }}
+                                    onKeyDown={e => {
+                                      if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                                      if (e.key === 'Escape') setEditingKey(null);
+                                    }}
+                                  />
+                                ) : (
+                                  <span className="text-muted-foreground/30 italic">—</span>
+                                )}
+                              </td>
+                            );
                           }
                           const isNull  = cell.value === null || cell.value === undefined || cell.value === '';
                           const pct     = CONF_PCT[cell.confidence ?? 'low'] ?? 25;

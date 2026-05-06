@@ -3,7 +3,7 @@ import {
   ChevronLeft, ChevronRight, ZoomIn, ZoomOut,
   MousePointer2, Eraser, Loader2, TextCursor,
   FileDown, FileInput, FileStack, Trash2, ListChecks, ChevronDown, Search,
-  SlidersHorizontal, Download, MousePointerClick, Wand2, Filter, Check,
+  SlidersHorizontal, Download, MousePointerClick, Wand2, Filter, Check, FileSpreadsheet,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -54,6 +54,9 @@ interface ViewerToolbarProps {
   // OCR download
   onDownloadOcr: () => void;
   downloadingOcr: boolean;
+  // Excel table export
+  onDownloadExcel: () => void;
+  downloadingExcel: boolean;
   // Auto-search: find field labels in the PDF and auto-create highlights
   // over their adjacent values. Available for all doc types.
   onAutoSearch: () => void;
@@ -87,6 +90,7 @@ export default function ViewerToolbar({
   fineRotation, onFineRotationChange,
   onStartPageChange,
   onDownloadOcr, downloadingOcr,
+  onDownloadExcel, downloadingExcel,
   onAutoSearch, autoSearching,
 }: ViewerToolbarProps) {
   // Relative page numbering when startPage > 1 (cover pages skipped)
@@ -531,6 +535,26 @@ export default function ViewerToolbar({
         </TooltipTrigger>
         <TooltipContent side="bottom" className="max-w-[200px] text-xs">
           Download OCR'd PDF
+        </TooltipContent>
+      </Tooltip>
+
+      {/* Download tables as Excel */}
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            className="p-1.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted
+                       disabled:opacity-30 disabled:cursor-not-allowed transition-colors shrink-0"
+            onClick={onDownloadExcel}
+            disabled={downloadingExcel}
+            aria-label="Download tables as Excel"
+          >
+            {downloadingExcel
+              ? <Loader2 className="w-4 h-4 animate-spin" />
+              : <FileSpreadsheet className="w-4 h-4" />}
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="bottom" className="max-w-[200px] text-xs">
+          Download tables as Excel (.xlsx)
         </TooltipContent>
       </Tooltip>
 

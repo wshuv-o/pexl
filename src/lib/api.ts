@@ -134,7 +134,7 @@ const DATE_FIELDS = new Set([
 const AMOUNT_FIELDS = new Set([
   'total_gas_bill', 'total_electricity_bill', 'total_internet_bill',
   'total_phone_bill', 'total_water_bill', 'total_sewer_bill',
-  'total_water_sewer_bill', 'total_trash_bill',
+  'total_water_sewer_bill', 'total_trash_bill', 'total_utilities',
   'beginning_balance', 'ending_balance', 'total_credits', 'total_debits',
   'appraised_as_is_value',
   'security_deposit', 'rent_and_charges', 'monthly_rent',
@@ -405,6 +405,40 @@ export async function downloadOcrPdf(
   const stem = originalName.replace(/\.(docx?|pdf)$/i, '') || sessionId;
   triggerDownload(result.blob, `${stem}_ocr.pdf`);
   return { newSessionId: result.newSessionId };
+}
+
+export async function fetchTableRegions(
+  sessionId: string,
+): Promise<Record<number, Array<{ x: number; y: number; width: number; height: number }>>> {
+  try {
+    const res = await fetch(`${BACKEND_URL}/api/utility/session/${sessionId}/tables`);
+    if (!res.ok) return {};
+    const data = await res.json();
+    const out: Record<number, Array<{ x: number; y: number; width: number; height: number }>> = {};
+    for (const [page, boxes] of Object.entries((data as { tables: Record<string, unknown[]> }).tables ?? {})) {
+      out[parseInt(page)] = boxes as Array<{ x: number; y: number; width: number; height: number }>;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+export async function downloadExcel(
+  sessionId: string,
+  originalName: string,
+): Promise<void> {
+  const res = await fetch(`${BACKEND_URL}/api/utility/session/${sessionId}/excel`);
+  if (res.status === 404) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error((data as { error?: string }).error ?? 'No tables found in this PDF');
+  }
+  if (!res.ok) {
+    throw new Error(`Excel export failed (${res.status})`);
+  }
+  const blob = await res.blob();
+  const stem = originalName.replace(/\.(docx?|pdf)$/i, '') || sessionId;
+  triggerDownload(blob, `${stem}_tables.xlsx`);
 }
 
 export type SearchMode = 'exact' | 'partial' | 'fuzzy';

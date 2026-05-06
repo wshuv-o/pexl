@@ -57,6 +57,7 @@ export type FieldLabel =
   | 'total_sewer_bill'
   | 'total_water_sewer_bill'
   | 'total_trash_bill'
+  | 'total_utilities'
   // Bank statement fields
   | 'beginning_balance'
   | 'ending_balance'
@@ -129,6 +130,7 @@ export const FIELD_LABELS: FieldLabelOption[] = [
   { value: 'total_internet_bill',   label: 'Total Internet',      color: '#7c3aed', bgColor: 'rgba(124,58,237,0.18)',  docTypes: ['utility_bill'] },
   { value: 'total_phone_bill',      label: 'Total Phone',         color: '#9333ea', bgColor: 'rgba(147,51,234,0.18)',  docTypes: ['utility_bill'] },
   { value: 'total_trash_bill',      label: 'Total Trash',         color: '#65a30d', bgColor: 'rgba(101,163,13,0.18)',  docTypes: ['utility_bill'] },
+  { value: 'total_utilities',       label: 'Total Utilities',     color: '#059669', bgColor: 'rgba(5,150,105,0.18)',   docTypes: ['utility_bill'] },
   // ── Bank statement fields ─────────────────────────────────────────
   { value: 'beginning_balance',     label: 'Beginning Balance',   color: '#16a34a', bgColor: 'rgba(22,163,74,0.18)',   docTypes: ['bank_statement'] },
   { value: 'ending_balance',        label: 'Ending Balance',      color: '#dc2626', bgColor: 'rgba(220,38,38,0.18)',   docTypes: ['bank_statement'] },

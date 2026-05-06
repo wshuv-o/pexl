@@ -6,7 +6,7 @@ import ViewerToolbar from './ViewerToolbar';
 import HighlightOverlay from './HighlightOverlay';
 import FieldLabelPicker from './FieldLabelPicker';
 import HighlightLegend from './HighlightLegend';
-import { downloadOcrPdf, extractRegions, searchBackend, type SearchMode } from '@/lib/api';
+import { downloadOcrPdf, downloadExcel, fetchTableRegions, extractRegions, searchBackend, type SearchMode } from '@/lib/api';
 import { findAllTextPositionsInPdfPage, detectTableRegionsInPdfPage, getTextAtRect } from '@/lib/pdf-extract';
 import { toast } from 'sonner';
 
@@ -123,6 +123,7 @@ export default function PDFViewer({
   const [activeMatchIdx, setActiveMatchIdx] = useState<number>(-1);
   const [pdfLoaded, setPdfLoaded]       = useState(false);
   const [downloadingOcr, setDownloadingOcr] = useState(false);
+  const [downloadingExcel, setDownloadingExcel] = useState(false);
 
   // ── Auto-extract setup mode (replaces the old guided auto-search) ─────
   // Click the magic-wand button to enter setup. The user draws value
@@ -358,7 +359,7 @@ export default function PDFViewer({
           // ready yet; the source-page fallback handles it and the index is cached
           // for the next run.
           const ctrl = new AbortController();
-          const timer = setTimeout(() => ctrl.abort(), 20_000);
+          const timer = setTimeout(() => ctrl.abort(), 5_000);
           let r: Awaited<ReturnType<typeof searchBackend>>;
           try {
             r = await searchBackend(sessionIdRef.current, q, mode, { signal: ctrl.signal });
@@ -384,30 +385,43 @@ export default function PDFViewer({
         return map;
       };
 
-      console.group(`[AutoSearch] applyAllPages — ${resolved.length} pair(s), ${lastPage} page(s)`);
-      console.log('pairs:', resolved.map(r => `"${r.keyText}" offset(${r.offsetX.toFixed(3)},${r.offsetY.toFixed(3)})`));
-
       // Skip every page that was a source for any pair, not just the first.
       const sourcePages = new Set(resolved.map(r => r.sourcePage));
 
+      // Prefetch all backend keys in parallel before the page loop so we don't
+      // block each page on a sequential network round-trip.
+      await Promise.all(resolved.filter(r => !r.useAbsoluteCoords).map(r => fetchBackendKey(r.keyText)));
+
       // Per-page table region cache — detect once per page, reuse across pairs.
+      // When tableOnly is on, pre-seed from camelot backend (more accurate than
+      // pdfjs text-clustering). Pages absent from the backend response fall back
+      // to pdfjs detectTableRegionsInPdfPage.
       const tableCache = new Map<number, Array<{ x: number; y: number; width: number; height: number }>>();
+      if (tableOnly) {
+        try {
+          const backendRegions = await fetchTableRegions(sessionIdRef.current);
+          for (const [pg, boxes] of Object.entries(backendRegions)) {
+            tableCache.set(Number(pg), boxes);
+          }
+        } catch {
+          // backend unavailable — pdfjs fallback below
+        }
+      }
       const getTables = async (pg: number) => {
         if (tableCache.has(pg)) return tableCache.get(pg)!;
         const t = await detectTableRegionsInPdfPage(file, pg);
         tableCache.set(pg, t);
         return t;
       };
-      // Return the first candidate whose centre lies inside a detected table region.
-      // When tableOnly=true, return null for any candidate not in a table so the
-      // highlight is skipped entirely on that page.
       const preferInTable = async (
         cands: Array<{ x: number; y: number; width: number; height: number }>,
         pg: number,
       ) => {
         if (cands.length === 0) return null;
+        // Skip table detection when there is only one candidate and we are not
+        // in table-only mode — no disambiguation needed, saves two worker calls.
+        if (cands.length === 1 && !tableOnly) return cands[0];
         const tables = await getTables(pg);
-        console.log(`  detected tables (${tables.length}):`, tables);
         if (tables.length > 0) {
           const inTable = cands.filter(c =>
             tables.some(t =>
@@ -415,16 +429,9 @@ export default function PDFViewer({
               c.y + c.height / 2 >= t.y && c.y + c.height / 2 <= t.y + t.height,
             ),
           );
-          if (inTable.length > 0) {
-            console.log(`  table match →`, inTable[0]);
-            return inTable[0];
-          }
+          if (inTable.length > 0) return inTable[0];
         }
-        if (tableOnly) {
-          console.log(`  no table match — SKIPPED (table-only mode)`);
-          return null;
-        }
-        console.log(`  no table match — using first candidate →`, cands[0]);
+        if (tableOnly) return null;
         return cands[0];
       };
 
@@ -435,48 +442,37 @@ export default function PDFViewer({
 
         for (const r of resolved) {
           try {
-            console.group(`  pg=${pg} field="${r.field}" key="${r.keyText || '(abs)'}"`);
-
             let x: number, y: number, w: number, h: number;
 
             if (r.useAbsoluteCoords) {
-              // Key text unreadable on source — only valid on the source page layout.
-              if (pg !== r.sourcePage) { console.log('  abs-coords: non-source page — skipping'); console.groupEnd(); continue; }
+              if (pg !== r.sourcePage) continue;
               x = r.absoluteValueX!;
               y = r.absoluteValueY!;
               w = r.valueWidth;
               h = r.valueHeight;
-              console.log(`  absolute-coords fallback → x=${x.toFixed(3)} y=${y.toFixed(3)}`);
             } else {
               let match: { x: number; y: number; width: number; height: number } | null = null;
               const map = await fetchBackendKey(r.keyText);
               const backendList = map.get(pg) ?? [];
-              console.log(`  backend hits (${backendList.length}):`, backendList);
               match = await preferInTable(backendList, pg);
               if (!match) {
                 const cands = await findAllTextPositionsInPdfPage(file, pg, r.keyText);
-                console.log(`  pdfjs candidates (${cands.length}):`, cands);
                 match = await preferInTable(cands, pg);
               }
               if (!match) {
-                // Label is image-embedded (not in text/search index). Fall back to
-                // drawn coordinates on the source page; skip all other pages.
-                if (pg !== r.sourcePage) { console.log('  SKIPPED — key not found'); console.groupEnd(); continue; }
+                if (pg !== r.sourcePage) continue;
                 x = clamp01(r.sourceKeyX + r.offsetX);
                 y = clamp01(r.sourceKeyY + r.offsetY);
                 w = r.valueWidth;
                 h = r.valueHeight;
-                console.log(`  drawn-coords fallback → x=${x.toFixed(3)} y=${y.toFixed(3)}`);
               } else {
                 x = clamp01(match.x + r.offsetX);
                 y = clamp01(match.y + r.offsetY);
                 w = Math.min(r.valueWidth,  0.999 - x);
                 h = Math.min(r.valueHeight, 0.999 - y);
-                console.log(`  placed → x=${x.toFixed(3)} y=${y.toFixed(3)} w=${w.toFixed(3)} h=${h.toFixed(3)}`);
               }
             }
 
-            console.groupEnd();
             if (w <= 0 || h <= 0) continue;
             const hl: Highlight = {
               id: `auto-${Date.now()}-${pg}-${r.field}-${Math.random().toString(36).slice(2, 5)}`,
@@ -489,13 +485,9 @@ export default function PDFViewer({
             added++;
           } catch (err) {
             console.warn('[applyAllPages] place failed:', err);
-            console.groupEnd();
           }
         }
       }
-
-      console.log(`[AutoSearch] applyAllPages done — added=${added} pagesScanned=${pagesScanned}`);
-      console.groupEnd();
       onHighlightsChange(session.id, merged);
       if (added > 0) {
         toast.success(`Placed ${added} highlight${added !== 1 ? 's' : ''} across ${pagesScanned} page${pagesScanned !== 1 ? 's' : ''}.`);
@@ -581,6 +573,18 @@ export default function PDFViewer({
     }
     setDownloadingOcr(false);
   }, [session.id, session.filename, session.file, onSessionRenewed]);
+
+  const handleDownloadExcel = useCallback(async () => {
+    setDownloadingExcel(true);
+    try {
+      await downloadExcel(session.id, session.filename);
+      toast.success('Excel tables downloaded');
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Excel export failed';
+      toast.error(msg);
+    }
+    setDownloadingExcel(false);
+  }, [session.id, session.filename]);
 
   const pageRefs  = useRef<Record<number, HTMLDivElement | null>>({});
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -1235,6 +1239,24 @@ export default function PDFViewer({
     };
   }, [scrollToPageTrigger, pdfLoaded, totalPages]);
 
+  // Ctrl+scroll → zoom in / out.
+  // Listening on window (not scrollRef.current) so the handler is always
+  // registered regardless of render timing. The ref is checked lazily inside
+  // the handler so we only zoom when the pointer is over the PDF viewer.
+  useEffect(() => {
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey) return;
+      const container = scrollRef.current;
+      if (!container || !container.contains(e.target as Node)) return;
+      e.preventDefault();
+      const delta = e.deltaY > 0 ? -0.1 : 0.1;
+      setZoom(prev => parseFloat(Math.max(0.3, Math.min(5.0, (prev ?? 1) + delta)).toFixed(2)));
+    };
+    window.addEventListener('wheel', onWheel, { passive: false });
+    return () => window.removeEventListener('wheel', onWheel);
+  }, []);
+
+
   const handleSearch = useCallback(async (query: string) => {
     setSearchQuery(query);
 
@@ -1469,6 +1491,8 @@ export default function PDFViewer({
         onStartPageChange={(sp) => onStartPageChange(session.id, sp)}
         onDownloadOcr={handleDownloadOcr}
         downloadingOcr={downloadingOcr}
+        onDownloadExcel={handleDownloadExcel}
+        downloadingExcel={downloadingExcel}
         onAutoSearch={handleAutoSearch}
         autoSearching={false}
         selectedIds={selectedIds}

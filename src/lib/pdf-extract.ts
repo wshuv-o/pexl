@@ -20,6 +20,32 @@ pdfjs.GlobalWorkerOptions.workerSrc = new URL(
 // ---------------------------------------------------------------------------
 const _docCache = new Map<string, { proxy: any; ts: number; blobUrl: string }>();
 
+// Per-page text-content cache — one getTextContent() call shared between
+// detectTableRegionsInPdfPage and findAllTextPositionsInPdfPage so the pdfjs
+// worker is not hit twice for the same page during auto-apply.
+const _pageContentCache = new Map<string, { items: any[]; vp: any; ts: number }>();
+
+function _fileKey(file: File) { return `${file.name}::${file.size}::${file.lastModified}`; }
+
+async function getPageContentCached(
+  file: File, pdf: any, pageNumber: number,
+): Promise<{ page: any; items: any[]; vp: any }> {
+  const key = `${_fileKey(file)}::${pageNumber}`;
+  const page = await pdf.getPage(pageNumber);
+  const hit = _pageContentCache.get(key);
+  if (hit) { hit.ts = Date.now(); return { page, items: hit.items, vp: hit.vp }; }
+  const vp      = page.getViewport({ scale: 1 });
+  const content = await page.getTextContent({ includeMarkedContent: false });
+  const items   = content.items as any[];
+  _pageContentCache.set(key, { items, vp, ts: Date.now() });
+  // Evict entries older than 5 minutes
+  const cutoff = Date.now() - 5 * 60 * 1000;
+  for (const [k, v] of _pageContentCache) {
+    if (k !== key && v.ts < cutoff) _pageContentCache.delete(k);
+  }
+  return { page, items, vp };
+}
+
 async function getDocumentCached(file: File): Promise<any> {
   const key = `${file.name}::${file.size}::${file.lastModified}`;
   const hit = _docCache.get(key);
@@ -48,13 +74,17 @@ async function getDocumentCached(file: File): Promise<any> {
 /** Call this when a session is closed to free the cached document. */
 export function clearDocumentCache(file?: File): void {
   if (file) {
-    const key = `${file.name}::${file.size}::${file.lastModified}`;
+    const key = _fileKey(file);
     const entry = _docCache.get(key);
     if (entry) URL.revokeObjectURL(entry.blobUrl);
     _docCache.delete(key);
+    for (const k of _pageContentCache.keys()) {
+      if (k.startsWith(key + '::')) _pageContentCache.delete(k);
+    }
   } else {
     for (const v of _docCache.values()) URL.revokeObjectURL(v.blobUrl);
     _docCache.clear();
+    _pageContentCache.clear();
   }
 }
 
@@ -494,116 +524,94 @@ export async function extractFromRegions(
   highlights: { page: number; field: string; x: number; y: number; width: number; height: number }[],
 ): Promise<ExtractedRow[]> {
   const pdf = await getDocumentCached(file);
-  const results: ExtractedRow[] = [];
 
-  // Group highlights by page so we open each page only once
+  // Group highlights by page so we open each page only once.
   const byPage = new Map<number, typeof highlights>();
   for (const h of highlights) {
     if (!byPage.has(h.page)) byPage.set(h.page, []);
     byPage.get(h.page)!.push(h);
   }
 
-  for (const [pageNum, pageHighlights] of byPage.entries()) {
-    const page = await pdf.getPage(pageNum);
-    const content = await page.getTextContent();
-    const viewport = page.getViewport({ scale: 1 });
-    const pageWidth = viewport.width;
-    const pageHeight = viewport.height;
+  // Process all pages concurrently — each page is an independent pdfjs worker call.
+  const pageChunks = await Promise.all(
+    Array.from(byPage.entries()).map(async ([, pageHighlights]) => {
+      const pg = pageHighlights[0].page;
+      const { items, vp: viewport } = await getPageContentCached(file, pdf, pg);
+      const pageWidth  = viewport.width;
+      const pageHeight = viewport.height;
+      const scanned    = isScannedPage(items);
+      const chunk: ExtractedRow[] = [];
 
-    const items = content.items as any[];
-    const scanned = isScannedPage(items);
-
-    for (const hl of pageHighlights) {
-      // If the page is scanned, pdfjs has no text — signal that OCR is needed
-      if (scanned) {
-        results.push({
-          page: hl.page,
-          field: hl.field,
-          value: null,
-          confidence: 'low',
-          wasOcr: true,    // ← tells the caller "retry this with the backend OCR"
-        });
-        continue;
-      }
-
-      // Exact highlight rect in PDF points — no padding.
-      // Padding was pulling in text from neighboring rows/columns.
-      const hlLeft   = hl.x * pageWidth;
-      const hlRight  = (hl.x + hl.width)  * pageWidth;
-      const hlTop    = hl.y * pageHeight;
-      const hlBottom = (hl.y + hl.height) * pageHeight;
-
-      // Collect matched items with their positions
-      const matchedItems: { x: number; y: number; str: string }[] = [];
-
-      for (const item of items) {
-        if (!item.str || !item.transform) continue;
-        const str = item.str;
-        if (!str.trim()) continue;
-        // Skip items that are purely binary-encoded hidden numbers
-        if (/^[01]{8,}$/.test(str.trim())) continue;
-
-        const bb = itemAABB(item, pageHeight);
-
-        // Row filter: center-Y must be inside highlight (prevents above/below row bleed)
-        const inRow = bb.centerY >= hlTop && bb.centerY <= hlBottom;
-
-        // Column filter: at least 40% of item width must overlap highlight horizontally
-        const xOverlap = Math.min(bb.right, hlRight) - Math.max(bb.left, hlLeft);
-        const inCol = bb.width > 0 && (xOverlap / bb.width) >= 0.4;
-
-        if (inRow && inCol) {
-          matchedItems.push({ x: bb.left, y: bb.top, str });
+      for (const hl of pageHighlights) {
+        if (scanned) {
+          chunk.push({ page: hl.page, field: hl.field, value: null, confidence: 'low', wasOcr: true });
+          continue;
         }
-      }
 
-      const deduped: typeof matchedItems = [];
-      for (const item of matchedItems) {
-        const isDup = deduped.some(
-          d => d.str === item.str && Math.abs(d.x - item.x) < 4 && Math.abs(d.y - item.y) < 4
-        );
-        if (!isDup) deduped.push(item);
-      }
+        const hlLeft   = hl.x * pageWidth;
+        const hlRight  = (hl.x + hl.width)  * pageWidth;
+        const hlTop    = hl.y * pageHeight;
+        const hlBottom = (hl.y + hl.height) * pageHeight;
 
-      deduped.sort((a, b) => {
-        const lineDiff = a.y - b.y;
-        if (Math.abs(lineDiff) > 6) return lineDiff;
-        return a.x - b.x;
-      });
+        const matchedItems: { x: number; y: number; str: string }[] = [];
+        for (const item of items) {
+          if (!item.str || !item.transform) continue;
+          const str = item.str;
+          if (!str.trim()) continue;
+          if (/^[01]{8,}$/.test(str.trim())) continue;
+          const bb = itemAABB(item, pageHeight);
+          const inRow = bb.centerY >= hlTop && bb.centerY <= hlBottom;
+          const xOverlap = Math.min(bb.right, hlRight) - Math.max(bb.left, hlLeft);
+          const inCol = bb.width > 0 && (xOverlap / bb.width) >= 0.4;
+          if (inRow && inCol) matchedItems.push({ x: bb.left, y: bb.top, str });
+        }
 
-      let finalItems = deduped;
-      if (deduped.length > 1) {
-        const firstY = deduped[0].y;
-        const firstLine = deduped.filter(i => Math.abs(i.y - firstY) <= 6);
-        const restLine  = deduped.filter(i => Math.abs(i.y - firstY) > 6);
-        if (restLine.length > 0) {
-          const firstLineText = firstLine.map(i => i.str).join('').trim();
-          if (firstLineText.length >= 3) {
+        const deduped: typeof matchedItems = [];
+        for (const item of matchedItems) {
+          const isDup = deduped.some(
+            d => d.str === item.str && Math.abs(d.x - item.x) < 4 && Math.abs(d.y - item.y) < 4,
+          );
+          if (!isDup) deduped.push(item);
+        }
+
+        deduped.sort((a, b) => {
+          const lineDiff = a.y - b.y;
+          if (Math.abs(lineDiff) > 6) return lineDiff;
+          return a.x - b.x;
+        });
+
+        let finalItems = deduped;
+        if (deduped.length > 1) {
+          const firstY    = deduped[0].y;
+          const firstLine = deduped.filter(i => Math.abs(i.y - firstY) <= 6);
+          const restLine  = deduped.filter(i => Math.abs(i.y - firstY) > 6);
+          if (restLine.length > 0 && firstLine.map(i => i.str).join('').trim().length >= 3) {
             finalItems = firstLine;
           }
         }
+
+        const rawJoined = finalItems.map(i => i.str).join(' ');
+        const value = rawJoined
+          .replace(/\(\d+\)/g, '')
+          .replace(/[()]/g, '')
+          .replace(/[^\p{L}\p{N}\p{P}\p{Z}\p{Sc}\p{Sm}]/gu, '')
+          .replace(/\b[01]{8,}\b/g, '')
+          .replace(/\s+/g, ' ')
+          .trim() || null;
+
+        chunk.push({
+          page:       hl.page,
+          field:      hl.field,
+          value,
+          confidence: value && value.length > 2 ? 'high' : value ? 'medium' : 'low',
+          wasOcr:     false,
+        });
       }
+      return chunk;
+    }),
+  );
 
-      const rawJoined = finalItems.map(i => i.str).join(' ');
-      const value = rawJoined
-        .replace(/\(\d+\)/g, '')   // strip (numeric) groups
-        .replace(/[()]/g, '')       // strip any lone brackets
-        .replace(/[^\p{L}\p{N}\p{P}\p{Z}\p{Sc}\p{Sm}]/gu, '') // strip emoji & decorative symbols, keep letters/numbers/punctuation/spaces/currency/math
-        .replace(/\b[01]{8,}\b/g, '')  // strip binary-encoded hidden numbers (8+ digits of only 0/1)
-        .replace(/\s+/g, ' ')
-        .trim() || null;
-
-      results.push({
-        page:       hl.page,
-        field:      hl.field,
-        value,
-        confidence: value && value.length > 2 ? 'high' : value ? 'medium' : 'low',
-        wasOcr:     false,
-      });
-    }
-  }
-
-  return results;
+  return pageChunks.flat();
 }
 
 /**
@@ -664,8 +672,7 @@ export async function detectTableRegionsInPdfPage(
   try {
     const pdf = await getDocumentCached(file);
     if (pageNumber < 1 || pageNumber > pdf.numPages) return [];
-    const page = await pdf.getPage(pageNumber);
-    const vp   = page.getViewport({ scale: 1 });
+    const { page, items: cachedItems, vp } = await getPageContentCached(file, pdf, pageNumber);
     const W = vp.width, H = vp.height;
     const regions: Array<{ x: number; y: number; width: number; height: number }> = [];
 
@@ -759,8 +766,7 @@ export async function detectTableRegionsInPdfPage(
     //    Reduced minimum chain length to 2 (from 3) and widened X tolerance
     //    to 4% so more real-world borderless tables are captured.
     // -----------------------------------------------------------------------
-    const content = await page.getTextContent({ includeMarkedContent: false });
-    const items   = content.items as any[];
+    const items = cachedItems;
 
     type Row = { top: number; bottom: number; xs: number[] };
     const TOL_Y = 3;
@@ -844,10 +850,7 @@ export async function findAllTextPositionsInPdfPage(
   try {
     const pdf = await getDocumentCached(file);
     if (pageNumber < 1 || pageNumber > pdf.numPages) return [];
-    const page    = await pdf.getPage(pageNumber);
-    const content = await page.getTextContent({ includeMarkedContent: false });
-    const vp      = page.getViewport({ scale: 1 });
-    const items   = content.items as any[];
+    const { items, vp } = await getPageContentCached(file, pdf, pageNumber);
     // Don't skip pages with few items — appraisal/floor-plan pages legitimately
     // have sparse text (labels + numbers) and should still be searchable.
 

@@ -404,8 +404,8 @@ export default function Index() {
     let totalExtracted = 0;
     let totalNull = 0;
 
-    for (const sess of targets) {
-      // Clear all previous extracted values — fresh extraction every time
+    // Process all sessions in parallel — each makes one backend call.
+    const settled = await Promise.allSettled(targets.map(async sess => {
       const clearedHighlights: Record<number, Highlight[]> = {};
       for (const [pageNum, pageHls] of Object.entries(sess.highlights)) {
         clearedHighlights[Number(pageNum)] = pageHls.map(h => ({
@@ -413,34 +413,42 @@ export default function Index() {
         }));
       }
       const allHl = Object.values(clearedHighlights).flat();
+      const results = await extractRegions(sess.id, allHl, sess.file!, { strict: true });
 
-      try {
-        const results = await extractRegions(sess.id, allHl, sess.file!, { strict: true });
+      const newHighlights = { ...clearedHighlights };
+      let idx = 0;
+      for (const [pageNum, pageHls] of Object.entries(newHighlights)) {
+        newHighlights[Number(pageNum)] = pageHls.map(h => {
+          const r = results[idx++];
+          return r ? { ...h, extractedValue: r.value, confidence: r.confidence, wasOcr: r.wasOcr } : h;
+        });
+      }
+      const sessResults: ExtractedRow[] = Object.values(newHighlights).flat()
+        .filter(h => h.extractedValue !== undefined)
+        .map(h => ({
+          page: h.page, field: h.field, value: h.extractedValue ?? null,
+          confidence: h.confidence ?? 'low', wasOcr: h.wasOcr ?? false,
+          filename: sess.filename, folderName: sess.folderName, sessionId: sess.id,
+        }));
+      return { sess, newHighlights, sessResults };
+    }));
 
-        const newHighlights = { ...clearedHighlights };
-        let idx = 0;
-        for (const [pageNum, pageHls] of Object.entries(newHighlights)) {
-          newHighlights[Number(pageNum)] = pageHls.map(h => {
-            const r = results[idx++];
-            return r ? { ...h, extractedValue: r.value, confidence: r.confidence, wasOcr: r.wasOcr } : h;
-          });
-        }
-        const sessResults: ExtractedRow[] = Object.values(newHighlights).flat()
-          .filter(h => h.extractedValue !== undefined)
-          .map(h => ({
-            page: h.page, field: h.field, value: h.extractedValue ?? null,
-            confidence: h.confidence ?? 'low', wasOcr: h.wasOcr ?? false,
-            filename: sess.filename, folderName: sess.folderName, sessionId: sess.id,
-          }));
-
-        setSessions(prev => prev.map(s => s.id === sess.id
-          ? { ...s, highlights: newHighlights, extractedData: sessResults, status: 'extracted' as const } : s));
-
+    const updates: { id: string; highlights: Record<number, Highlight[]>; extractedData: ExtractedRow[] }[] = [];
+    for (const result of settled) {
+      if (result.status === 'fulfilled') {
+        const { sess, newHighlights, sessResults } = result.value;
+        updates.push({ id: sess.id, highlights: newHighlights, extractedData: sessResults });
         totalExtracted += sessResults.length;
         totalNull += sessResults.filter(r => !r.value).length;
-      } catch (err: any) {
-        toast.error(`Extraction failed for ${sess.filename}: ${err.message}`);
+      } else {
+        toast.error(`Extraction failed: ${result.reason?.message ?? 'unknown error'}`);
       }
+    }
+    if (updates.length > 0) {
+      setSessions(prev => prev.map(s => {
+        const u = updates.find(x => x.id === s.id);
+        return u ? { ...s, highlights: u.highlights, extractedData: u.extractedData, status: 'extracted' as const } : s;
+      }));
     }
 
     setShowExcel(true);
@@ -623,6 +631,7 @@ export default function Index() {
         pg: number,
       ) => {
         if (cands.length === 0) return null;
+        if (cands.length === 1 && !tableOnly) return cands[0];
         const tables = await getTables(pg);
         if (tables.length > 0) {
           const inTable = cands.filter(c =>
@@ -664,7 +673,7 @@ export default function Index() {
                 // scanned PDFs. Apply a timeout so we fall through to the source-page
                 // coordinate fallback quickly — the index will be cached for next time.
                 const ctrl = new AbortController();
-                const timer = setTimeout(() => ctrl.abort(), 20_000);
+                const timer = setTimeout(() => ctrl.abort(), 5_000);
                 try {
                   r = await searchBackend(liveTargetId, q, mode, { signal: ctrl.signal });
                 } catch { r = null; } finally { clearTimeout(timer); }
@@ -691,6 +700,9 @@ export default function Index() {
         backendByKey.set(q, map);
         return map;
       };
+
+      // Prefetch all keys in parallel before the page loop.
+      await Promise.all(pairs.filter(p => !p.useAbsoluteCoords).map(p => fetchBackendKey(p.keyText)));
 
       for (let pg = 1; pg <= totalPgs; pg++) {
         if (pg % 5 === 0) await new Promise(r => setTimeout(r, 0));
@@ -1277,6 +1289,14 @@ export default function Index() {
                       multiFile={sessions.filter(s => s.extractedData.length > 0).length > 1}
                       onDownload={() => trackDownload().catch(() => {})}
                       onRowClick={handleExcelRowClick}
+                      onDeleteRow={(sessionId, page) => {
+                        setSessions(prev => prev.map(s => {
+                          if (s.id !== sessionId) return s;
+                          const highlights = { ...s.highlights };
+                          delete highlights[page];
+                          return { ...s, highlights };
+                        }));
+                      }}
                     />
                   </div>
                 </>
