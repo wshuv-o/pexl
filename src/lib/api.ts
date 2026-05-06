@@ -427,8 +427,11 @@ export async function fetchTableRegions(
 export async function downloadExcel(
   sessionId: string,
   originalName: string,
+  pages?: string,
 ): Promise<void> {
-  const res = await fetch(`${BACKEND_URL}/api/utility/session/${sessionId}/excel`);
+  const url = new URL(`${BACKEND_URL}/api/utility/session/${sessionId}/excel`);
+  if (pages?.trim()) url.searchParams.set('pages', pages.trim());
+  const res = await fetch(url.toString());
   if (res.status === 404) {
     const data = await res.json().catch(() => ({}));
     throw new Error((data as { error?: string }).error ?? 'No tables found in this PDF');

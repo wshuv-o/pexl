@@ -55,8 +55,9 @@ interface ViewerToolbarProps {
   onDownloadOcr: () => void;
   downloadingOcr: boolean;
   // Excel table export
-  onDownloadExcel: () => void;
-  downloadingExcel: boolean;
+  onDownloadExcel: () => Promise<void>;
+  onDownloadExcelSelected?: () => Promise<void>;
+  onDownloadExcelRange: (range: string) => Promise<void>;
   // Auto-search: find field labels in the PDF and auto-create highlights
   // over their adjacent values. Available for all doc types.
   onAutoSearch: () => void;
@@ -90,7 +91,7 @@ export default function ViewerToolbar({
   fineRotation, onFineRotationChange,
   onStartPageChange,
   onDownloadOcr, downloadingOcr,
-  onDownloadExcel, downloadingExcel,
+  onDownloadExcel, onDownloadExcelSelected, onDownloadExcelRange,
   onAutoSearch, autoSearching,
 }: ViewerToolbarProps) {
   // Relative page numbering when startPage > 1 (cover pages skipped)
@@ -372,7 +373,7 @@ export default function ViewerToolbar({
 
       {/* Drawing tools */}
       <div className="flex items-center gap-0.5 shrink-0">
-        {toolBtn('cursor',      <MousePointer2     className="w-4 h-4" />, 'Cursor — drag to highlight, click boxes to edit')}
+        {toolBtn('cursor',      <MousePointer2     className="w-4 h-4" />, 'Cursor — drag to draw extraction boxes, click to edit')}
         {toolBtn('select',      <MousePointerClick className="w-4 h-4" />, 'Select — click boxes or marquee-select, drag to move')}
         {toolBtn('text-select', <TextCursor        className="w-4 h-4" />, 'Select text — copy from PDF')}
         {toolBtn('eraser',      <Eraser            className="w-4 h-4" />, 'Erase all on this page')}
@@ -539,24 +540,13 @@ export default function ViewerToolbar({
       </Tooltip>
 
       {/* Download tables as Excel */}
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <button
-            className="p-1.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted
-                       disabled:opacity-30 disabled:cursor-not-allowed transition-colors shrink-0"
-            onClick={onDownloadExcel}
-            disabled={downloadingExcel}
-            aria-label="Download tables as Excel"
-          >
-            {downloadingExcel
-              ? <Loader2 className="w-4 h-4 animate-spin" />
-              : <FileSpreadsheet className="w-4 h-4" />}
-          </button>
-        </TooltipTrigger>
-        <TooltipContent side="bottom" className="max-w-[200px] text-xs">
-          Download tables as Excel (.xlsx)
-        </TooltipContent>
-      </Tooltip>
+      <ExcelDownloadPopover
+        totalPages={totalPages}
+        selectedPdfCount={selectedPdfCount}
+        onDownloadCurrent={onDownloadExcel}
+        onDownloadSelected={onDownloadExcelSelected}
+        onDownloadRange={onDownloadExcelRange}
+      />
 
       {/* Extract */}
       <Button
@@ -595,6 +585,126 @@ function parsePageList(input: string, totalPages: number): number[] {
     }
   }
   return Array.from(pages).sort((a, b) => a - b);
+}
+
+// ─── Excel download popover ──────────────────────────────────────────────
+function ExcelDownloadPopover({
+  totalPages,
+  selectedPdfCount = 0,
+  onDownloadCurrent,
+  onDownloadSelected,
+  onDownloadRange,
+}: {
+  totalPages: number;
+  selectedPdfCount?: number;
+  onDownloadCurrent: () => Promise<void>;
+  onDownloadSelected?: () => Promise<void>;
+  onDownloadRange: (range: string) => Promise<void>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState<'current' | 'selected' | 'range' | null>(null);
+  const [rangeInput, setRangeInput] = useState('');
+  const [rangeError, setRangeError] = useState('');
+
+  const run = async (op: 'current' | 'selected' | 'range', fn: () => Promise<void>) => {
+    setBusy(op);
+    try { await fn(); } catch { /* toasts handled by caller */ }
+    setBusy(null);
+  };
+
+  const handleRange = () => {
+    const parsed = parsePageList(rangeInput, totalPages);
+    if (parsed.length === 0) { setRangeError('No valid pages — try "1-5, 8"'); return; }
+    setRangeError('');
+    run('range', () => onDownloadRange(rangeInput));
+  };
+
+  const rowCls = (disabled: boolean) =>
+    `flex items-center gap-2 w-full px-2 py-1.5 rounded text-xs text-left transition-colors
+     ${disabled ? 'opacity-40 cursor-not-allowed' : 'hover:bg-muted cursor-pointer'}`;
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          className="p-1.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted
+                     disabled:opacity-30 disabled:cursor-not-allowed transition-colors shrink-0"
+          aria-label="Export tables as Excel"
+        >
+          {busy !== null
+            ? <Loader2 className="w-4 h-4 animate-spin" />
+            : <FileSpreadsheet className="w-4 h-4" />}
+        </button>
+      </PopoverTrigger>
+
+      <PopoverContent side="bottom" align="end" className="w-60 p-2">
+        <p className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wide px-2 pb-1">
+          Export as Excel
+        </p>
+
+        {/* This PDF */}
+        <button
+          className={rowCls(busy !== null)}
+          disabled={busy !== null}
+          onClick={() => { run('current', onDownloadCurrent); setOpen(false); }}
+        >
+          {busy === 'current'
+            ? <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+            : <FileSpreadsheet className="w-3.5 h-3.5 shrink-0" />}
+          This PDF
+        </button>
+
+        {/* Selected PDFs */}
+        <button
+          className={rowCls(busy !== null || !onDownloadSelected || selectedPdfCount === 0)}
+          disabled={busy !== null || !onDownloadSelected || selectedPdfCount === 0}
+          onClick={() => { if (onDownloadSelected) { run('selected', onDownloadSelected); setOpen(false); } }}
+        >
+          {busy === 'selected'
+            ? <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+            : <FileSpreadsheet className="w-3.5 h-3.5 shrink-0" />}
+          <span>
+            Selected PDFs
+            {selectedPdfCount > 0 && (
+              <span className="ml-1 px-1 py-0.5 rounded bg-primary/15 text-primary text-[10px] font-semibold">
+                {selectedPdfCount}
+              </span>
+            )}
+          </span>
+        </button>
+
+        {/* Page range */}
+        <div className="border-t border-border mt-1.5 pt-1.5 px-1">
+          <p className="text-[11px] text-muted-foreground mb-1">Page range (this PDF)</p>
+          <div className="flex gap-1">
+            <Input
+              value={rangeInput}
+              onChange={e => { setRangeInput(e.target.value); setRangeError(''); }}
+              onKeyDown={e => e.key === 'Enter' && handleRange()}
+              placeholder={`e.g. 1-${Math.min(totalPages, 5)}, 8`}
+              className="h-7 text-xs flex-1 min-w-0"
+              disabled={busy !== null}
+            />
+            <button
+              onClick={handleRange}
+              disabled={busy !== null || !rangeInput.trim()}
+              className="px-2 h-7 rounded bg-primary text-primary-foreground text-xs font-medium
+                         hover:opacity-90 disabled:opacity-40 transition-opacity shrink-0"
+            >
+              {busy === 'range' ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Export'}
+            </button>
+          </div>
+          {rangeError && <p className="text-[11px] text-destructive mt-0.5">{rangeError}</p>}
+          {rangeInput.trim() && !rangeError && (() => {
+            const pages = parsePageList(rangeInput, totalPages);
+            return pages.length > 0
+              ? <p className="text-[11px] text-muted-foreground mt-0.5">{pages.length} page{pages.length !== 1 ? 's' : ''}: {pages.slice(0, 6).join(', ')}{pages.length > 6 ? '…' : ''}</p>
+              : <p className="text-[11px] text-destructive mt-0.5">No valid pages</p>;
+          })()}
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
 }
 
 // ─── Selected fields → Apply popover ────────────────────────────────────

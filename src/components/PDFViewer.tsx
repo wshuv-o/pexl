@@ -42,6 +42,8 @@ interface PDFViewerProps {
   // only the selected PDFs. The caller (Index) iterates sessions.
   onRemoveFieldFromAllPdfs?: (field: string) => void;
   onRemoveFieldFromSelectedPdfs?: (field: string) => void;
+  // Excel export for the selected (ctrl/cmd-clicked) PDFs — handled by Index.
+  onDownloadExcelSelected?: () => Promise<void>;
 
   onAutoApplyAllPdfs?: (
     pairs: ReadonlyArray<{
@@ -83,6 +85,7 @@ export default function PDFViewer({
   onAutoApplyAllPdfs,
   onRemoveFieldFromAllPdfs,
   onRemoveFieldFromSelectedPdfs,
+  onDownloadExcelSelected,
 }: PDFViewerProps) {
   const [currentPage, setCurrentPage]   = useState(session.startPage || 1);
   const [zoom, setZoom]                 = useState<number | null>(null);
@@ -123,7 +126,6 @@ export default function PDFViewer({
   const [activeMatchIdx, setActiveMatchIdx] = useState<number>(-1);
   const [pdfLoaded, setPdfLoaded]       = useState(false);
   const [downloadingOcr, setDownloadingOcr] = useState(false);
-  const [downloadingExcel, setDownloadingExcel] = useState(false);
 
   // ── Auto-extract setup mode (replaces the old guided auto-search) ─────
   // Click the magic-wand button to enter setup. The user draws value
@@ -574,16 +576,14 @@ export default function PDFViewer({
     setDownloadingOcr(false);
   }, [session.id, session.filename, session.file, onSessionRenewed]);
 
-  const handleDownloadExcel = useCallback(async () => {
-    setDownloadingExcel(true);
+  const handleDownloadExcel = useCallback(async (pages?: string): Promise<void> => {
     try {
-      await downloadExcel(session.id, session.filename);
+      await downloadExcel(session.id, session.filename, pages);
       toast.success('Excel tables downloaded');
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Excel export failed';
       toast.error(msg);
     }
-    setDownloadingExcel(false);
   }, [session.id, session.filename]);
 
   const pageRefs  = useRef<Record<number, HTMLDivElement | null>>({});
@@ -745,7 +745,7 @@ export default function PDFViewer({
       return;
     }
 
-    if (tool === 'cursor' || tool === 'select') {
+    if (tool === 'cursor' || tool === 'highlight' || tool === 'select') {
       e.preventDefault();
       if (!e.shiftKey && !e.ctrlKey && !e.metaKey) setSelectedIds(new Set());
       setDrawingPage(pageNum);
@@ -1491,8 +1491,9 @@ export default function PDFViewer({
         onStartPageChange={(sp) => onStartPageChange(session.id, sp)}
         onDownloadOcr={handleDownloadOcr}
         downloadingOcr={downloadingOcr}
-        onDownloadExcel={handleDownloadExcel}
-        downloadingExcel={downloadingExcel}
+        onDownloadExcel={() => handleDownloadExcel()}
+        onDownloadExcelSelected={onDownloadExcelSelected}
+        onDownloadExcelRange={(range) => handleDownloadExcel(range)}
         onAutoSearch={handleAutoSearch}
         autoSearching={false}
         selectedIds={selectedIds}
@@ -1642,7 +1643,7 @@ export default function PDFViewer({
         }}
       >
         {/* First-use hint overlay */}
-        {showFirstHint && tool === 'cursor' && allHighlights.length === 0 && (
+        {showFirstHint && (tool === 'cursor' || tool === 'highlight') && allHighlights.length === 0 && (
           <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none">
             <div className="bg-black/70 text-white px-4 py-2 rounded-lg text-sm font-medium backdrop-blur-sm">
               Draw boxes over the values you want to extract
@@ -1694,7 +1695,7 @@ export default function PDFViewer({
                   style={{
                     display:    'inline-block',
                     lineHeight: 0,
-                    cursor:     tool === 'cursor' ? 'crosshair' : tool === 'text-select' ? 'text' : 'default',
+                    cursor:     (tool === 'cursor' || tool === 'highlight') ? 'crosshair' : tool === 'text-select' ? 'text' : 'default',
                     transform:  fineRotation !== 0 ? `rotate(${fineRotation}deg)` : undefined,
                     transition: 'transform 0.3s ease',
                     opacity:    isCover ? 0.5 : 1,

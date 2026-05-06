@@ -15,7 +15,7 @@ import ExcelPanel from '@/components/ExcelPanel';
 import ThemeToggle from '@/components/ThemeToggle';
 import type { PDFSession, Highlight, ExtractedRow, DocumentType } from '@/types/utilscraper';
 import { DOCUMENT_TYPES } from '@/types/utilscraper';
-import { processFile, extractRegions, downloadAllOcrPdfsAsZip } from '@/lib/api';
+import { processFile, extractRegions, downloadAllOcrPdfsAsZip, downloadExcel } from '@/lib/api';
 import { rasterizeIfVectorOnly } from '@/lib/vector-pdf-rasterizer';
 import { sessionsCache } from '@/lib/sessions-cache';
 import { useAuth } from '@/contexts/AuthContext';
@@ -810,6 +810,27 @@ export default function Index() {
     }));
   }, [multiSelectedTabIds]);
 
+  // Download Excel tables for every ctrl/cmd-selected PDF sequentially.
+  const handleDownloadExcelSelected = useCallback(async (): Promise<void> => {
+    const targets = sessions.filter(s => multiSelectedTabIds.has(s.id));
+    if (targets.length === 0) {
+      toast('No PDFs selected — Ctrl/Cmd+click tabs to select', { icon: 'ℹ️' });
+      return;
+    }
+    let done = 0;
+    const failed: string[] = [];
+    for (const s of targets) {
+      try {
+        await downloadExcel(s.id, s.filename);
+        done++;
+      } catch (err) {
+        failed.push(s.filename);
+      }
+    }
+    if (done > 0) toast.success(`Downloaded Excel for ${done} PDF${done !== 1 ? 's' : ''}`);
+    if (failed.length > 0) toast.error(`Failed: ${failed.join(', ')}`);
+  }, [sessions, multiSelectedTabIds]);
+
   // Adds a user-typed custom field label to the session-wide list, so every
   // PDF's label picker shows it.
   const handleAddCustomField = useCallback((name: string) => {
@@ -1241,6 +1262,9 @@ export default function Index() {
                   onRemoveFieldFromAllPdfs={handleRemoveFieldFromAllPdfs}
                   onRemoveFieldFromSelectedPdfs={multiSelectedTabIds.size > 0
                     ? handleRemoveFieldFromSelectedPdfs
+                    : undefined}
+                  onDownloadExcelSelected={multiSelectedTabIds.size > 0
+                    ? handleDownloadExcelSelected
                     : undefined}
                 />
               </div>
