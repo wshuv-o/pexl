@@ -109,6 +109,8 @@ type TableRow = {
   provider: string; account: string;
   monthValues:     Map<string, number>;
   monthValuesList: Map<string, number[]>;
+  otherCharges:    Map<string, number>;
+  taxes:           Map<string, number>;
 };
 type UtilityTable = {
   utilityField: string; utilityLabel: string;
@@ -141,7 +143,7 @@ function buildSheet(wb: ExcelJS.Workbook, sheetName: string, p: SheetParams): vo
   const accountCol      = isRecon ? 4 : 6;
 
   // Total and Comments columns always get a bold (medium) left border
-  const boldLeftSet = new Set([TOTAL_COL, COMMENTS_COL]);
+  const boldLeftSet = new Set([COMMENTS_COL]);
 
   const ws = wb.addWorksheet(sheetName);
 
@@ -199,12 +201,13 @@ function buildSheet(wb: ExcelJS.Workbook, sheetName: string, p: SheetParams): vo
   ws.getRow(4).height = 12.75;
 
   // ── Row 5: bold-bordered decoration ──────────────────────────────────────────
+  // Right border at each merged-group boundary: B:C | D (recon) or D:E (raw) | rest
   ws.getRow(5).height = 13.5;
   for (let c = 2; c <= LAST_COL; c++) {
     G(5, c).border = {
       top: medium, bottom: medium,
-      left:  c === 2        ? medium : undefined,
-      right: c === LAST_COL ? medium : undefined,
+      left:  c === 2 ? medium : undefined,
+      right: medium,
     };
   }
   ws.mergeCells('B5:C5');
@@ -267,7 +270,7 @@ function buildSheet(wb: ExcelJS.Workbook, sheetName: string, p: SheetParams): vo
     if (!isRecon) {
       ws.getRow(currentRow).height = 13.5;
       for (let c = 2; c <= LAST_COL; c++) {
-        G(currentRow, c).fill = orangeFill;
+        G(currentRow, c).fill = (c >= utilityItemsCol && c <= providerCol) ? orangeFill : whiteFill;
         G(currentRow, c).font = { name: 'Calibri', size: 10 };
       }
       G(currentRow, utilityItemsCol).value = table.utilityLabel;
@@ -294,7 +297,7 @@ function buildSheet(wb: ExcelJS.Workbook, sheetName: string, p: SheetParams): vo
     }
 
     // Data rows
-    const dataStartRow = currentRow;
+    const mainDataRows: number[] = [];
     for (const row of sortedRows) {
       ws.getRow(currentRow).height = isRecon ? 12.75 : 13.5;
       if (!isRecon) {
@@ -305,7 +308,7 @@ function buildSheet(wb: ExcelJS.Workbook, sheetName: string, p: SheetParams): vo
       G(currentRow, providerCol).value     = row.provider;
       G(currentRow, accountCol).value      = row.account;
       for (let c = 2; c <= FIXED_COLS; c++) {
-        G(currentRow, c).fill = orangeFill;
+        G(currentRow, c).fill = (c >= utilityItemsCol && c <= providerCol) ? orangeFill : whiteFill;
         G(currentRow, c).font = { name: 'Calibri', size: 10, bold: !isRecon && c === 4 };
         const isCenter = (c === providerCol || c === accountCol);
         G(currentRow, c).alignment = { horizontal: isCenter ? 'center' : 'left', vertical: 'middle' };
@@ -324,7 +327,7 @@ function buildSheet(wb: ExcelJS.Workbook, sheetName: string, p: SheetParams): vo
         }
         cell.fill      = whiteFill;
         cell.font      = { name: 'Calibri', size: 10 };
-        cell.alignment = { horizontal: 'right', vertical: 'middle' };
+        cell.alignment = { horizontal: 'center', vertical: 'middle' };
       }
       if (MONTH_COUNT > 0) {
         const tc = G(currentRow, TOTAL_COL);
@@ -336,13 +339,47 @@ function buildSheet(wb: ExcelJS.Workbook, sheetName: string, p: SheetParams): vo
       }
       G(currentRow, COMMENTS_COL).fill = whiteFill;
       G(currentRow, COMMENTS_COL).font = { name: 'Calibri', size: 10 };
+      mainDataRows.push(currentRow);
       currentRow++;
-    }
-    const dataEndRow = currentRow - 1;
 
+      // Other Charges / Taxes sub-rows (raw data only)
+      if (!isRecon) {
+        for (const [subLabel, subMap] of [['Other Charges', row.otherCharges], ['Taxes', row.taxes]] as [string, Map<string, number>][]) {
+          if (subMap.size === 0) continue;
+          ws.getRow(currentRow).height = 13.5;
+          for (let c = 2; c <= LAST_COL; c++) {
+            G(currentRow, c).fill = whiteFill;
+            G(currentRow, c).font = { name: 'Calibri', size: 10, italic: true };
+          }
+          G(currentRow, utilityItemsCol).value     = `  ${subLabel}`;
+          G(currentRow, utilityItemsCol).alignment = { horizontal: 'left', vertical: 'middle' };
+          for (let i = 0; i < MONTH_COUNT; i++) {
+            const mk  = sortedMonths[i];
+            const val = subMap.get(mk);
+            if (val !== undefined) {
+              const cell       = G(currentRow, FIXED_COLS + 1 + i);
+              cell.value       = val;
+              cell.numFmt      = '"$"#,##0.00';
+              cell.fill        = whiteFill;
+              cell.font        = { name: 'Calibri', size: 10, italic: true };
+              cell.alignment   = { horizontal: 'center', vertical: 'middle' };
+            }
+          }
+          if (MONTH_COUNT > 0) {
+            const tc     = G(currentRow, TOTAL_COL);
+            tc.value     = { formula: `SUM(${colLetter(FIXED_COLS+1)}${currentRow}:${colLetter(FIXED_COLS+MONTH_COUNT)}${currentRow})` };
+            tc.numFmt    = '"$"#,##0.00';
+            tc.fill      = whiteFill;
+            tc.font      = { name: 'Calibri', size: 10, italic: true };
+            tc.alignment = { horizontal: 'center', vertical: 'middle' };
+          }
+          currentRow++;
+        }
+      }
+    }
     // Spacer row — same height as data rows
     ws.getRow(currentRow).height = isRecon ? 12.75 : 13.5;
-    for (let c = 2; c <= FIXED_COLS;         c++) G(currentRow, c).fill = orangeFill;
+    for (let c = 2; c <= FIXED_COLS;         c++) G(currentRow, c).fill = (c >= utilityItemsCol && c <= providerCol) ? orangeFill : whiteFill;
     for (let c = FIXED_COLS + 1; c <= LAST_COL; c++) G(currentRow, c).fill = whiteFill;
     currentRow++;
 
@@ -352,18 +389,18 @@ function buildSheet(wb: ExcelJS.Workbook, sheetName: string, p: SheetParams): vo
     for (let c = 2; c <= LAST_COL; c++) {
       G(currentRow, c).font = { name: 'Calibri', size: 10, bold: true };
     }
-    if (sortedRows.length > 0) {
+    if (mainDataRows.length > 0) {
       for (let i = 0; i < MONTH_COUNT; i++) {
         const L    = colLetter(FIXED_COLS + 1 + i);
         const cell = G(currentRow, FIXED_COLS + 1 + i);
-        cell.value  = { formula: `SUM(${L}${dataStartRow}:${L}${dataEndRow})` };
+        cell.value  = { formula: `SUM(${mainDataRows.map(r => `${L}${r}`).join(',')})` };
         cell.numFmt = '"$"#,##0.00';
         cell.alignment = { horizontal: 'center', vertical: 'middle' };
       }
       if (MONTH_COUNT > 0) {
         const L  = colLetter(TOTAL_COL);
         const tc = G(currentRow, TOTAL_COL);
-        tc.value  = { formula: `SUM(${L}${dataStartRow}:${L}${dataEndRow})` };
+        tc.value  = { formula: `SUM(${mainDataRows.map(r => `${L}${r}`).join(',')})` };
         tc.numFmt = '"$"#,##0.00';
         tc.alignment = { horizontal: 'center', vertical: 'middle' };
       }
@@ -389,7 +426,7 @@ function buildSheet(wb: ExcelJS.Workbook, sheetName: string, p: SheetParams): vo
   const varRows: Map<string, number> = new Map();
 
   // Variance cells use red-bracket format for negatives
-  const varFmt = '"$"#,##0.00;[Red]"$"(#,##0.00)';
+  const varFmt = '"$"#,##0.00;[Red]("$"#,##0.00)';
 
   for (let si = 0; si < sections.length; si++) {
     const section      = sections[si];
@@ -399,7 +436,7 @@ function buildSheet(wb: ExcelJS.Workbook, sheetName: string, p: SheetParams): vo
     // Header row: 12.75 height, size 10; recon=blue/green split, raw=all navy; Comments col no fill
     ws.getRow(currentRow).height = 12.75;
     for (let c = 2; c <= LAST_COL; c++) {
-      if (c === COMMENTS_COL) {
+      if (c === COMMENTS_COL || c === accountCol) {
         G(currentRow, c).fill = whiteFill;
         G(currentRow, c).font = { name: 'Calibri', size: 10, bold: true };
         G(currentRow, c).alignment = { horizontal: 'center', vertical: 'middle' };
@@ -552,6 +589,8 @@ export async function downloadUtilityExcel(fileMap: Map<string, ExtractedRow[]>)
     folder: string; fileName: string; provider: string; account: string;
     monthValues:     Map<string, number>;
     monthValuesList: Map<string, number[]>;
+    otherCharges:    Map<string, number>;
+    taxes:           Map<string, number>;
   };
   type UtilityTable = {
     utilityField: string; utilityLabel: string;
@@ -575,7 +614,7 @@ export async function downloadUtilityExcel(fileMap: Map<string, ExtractedRow[]>)
       const rowKey = `${pg.provider}__${pg.account || pg.fileName}`;
       let tr = table.rows.get(rowKey);
       if (!tr) {
-        tr = { folder: pg.folder, fileName: pg.fileName, provider: pg.provider, account: pg.account, monthValues: new Map(), monthValuesList: new Map() };
+        tr = { folder: pg.folder, fileName: pg.fileName, provider: pg.provider, account: pg.account, monthValues: new Map(), monthValuesList: new Map(), otherCharges: new Map(), taxes: new Map() };
         table.rows.set(rowKey, tr);
       } else {
         if (!tr.folder && pg.folder) tr.folder = pg.folder;
@@ -587,6 +626,10 @@ export async function downloadUtilityExcel(fileMap: Map<string, ExtractedRow[]>)
         if (!tr.monthValuesList.has(pg.monthKey)) tr.monthValuesList.set(pg.monthKey, []);
         tr.monthValuesList.get(pg.monthKey)!.push(num);
         table.monthKeys.add(pg.monthKey);
+        const ocRaw  = pg.fieldValues['other_charges'];
+        if (ocRaw)  { const v = parseFloat(ocRaw.replace(/[$,\s]/g,  '')); if (!isNaN(v)) tr.otherCharges.set(pg.monthKey, (tr.otherCharges.get(pg.monthKey) ?? 0) + v); }
+        const taxRaw = pg.fieldValues['taxes'];
+        if (taxRaw) { const v = parseFloat(taxRaw.replace(/[$,\s]/g, '')); if (!isNaN(v)) tr.taxes.set(pg.monthKey,        (tr.taxes.get(pg.monthKey)        ?? 0) + v); }
         const rawDate = pg.fieldValues.billing_date;
         if (rawDate) {
           if (!table.monthScrapedDates.has(pg.monthKey)) table.monthScrapedDates.set(pg.monthKey, new Set());
