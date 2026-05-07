@@ -29,15 +29,17 @@ const whiteFill:       ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgCol
 const thin:   Partial<ExcelJS.Border> = { style: 'thin',   color: { argb: 'FF000000' } };
 const medium: Partial<ExcelJS.Border> = { style: 'medium', color: { argb: 'FF000000' } };
 
+// boldLeftCols: columns that always get a medium left border (visual separators)
 function blockBorder(
   r: number, c: number,
   startRow: number, endRow: number,
   startCol: number, endCol: number,
+  boldLeftCols: Set<number> = new Set(),
 ): Partial<ExcelJS.Borders> {
   return {
     top:    r === startRow ? medium : thin,
     bottom: r === endRow   ? medium : thin,
-    left:   c === startCol ? medium : thin,
+    left:   (c === startCol || boldLeftCols.has(c)) ? medium : thin,
     right:  c === endCol   ? medium : thin,
   };
 }
@@ -46,10 +48,11 @@ function applyBlockBorders(
   ws: ExcelJS.Worksheet,
   startRow: number, endRow: number,
   startCol: number, endCol: number,
+  boldLeftCols: Set<number> = new Set(),
 ) {
   for (let r = startRow; r <= endRow; r++) {
     for (let c = startCol; c <= endCol; c++) {
-      ws.getCell(r, c).border = blockBorder(r, c, startRow, endRow, startCol, endCol);
+      ws.getCell(r, c).border = blockBorder(r, c, startRow, endRow, startCol, endCol, boldLeftCols);
     }
   }
 }
@@ -137,6 +140,9 @@ function buildSheet(wb: ExcelJS.Workbook, sheetName: string, p: SheetParams): vo
   const providerCol     = isRecon ? 3 : 5;
   const accountCol      = isRecon ? 4 : 6;
 
+  // Total and Comments columns always get a bold (medium) left border
+  const boldLeftSet = new Set([TOTAL_COL, COMMENTS_COL]);
+
   const ws = wb.addWorksheet(sheetName);
 
   ws.views = [{ state: 'frozen', xSplit: 4, ySplit: 6, showGridLines: false, zoomScale: 85 }];
@@ -146,17 +152,17 @@ function buildSheet(wb: ExcelJS.Workbook, sheetName: string, p: SheetParams): vo
   if (isRecon) {
     ws.getColumn(2).width = 30;    // utility items
     ws.getColumn(3).width = 33;    // utility provider
-    ws.getColumn(4).width = 20;    // account number
+    ws.getColumn(4).width = 23;    // account number
   } else {
     ws.getColumn(2).width = 33.57; // folder path
     ws.getColumn(3).width = 37.71; // file name
     ws.getColumn(4).width = 20;    // utility items
     ws.getColumn(5).width = 24;    // utility provider
-    ws.getColumn(6).width = 20;    // account number
+    ws.getColumn(6).width = 23;    // account number
   }
   for (let i = 0; i < MONTH_COUNT; i++) ws.getColumn(FIXED_COLS + 1 + i).width = 13.14;
-  ws.getColumn(TOTAL_COL).width    = 12;
-  ws.getColumn(COMMENTS_COL).width = 20;
+  ws.getColumn(TOTAL_COL).width    = 11.43;
+  ws.getColumn(COMMENTS_COL).width = 16.43;
 
   const G = (row: number, col: number) => ws.getCell(row, col);
 
@@ -180,11 +186,11 @@ function buildSheet(wb: ExcelJS.Workbook, sheetName: string, p: SheetParams): vo
     cell.alignment = { horizontal: 'center', vertical: 'middle' };
   }
 
-  // ── Row 3: 2-digit year numbers ──────────────────────────────────────────────
+  // ── Row 3: full year numbers ──────────────────────────────────────────────────
   ws.getRow(3).height = 12.75;
   for (let i = 0; i < MONTH_COUNT; i++) {
     const cell = G(3, FIXED_COLS + 1 + i);
-    cell.value     = parseInt(sortedMonths[i].split('-')[0], 10) % 100;
+    cell.value     = parseInt(sortedMonths[i].split('-')[0], 10);  // full year e.g. 2025
     cell.font      = { name: 'Calibri', size: 10 };
     cell.alignment = { horizontal: 'center', vertical: 'middle' };
   }
@@ -209,7 +215,7 @@ function buildSheet(wb: ExcelJS.Workbook, sheetName: string, p: SheetParams): vo
     if (LAST_COL >= 6) ws.mergeCells(5, 6, 5, LAST_COL);
   }
 
-  // ── Row 6: column headers — utility items & provider blue, others green ───────
+  // ── Row 6: column headers — all green ────────────────────────────────────────
   ws.getRow(6).height = 16.5;
   const hdrLabels: [number, string][] = isRecon
     ? [[2, 'Utility Items'], [3, 'Utility Provider'], [4, 'Account Number']]
@@ -231,13 +237,13 @@ function buildSheet(wb: ExcelJS.Workbook, sheetName: string, p: SheetParams): vo
   }
   G(6, TOTAL_COL).value     = 'Total';
   G(6, TOTAL_COL).fill      = greenHeaderFill;
-  G(6, TOTAL_COL).font      = { name: 'Calibri', size: 12, bold: true };
+  G(6, TOTAL_COL).font      = { name: 'Calibri', size: 12, bold: true, italic: true };
   G(6, TOTAL_COL).alignment = { horizontal: 'center', vertical: 'middle' };
   G(6, COMMENTS_COL).value     = 'Comments';
   G(6, COMMENTS_COL).fill      = greenHeaderFill;
   G(6, COMMENTS_COL).font      = { name: 'Calibri', size: 12, bold: true };
   G(6, COMMENTS_COL).alignment = { horizontal: 'center', vertical: 'middle' };
-  applyBlockBorders(ws, 6, 6, 2, LAST_COL);
+  applyBlockBorders(ws, 6, 6, 2, LAST_COL, boldLeftSet);
 
   ws.autoFilter = { from: { row: 6, column: 2 }, to: { row: 6, column: LAST_COL } };
 
@@ -268,17 +274,18 @@ function buildSheet(wb: ExcelJS.Workbook, sheetName: string, p: SheetParams): vo
       for (let i = 0; i < MONTH_COUNT; i++) {
         const mk    = sortedMonths[i];
         const dates = table.monthScrapedDates.get(mk);
-        G(currentRow, FIXED_COLS + 1 + i).value =
-          dates && dates.size > 0 ? Array.from(dates).join(' · ') : '';
+        const cell  = G(currentRow, FIXED_COLS + 1 + i);
+        cell.value     = dates && dates.size > 0 ? Array.from(dates).join(' · ') : '';
+        cell.alignment = { horizontal: 'center', vertical: 'middle' };
       }
       currentRow++;
     }
 
-    // Extra group label row (recon only): utility label bolded, all other cells empty
+    // Extra group label row (recon only): utility label bolded, orange only on utility items → provider
     if (isRecon) {
       ws.getRow(currentRow).height = 12.75;
       for (let c = 2; c <= LAST_COL; c++) {
-        G(currentRow, c).fill = orangeFill;
+        G(currentRow, c).fill = (c >= utilityItemsCol && c <= providerCol) ? orangeFill : whiteFill;
         G(currentRow, c).font = { name: 'Calibri', size: 10 };
       }
       G(currentRow, utilityItemsCol).value = table.utilityLabel;
@@ -298,14 +305,14 @@ function buildSheet(wb: ExcelJS.Workbook, sheetName: string, p: SheetParams): vo
       G(currentRow, providerCol).value     = row.provider;
       G(currentRow, accountCol).value      = row.account;
       for (let c = 2; c <= FIXED_COLS; c++) {
-        G(currentRow, c).fill      = orangeFill;
-        G(currentRow, c).font      = { name: 'Calibri', size: 10, bold: !isRecon && c === 4 };
-        G(currentRow, c).alignment = { horizontal: 'left', vertical: 'middle' };
+        G(currentRow, c).fill = orangeFill;
+        G(currentRow, c).font = { name: 'Calibri', size: 10, bold: !isRecon && c === 4 };
+        const isCenter = (c === providerCol || c === accountCol);
+        G(currentRow, c).alignment = { horizontal: isCenter ? 'center' : 'left', vertical: 'middle' };
       }
       for (let i = 0; i < MONTH_COUNT; i++) {
         const mk    = sortedMonths[i];
         const cell  = G(currentRow, FIXED_COLS + 1 + i);
-        // Both sheets: show breakdown formula when multiple bills land on same month
         const vList = row.monthValuesList.get(mk);
         if (vList && vList.length > 1) {
           const sum = vList.reduce((a, b) => a + b, 0);
@@ -325,7 +332,7 @@ function buildSheet(wb: ExcelJS.Workbook, sheetName: string, p: SheetParams): vo
         tc.numFmt  = '"$"#,##0.00';
         tc.fill    = whiteFill;
         tc.font    = { name: 'Calibri', size: 10, bold: true };
-        tc.alignment = { horizontal: 'right', vertical: 'middle' };
+        tc.alignment = { horizontal: 'center', vertical: 'middle' };
       }
       G(currentRow, COMMENTS_COL).fill = whiteFill;
       G(currentRow, COMMENTS_COL).font = { name: 'Calibri', size: 10 };
@@ -351,27 +358,28 @@ function buildSheet(wb: ExcelJS.Workbook, sheetName: string, p: SheetParams): vo
         const cell = G(currentRow, FIXED_COLS + 1 + i);
         cell.value  = { formula: `SUM(${L}${dataStartRow}:${L}${dataEndRow})` };
         cell.numFmt = '"$"#,##0.00';
-        cell.alignment = { horizontal: 'right', vertical: 'middle' };
+        cell.alignment = { horizontal: 'center', vertical: 'middle' };
       }
       if (MONTH_COUNT > 0) {
         const L  = colLetter(TOTAL_COL);
         const tc = G(currentRow, TOTAL_COL);
         tc.value  = { formula: `SUM(${L}${dataStartRow}:${L}${dataEndRow})` };
         tc.numFmt = '"$"#,##0.00';
-        tc.alignment = { horizontal: 'right', vertical: 'middle' };
+        tc.alignment = { horizontal: 'center', vertical: 'middle' };
       }
     }
     tableTotalRows.set(table.utilityField, currentRow);
     const tableEndRow = currentRow;
     currentRow++;
 
-    applyBlockBorders(ws, tableStartRow, tableEndRow, 2, LAST_COL);
-    currentRow += 3;
+    applyBlockBorders(ws, tableStartRow, tableEndRow, 2, LAST_COL, boldLeftSet);
+    currentRow += 1;  // 1 gap row between orange tables
   }
 
-  // ── Three summary tables: Utility Bills / Operating Statement / Variance ──────
+  // 1 extra gap row so total gap between last orange table and first summary table = 2
   currentRow += 1;
 
+  // ── Three summary tables: Utility Bills / Operating Statement / Variance ──────
   const monthLabels = sortedMonths.map(mk => monthKeyLabel(mk));
   type Section = 'Utility Bills' | 'Operating Statement' | 'Variance';
   const sections: Section[] = ['Utility Bills', 'Operating Statement', 'Variance'];
@@ -380,17 +388,27 @@ function buildSheet(wb: ExcelJS.Workbook, sheetName: string, p: SheetParams): vo
   const osRows:  Map<string, number> = new Map();
   const varRows: Map<string, number> = new Map();
 
+  // Variance cells use red-bracket format for negatives
+  const varFmt = '"$"#,##0.00;[Red]"$"(#,##0.00)';
+
   for (let si = 0; si < sections.length; si++) {
     const section      = sections[si];
     const summaryStart = currentRow;
+    const isVariance   = section === 'Variance';
 
-    // Header row: recon=blue/green split, raw data=all navy (original)
-    ws.getRow(currentRow).height = 16.5;
+    // Header row: 12.75 height, size 10; recon=blue/green split, raw=all navy; Comments col no fill
+    ws.getRow(currentRow).height = 12.75;
     for (let c = 2; c <= LAST_COL; c++) {
+      if (c === COMMENTS_COL) {
+        G(currentRow, c).fill = whiteFill;
+        G(currentRow, c).font = { name: 'Calibri', size: 10, bold: true };
+        G(currentRow, c).alignment = { horizontal: 'center', vertical: 'middle' };
+        continue;
+      }
       const isNavy = !isRecon || (c === utilityItemsCol || c === providerCol);
       G(currentRow, c).fill      = isNavy ? navyFill : greenHeaderFill;
       G(currentRow, c).font      = {
-        name: 'Calibri', size: 11, bold: true,
+        name: 'Calibri', size: 10, bold: true,
         color: { argb: isNavy ? 'FFFFFFFF' : 'FF000000' },
       };
       G(currentRow, c).alignment = { horizontal: c > FIXED_COLS ? 'center' : 'left', vertical: 'middle' };
@@ -402,7 +420,7 @@ function buildSheet(wb: ExcelJS.Workbook, sheetName: string, p: SheetParams): vo
 
     // Per-utility rows
     for (const table of sortedTables) {
-      ws.getRow(currentRow).height = 13.5;
+      ws.getRow(currentRow).height = 12.75;
       for (let c = 2; c <= LAST_COL; c++) G(currentRow, c).font = { name: 'Calibri', size: 10 };
       G(currentRow, utilityItemsCol).value = table.utilityLabel;
 
@@ -414,22 +432,22 @@ function buildSheet(wb: ExcelJS.Workbook, sheetName: string, p: SheetParams): vo
             const cell = G(currentRow, FIXED_COLS + 1 + i);
             cell.value  = { formula: `${L}${mainRow}` };
             cell.numFmt = '"$"#,##0.00';
-            cell.alignment = { horizontal: 'right', vertical: 'middle' };
+            cell.alignment = { horizontal: 'center', vertical: 'middle' };
           }
           const tc = G(currentRow, TOTAL_COL);
           tc.value   = { formula: `${colLetter(TOTAL_COL)}${mainRow}` };
           tc.numFmt  = '"$"#,##0.00';
-          tc.alignment = { horizontal: 'right', vertical: 'middle' };
+          tc.alignment = { horizontal: 'center', vertical: 'middle' };
         }
         ubRows.set(table.utilityField, currentRow);
 
       } else if (section === 'Operating Statement') {
         for (let i = 0; i < MONTH_COUNT; i++) {
           G(currentRow, FIXED_COLS + 1 + i).numFmt    = '"$"#,##0.00';
-          G(currentRow, FIXED_COLS + 1 + i).alignment = { horizontal: 'right', vertical: 'middle' };
+          G(currentRow, FIXED_COLS + 1 + i).alignment = { horizontal: 'center', vertical: 'middle' };
         }
         G(currentRow, TOTAL_COL).numFmt    = '"$"#,##0.00';
-        G(currentRow, TOTAL_COL).alignment = { horizontal: 'right', vertical: 'middle' };
+        G(currentRow, TOTAL_COL).alignment = { horizontal: 'center', vertical: 'middle' };
         osRows.set(table.utilityField, currentRow);
 
       } else {
@@ -440,24 +458,24 @@ function buildSheet(wb: ExcelJS.Workbook, sheetName: string, p: SheetParams): vo
             const L    = colLetter(FIXED_COLS + 1 + i);
             const cell = G(currentRow, FIXED_COLS + 1 + i);
             cell.value  = { formula: `${L}${osR}-${L}${ubR}` };
-            cell.numFmt = '"$"#,##0.00';
-            cell.alignment = { horizontal: 'right', vertical: 'middle' };
+            cell.numFmt = varFmt;
+            cell.alignment = { horizontal: 'center', vertical: 'middle' };
           }
           const L  = colLetter(TOTAL_COL);
           const tc = G(currentRow, TOTAL_COL);
           tc.value  = { formula: `${L}${osR}-${L}${ubR}` };
-          tc.numFmt = '"$"#,##0.00';
-          tc.alignment = { horizontal: 'right', vertical: 'middle' };
+          tc.numFmt = varFmt;
+          tc.alignment = { horizontal: 'center', vertical: 'middle' };
         }
         varRows.set(table.utilityField, currentRow);
       }
       currentRow++;
     }
 
-    // Total Utilities row
-    ws.getRow(currentRow).height = 13.5;
+    // Total Utilities row — bold, NOT italic, 12.75 height
+    ws.getRow(currentRow).height = 12.75;
     for (let c = 2; c <= LAST_COL; c++) {
-      G(currentRow, c).font = { name: 'Calibri', size: 10, bold: true, italic: true };
+      G(currentRow, c).font = { name: 'Calibri', size: 10, bold: true };
     }
     G(currentRow, utilityItemsCol).value = 'Total Utilities';
     const perRows = section === 'Utility Bills' ? ubRows : section === 'Operating Statement' ? osRows : varRows;
@@ -466,20 +484,20 @@ function buildSheet(wb: ExcelJS.Workbook, sheetName: string, p: SheetParams): vo
       const L    = colLetter(FIXED_COLS + 1 + i);
       const cell = G(currentRow, FIXED_COLS + 1 + i);
       if (rowNums.length > 0) cell.value = { formula: rowNums.map(rn => `${L}${rn}`).join('+') };
-      cell.numFmt    = '"$"#,##0.00';
-      cell.alignment = { horizontal: 'right', vertical: 'middle' };
+      cell.numFmt    = isVariance ? varFmt : '"$"#,##0.00';
+      cell.alignment = { horizontal: 'center', vertical: 'middle' };
     }
     {
       const L  = colLetter(TOTAL_COL);
       const tc = G(currentRow, TOTAL_COL);
       if (rowNums.length > 0) tc.value = { formula: rowNums.map(rn => `${L}${rn}`).join('+') };
-      tc.numFmt    = '"$"#,##0.00';
-      tc.alignment = { horizontal: 'right', vertical: 'middle' };
+      tc.numFmt    = isVariance ? varFmt : '"$"#,##0.00';
+      tc.alignment = { horizontal: 'center', vertical: 'middle' };
     }
     const summaryEnd = currentRow;
     currentRow++;
 
-    applyBlockBorders(ws, summaryStart, summaryEnd, 2, LAST_COL);
+    applyBlockBorders(ws, summaryStart, summaryEnd, 2, LAST_COL, boldLeftSet);
     if (si < sections.length - 1) currentRow += 1;
   }
 }
