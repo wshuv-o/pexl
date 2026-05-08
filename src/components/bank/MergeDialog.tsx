@@ -64,6 +64,18 @@ export default function MergeDialog({ groups, onConfirm, onCancel }: Props) {
     setState(next);
   };
 
+  const selectAll = (gi: number) => {
+    const next = [...state];
+    next[gi] = { ...next[gi], values: next[gi].values.map(v => ({ ...v, selected: true })) };
+    setState(next);
+  };
+
+  const unselectAll = (gi: number) => {
+    const next = [...state];
+    next[gi] = { ...next[gi], values: next[gi].values.map(v => ({ ...v, selected: false })) };
+    setState(next);
+  };
+
   const totalMergeCount = state.reduce((sum, gs) => {
     const sel = gs.values.filter(v => v.selected).length;
     return sum + (sel >= 2 ? sel : 0);
@@ -112,11 +124,25 @@ export default function MergeDialog({ groups, onConfirm, onCancel }: Props) {
                   <span className="text-[10px] text-muted-foreground">
                     {g.values.length} similar · {selectedCount} checked
                   </span>
-                  {willMerge && (
-                    <span className="text-[10px] text-primary font-medium ml-auto">
-                      will merge → {gs.canonical.length > 30 ? gs.canonical.slice(0, 30) + '…' : gs.canonical}
-                    </span>
-                  )}
+                  <div className="flex items-center gap-1 ml-auto">
+                    {willMerge && (
+                      <span className="text-[10px] text-primary font-medium mr-1">
+                        will merge → {gs.canonical.length > 22 ? gs.canonical.slice(0, 22) + '…' : gs.canonical}
+                      </span>
+                    )}
+                    <button
+                      onClick={() => selectAll(gi)}
+                      className="text-[10px] px-1.5 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                    >
+                      Select All
+                    </button>
+                    <button
+                      onClick={() => unselectAll(gi)}
+                      className="text-[10px] px-1.5 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                    >
+                      Unselect All
+                    </button>
+                  </div>
                 </div>
 
                 {willMerge && (

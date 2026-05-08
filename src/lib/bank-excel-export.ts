@@ -252,15 +252,35 @@ function findSimilarGroups(values: string[], similarFn: (a: string, b: string) =
 }
 
 export interface MergeGroup {
-  field: 'property_name' | 'account_number' | 'address' | 'provider_name';
+  field: string;
   fieldLabel: string;
-  values: string[];        // distinct similar values found
+  values: string[];
 }
 
 export interface MergeChoice {
-  field: 'property_name' | 'account_number' | 'address' | 'provider_name';
-  values: string[];        // values to merge
-  canonical: string;       // chosen canonical value
+  field: string;
+  values: string[];
+  canonical: string;
+}
+
+// Module-level helper: clusters values and pushes groups to `out`
+function addMergeGroups(
+  field: string,
+  fieldLabel: string,
+  values: string[],
+  similar: (a: string, b: string) => boolean,
+  out: MergeGroup[],
+): void {
+  if (values.length < 2) return;
+  const auto = findSimilarGroups(values, similar);
+  if (auto.length > 0) {
+    for (const g of auto) out.push({ field, fieldLabel, values: g });
+    const seen = new Set(auto.flat());
+    const rest = values.filter(v => !seen.has(v));
+    if (rest.length >= 2) out.push({ field, fieldLabel: `${fieldLabel} (other)`, values: rest });
+  } else {
+    out.push({ field, fieldLabel: `${fieldLabel} (manual)`, values });
+  }
 }
 
 // Generic merge-opportunity scan for utility bills — surfaces every field
@@ -283,40 +303,16 @@ export function findUtilityMergeOpportunities(data: ExtractedRow[]): MergeGroup[
     if (row.field === 'address')        addrs.add(v);
   }
 
-  const addGroups = (
-    field: MergeGroup['field'],
-    fieldLabel: string,
-    values: string[],
-    similar: (a: string, b: string) => boolean,
-    out: MergeGroup[],
-  ) => {
-    if (values.length < 2) return;     // nothing to merge
-    const auto = findSimilarGroups(values, similar);
-    if (auto.length > 0) {
-      for (const g of auto) out.push({ field, fieldLabel, values: g });
-      // If some values weren't picked up by similarity, surface the rest
-      // as a separate group so the user can still merge them manually.
-      const seen = new Set(auto.flat());
-      const rest = values.filter(v => !seen.has(v));
-      if (rest.length >= 2) out.push({ field, fieldLabel: `${fieldLabel} (other)`, values: rest });
-    } else {
-      // No similar clusters detected — give the user a manual merge group
-      // with every distinct value so they can still consolidate.
-      out.push({ field, fieldLabel: `${fieldLabel} (manual)`, values });
-    }
-  };
-
   const groups: MergeGroup[] = [];
-  addGroups('provider_name',  'Provider Name',  Array.from(provs), propertySimilar, groups);
-  addGroups('property_name',  'Property Name',  Array.from(props), propertySimilar, groups);
-  addGroups('account_number', 'Account Number', Array.from(accts), accountSimilar,  groups);
-  addGroups('address',        'Address',        Array.from(addrs), addressSimilar,  groups);
+  addMergeGroups('provider_name',  'Provider Name',  Array.from(provs), propertySimilar, groups);
+  addMergeGroups('property_name',  'Property Name',  Array.from(props), propertySimilar, groups);
+  addMergeGroups('account_number', 'Account Number', Array.from(accts), accountSimilar,  groups);
+  addMergeGroups('address',        'Address',        Array.from(addrs), addressSimilar,  groups);
   return groups;
 }
 
 // Scan extracted bank statement data for merge opportunities
 export function findMergeOpportunities(data: ExtractedRow[]): MergeGroup[] {
-  // Group rows by file → flatten each file
   const fileMap = new Map<string, ExtractedRow[]>();
   for (const row of data) {
     const key = row.filename || 'Unknown';
@@ -336,38 +332,26 @@ export function findMergeOpportunities(data: ExtractedRow[]): MergeGroup[] {
   }
 
   const groups: MergeGroup[] = [];
-  const propGroups = findSimilarGroups(Array.from(props), propertySimilar);
-  for (const g of propGroups) groups.push({ field: 'property_name', fieldLabel: 'Property Name', values: g });
-
-  const acctGroups = findSimilarGroups(Array.from(accts), accountSimilar);
-  for (const g of acctGroups) groups.push({ field: 'account_number', fieldLabel: 'Account Number', values: g });
-
-  const addrGroups = findSimilarGroups(Array.from(addrs), addressSimilar);
-  for (const g of addrGroups) groups.push({ field: 'address', fieldLabel: 'Address', values: g });
-
+  addMergeGroups('property_name',  'Property Name',  Array.from(props), propertySimilar, groups);
+  addMergeGroups('account_number', 'Account Number', Array.from(accts), accountSimilar,  groups);
+  addMergeGroups('address',        'Address',        Array.from(addrs), addressSimilar,  groups);
   return groups;
 }
 
 // Apply user-confirmed merges by replacing values in the data
 export function applyMerges(data: ExtractedRow[], choices: MergeChoice[]): ExtractedRow[] {
   if (choices.length === 0) return data;
-  // Build a per-field replacement map
-  const replaceMap: Record<string, Map<string, string>> = {
-    property_name:  new Map(),
-    account_number: new Map(),
-    address:        new Map(),
-    provider_name:  new Map(),
-  };
+  const replaceMap = new Map<string, Map<string, string>>();
   for (const c of choices) {
+    if (!replaceMap.has(c.field)) replaceMap.set(c.field, new Map());
+    const fm = replaceMap.get(c.field)!;
     for (const v of c.values) {
-      if (v !== c.canonical) replaceMap[c.field].set(v, c.canonical);
+      if (v !== c.canonical) fm.set(v, c.canonical);
     }
   }
   return data.map(row => {
-    const m = replaceMap[row.field];
-    if (m && row.value && m.has(row.value)) {
-      return { ...row, value: m.get(row.value)! };
-    }
+    const m = replaceMap.get(row.field);
+    if (m && row.value && m.has(row.value)) return { ...row, value: m.get(row.value)! };
     return row;
   });
 }
