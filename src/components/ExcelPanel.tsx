@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import React, { useState, useMemo, useEffect } from 'react';
-import { X, Download, RefreshCw, Pencil, CheckCircle2, ArrowUpDown, ArrowUp, ArrowDown, Trash2 } from 'lucide-react';
+import { X, Download, RefreshCw, Pencil, CheckCircle2, ArrowUpDown, ArrowUp, ArrowDown, Trash2, Check, Layers } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import type { ExtractedRow } from '@/types/utilscraper';
@@ -11,7 +11,10 @@ import {
   type MergeGroup, type MergeChoice,
 } from '@/lib/bank-excel-export';
 import MergeDialog from '@/components/bank/MergeDialog';
+import BatchPanel from '@/components/BatchPanel';
 import { FIELD_LABELS } from '@/types/utilscraper';
+import { useAuth } from '@/contexts/AuthContext';
+import { toast } from 'sonner';
 
 interface Props {
   data: ExtractedRow[];
@@ -19,12 +22,15 @@ interface Props {
   provider: string;
   onClose: () => void;
   onReExtract: () => void;
+  onReExtractPage?: (sessionId: string, page: number) => void;
   onDataChange: (data: ExtractedRow[]) => void;
   multiFile?: boolean;
   onDownload?: () => void;
   onRowClick?: (sessionId: string, page: number) => void;
   onDeleteRow?: (sessionId: string, page: number) => void;
 }
+
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000';
 
 const CONF_PCT: Record<string, number> = { high: 95, medium: 65, low: 25 };
 
@@ -142,13 +148,19 @@ const parseDateValue = (val: string): number => {
 const isDateField = (field: string): boolean => /date$/i.test(field);
 
 export default function ExcelPanel({
-  data, filename, provider, onClose, onReExtract, onDataChange, multiFile, onDownload, onRowClick, onDeleteRow,
+  data, filename, provider, onClose, onReExtract, onReExtractPage, onDataChange, multiFile, onDownload, onRowClick, onDeleteRow,
 }: Props) {
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const [mergeGroups, setMergeGroups] = useState<MergeGroup[] | null>(null);
   const [sortCol, setSortCol]       = useState<string | null>(null);
   const [sortAsc, setSortAsc]       = useState(true);
   const [selectedRowKey, setSelectedRowKey] = useState<string | null>(null);
+  const [approvedKeys, setApprovedKeys] = useState<Set<string>>(new Set());
+  const [approvingKey, setApprovingKey] = useState<string | null>(null);
+  const [batches, setBatches]           = useState<{ id: number; name: string }[]>([]);
+  const [activeBatchId, setActiveBatchId] = useState<number | null>(null);
+  const [showBatchPanel, setShowBatchPanel] = useState(false);
+  const { user } = useAuth();
 
   // ── Build page rows grouped by PDF (multi-value cells) ─────────────────
   const { groups, fieldColumns } = useMemo(() => {
@@ -335,6 +347,41 @@ export default function ExcelPanel({
     void cellKey;
   };
 
+  const toggleApprove = async (row: DisplayRow) => {
+    if (!activeBatchId) { toast.error('Select a batch before approving'); return; }
+    const key = `${row.sessionId}-${row.page}`;
+    if (approvingKey === key) return;
+    setApprovingKey(key);
+    try {
+      if (approvedKeys.has(key)) {
+        await fetch(
+          `${BACKEND_URL}/api/batches/${activeBatchId}/records/${encodeURIComponent(row.sessionId)}/${row.page}`,
+          { method: 'DELETE' },
+        );
+        setApprovedKeys(prev => { const n = new Set(prev); n.delete(key); return n; });
+      } else {
+        const fields: Record<string, string> = {};
+        const pageData = data.filter(d => d.sessionId === row.sessionId && d.page === row.page);
+        for (const d of pageData) {
+          if (fields[d.field]) fields[d.field] += ', ' + (d.value ?? '');
+          else fields[d.field] = d.value ?? '';
+        }
+        await fetch(`${BACKEND_URL}/api/batches/${activeBatchId}/records`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: row.sessionId, filename: row.filename, page: row.page, fields }),
+        });
+        setApprovedKeys(prev => new Set([...prev, key]));
+        toast.success(`Page ${row.page} saved to batch`);
+      }
+    } catch (err) {
+      console.error('approve error', err);
+      toast.error('Failed to save record');
+    } finally {
+      setApprovingKey(null);
+    }
+  };
+
   const SortIcon = ({ col }: { col: string }) => {
     if (sortCol !== col) return <ArrowUpDown className="w-3 h-3 opacity-40" />;
     return sortAsc
@@ -345,8 +392,8 @@ export default function ExcelPanel({
   const extracted = data.filter(r => r.value).length;
   const nullCount = data.filter(r => !r.value).length;
   const totalRows = sortedGroups.reduce((s, g) => s + g.rows.length, 0);
-  // +1 for the delete button column at the end
-  const totalCols = (multiFile ? 1 : 0) + 1 + fieldColumns.length + 1;
+  // +1 for the delete column at the end, +1 for the actions column at the start
+  const totalCols = 1 + (multiFile ? 1 : 0) + 1 + fieldColumns.length + 1;
 
   // Per-PDF sums for bank-statement credit/debit fields. This number is
   // what the exporter writes into the `Deposits` / `Withdrawals` cells —
@@ -368,6 +415,14 @@ export default function ExcelPanel({
     }
     return byKey;
   }, [data]);
+  // Load batches for the selector on mount
+  useEffect(() => {
+    fetch(`${BACKEND_URL}/api/batches`)
+      .then(r => r.json())
+      .then(d => { if (d.status === 'ok') setBatches(d.batches.map((b: any) => ({ id: b.id, name: b.name }))); })
+      .catch(() => {});
+  }, []);
+
   // Diagnostic: log the raw data shape so we can see whether multi-value
   // rows are reaching the panel. Open DevTools console and look for the
   // '[ExcelPanel]' line.
@@ -406,6 +461,27 @@ export default function ExcelPanel({
           </button>
         </div>
 
+        {/* Batch selector */}
+        <div className="flex items-center gap-2 mb-2">
+          <select
+            value={activeBatchId ?? ''}
+            onChange={e => setActiveBatchId(e.target.value ? Number(e.target.value) : null)}
+            className="flex-1 h-8 px-2 text-xs rounded-md border border-border bg-background text-foreground outline-none focus:ring-1 focus:ring-primary"
+          >
+            <option value="">— Select batch —</option>
+            {batches.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
+          </select>
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-8 text-xs shrink-0"
+            onClick={() => setShowBatchPanel(true)}
+            title="Manage batches"
+          >
+            <Layers className="w-3.5 h-3.5 mr-1" /> Batches
+          </Button>
+        </div>
+
         <div className="flex gap-2">
           <Button variant="outline" size="sm" className="flex-1 h-8 text-xs" onClick={onReExtract}>
             <RefreshCw className="w-3.5 h-3.5 mr-1.5" /> Re-extract
@@ -440,6 +516,21 @@ export default function ExcelPanel({
         </div>
       </div>
 
+      {/* Batch manager overlay */}
+      {showBatchPanel && (
+        <BatchPanel
+          username={user?.username ?? 'unknown'}
+          onClose={() => {
+            setShowBatchPanel(false);
+            // Refresh batch list after managing
+            fetch(`${BACKEND_URL}/api/batches`)
+              .then(r => r.json())
+              .then(d => { if (d.status === 'ok') setBatches(d.batches.map((b: any) => ({ id: b.id, name: b.name }))); })
+              .catch(() => {});
+          }}
+        />
+      )}
+
       {/* Shared merge dialog — works for bank-style and utility-style groups */}
       {mergeGroups && (
         <MergeDialog
@@ -468,6 +559,8 @@ export default function ExcelPanel({
           <table className="w-max min-w-full text-xs border-collapse">
             <thead className="sticky top-0 z-10">
               <tr className="bg-primary text-primary-foreground text-[11px] font-semibold">
+                {/* Actions column: re-extract + approve */}
+                <th className="px-1 py-2.5 w-14 border-r border-white/10" />
                 {multiFile && (
                   <th
                     className="text-left px-3 py-2.5 cursor-pointer hover:bg-white/10 select-none transition-all duration-200 whitespace-nowrap"
@@ -508,12 +601,15 @@ export default function ExcelPanel({
                     const isLastInGroup = ri === g.rows.length - 1;
                     const rowKey = `${g.sessionId}-${row.page}-${row.subIndex}`;
                     const isSelected = selectedRowKey === rowKey;
+                    const approveKey = `${row.sessionId}-${row.page}`;
+                    const isApproved = approvedKeys.has(approveKey);
+                    const isApproving = approvingKey === approveKey;
                     return (
                       <tr
                         key={rowKey}
-                        className={`group/row transition-all duration-200 cursor-pointer hover:bg-primary/5
-                          ${ri % 2 === 0 ? 'bg-card' : 'bg-muted/20'}
-                          ${isSelected ? 'bg-primary/10 shadow-[inset_3px_0_0_0_hsl(var(--primary))]' : ''}
+                        className={`group/row transition-all duration-200 cursor-pointer
+                          ${isApproved ? 'bg-green-500/10 hover:bg-green-500/15' : `hover:bg-primary/5 ${ri % 2 === 0 ? 'bg-card' : 'bg-muted/20'}`}
+                          ${isApproved ? 'shadow-[inset_3px_0_0_0_#22c55e]' : isSelected ? 'bg-primary/10 shadow-[inset_3px_0_0_0_hsl(var(--primary))]' : ''}
                           ${isLastInGroup && gi < sortedGroups.length - 1 ? 'border-b-2 border-b-primary/40' : 'border-b border-border/40'}`}
                         onClick={() => {
                           // If the user just finished a text selection, treat the
@@ -526,6 +622,33 @@ export default function ExcelPanel({
                           onRowClick?.(row.sessionId, row.page);
                         }}
                       >
+                        {/* Actions: re-extract + approve — shown on first sub-row of each page */}
+                        <td className="px-1 py-2 w-14 border-r border-border/40">
+                          {row.isFirstOfPage && (
+                            <div className="flex items-center gap-0.5 justify-center">
+                              {onReExtractPage && (
+                                <button
+                                  className="p-0.5 rounded text-muted-foreground hover:text-primary hover:bg-primary/10 transition-all"
+                                  title="Re-extract this page"
+                                  onClick={e => { e.stopPropagation(); onReExtractPage(row.sessionId, row.page); }}
+                                >
+                                  <RefreshCw className="w-3 h-3" />
+                                </button>
+                              )}
+                              <button
+                                className={`p-0.5 rounded transition-all ${
+                                  isApproved
+                                    ? 'text-green-500 bg-green-500/15 hover:bg-green-500/25'
+                                    : 'text-muted-foreground hover:text-green-500 hover:bg-green-500/10'
+                                } ${isApproving ? 'opacity-40 pointer-events-none' : ''}`}
+                                title={isApproved ? 'Approved — click to un-approve' : 'Approve this row'}
+                                onClick={e => { e.stopPropagation(); void toggleApprove(row); }}
+                              >
+                                <Check className="w-3 h-3" />
+                              </button>
+                            </div>
+                          )}
+                        </td>
                         {multiFile && (
                           <td className="px-3 py-2 text-muted-foreground text-[10px] truncate max-w-[140px]" title={g.filename}>
                             {ri === 0 ? g.filename.replace(/\.(pdf|docx?)$/i, '') : ''}

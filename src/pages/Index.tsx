@@ -4,7 +4,7 @@ import { toast } from 'sonner';
 import {
   Upload, ChevronLeft, ChevronRight,
   AlertTriangle, FileSearch, X, ShieldCheck, LogOut,
-  RotateCw, Eraser, DownloadCloud, Loader2, XCircle,
+  RotateCw, Eraser, DownloadCloud, Loader2, XCircle, Layers,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import UploadZone from '@/components/UploadZone';
@@ -12,6 +12,7 @@ import PDFCardList from '@/components/PDFCardList';
 import ProcessingModal from '@/components/ProcessingModal';
 import PDFViewer from '@/components/PDFViewer';
 import ExcelPanel from '@/components/ExcelPanel';
+import BatchPanel from '@/components/BatchPanel';
 import ThemeToggle from '@/components/ThemeToggle';
 import type { PDFSession, Highlight, ExtractedRow, DocumentType } from '@/types/utilscraper';
 import { DOCUMENT_TYPES } from '@/types/utilscraper';
@@ -41,6 +42,7 @@ export default function Index() {
   const [excelWidth, setExcelWidth]             = useState(480); // px, draggable
   const [backendDown, setBackendDown]           = useState(false);
   const [zippingOcr, setZippingOcr]             = useState(false);
+  const [showBatchPanel, setShowBatchPanel]     = useState(false);
   const [navCollapsed, setNavCollapsed]         = useState(false);
   const [pendingDocType, setPendingDocType]     = useState<DocumentType>('utility_bill');
   const [dragTabId, setDragTabId]               = useState<string | null>(null);
@@ -461,6 +463,44 @@ export default function Index() {
     const docTypes = targets.map(t => t.docType);
     trackUsage(targets.length, totalExtracted, docTypes).catch(() => {});
   }, [sessions, openTabs, trackUsage]);
+
+  const handleReExtractPage = useCallback(async (sessionId: string, page: number) => {
+    const sess = sessions.find(s => s.id === sessionId);
+    if (!sess?.file) return;
+    const pageHighlights = sess.highlights[page] ?? [];
+    if (!pageHighlights.length) { toast('No highlights on this page', { icon: 'ℹ️' }); return; }
+
+    setExtracting(true);
+    try {
+      const cleared = pageHighlights.map(h => ({ ...h, extractedValue: undefined, confidence: undefined, wasOcr: undefined }));
+      const results = await extractRegions(sessionId, cleared, sess.file, { strict: true });
+
+      setSessions(prev => prev.map(s => {
+        if (s.id !== sessionId) return s;
+        const newHls = { ...s.highlights };
+        newHls[page] = (s.highlights[page] ?? []).map((h, i) => {
+          const r = results[i];
+          return r ? { ...h, extractedValue: r.value, confidence: r.confidence, wasOcr: r.wasOcr } : h;
+        });
+        const allResults: ExtractedRow[] = Object.values(newHls).flat()
+          .filter(h => h.extractedValue !== undefined)
+          .map(h => ({
+            page: h.page, field: h.field, value: h.extractedValue ?? null,
+            confidence: h.confidence ?? 'low', wasOcr: h.wasOcr ?? false,
+            filename: s.filename, folderName: s.folderName, sessionId: s.id,
+          }));
+        // Preserve any manually-edited values for OTHER pages
+        const editedOtherPages = s.extractedData.filter(r => r.page !== page && r.edited);
+        for (const e of editedOtherPages) {
+          const idx = allResults.findIndex(r => r.sessionId === e.sessionId && r.page === e.page && r.field === e.field);
+          if (idx >= 0) allResults[idx] = { ...allResults[idx], value: e.value, edited: true };
+        }
+        return { ...s, highlights: newHls, extractedData: allResults };
+      }));
+      toast.success(`Re-extracted page ${page}`);
+    } catch (err: any) { toast.error(`Re-extraction failed: ${err.message}`); }
+    setExtracting(false);
+  }, [sessions]);
 
   const handleReExtractHighlight = useCallback(async (highlightId: string) => {
     if (!activeSession?.file) return;
@@ -1103,6 +1143,14 @@ export default function Index() {
                 <span className="hidden sm:inline">Usage</span>
               </button>
             )}
+            <button
+              onClick={() => setShowBatchPanel(true)}
+              className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-all duration-200 px-2 py-1.5 rounded-lg hover:bg-muted"
+              title="Manage batches"
+            >
+              <Layers className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Batches</span>
+            </button>
             <ThemeToggle />
             <button
               onClick={() => { logout(); navigate('/login'); }}
@@ -1304,6 +1352,7 @@ export default function Index() {
                       provider={DOCUMENT_TYPES.find(d => d.value === activeSession.docType)?.label ?? 'Document'}
                       onClose={() => setShowExcel(false)}
                       onReExtract={handleExtract}
+                      onReExtractPage={handleReExtractPage}
                       onDataChange={(d: ExtractedRow[]) => {
                         setSessions(prev => prev.map(s => ({
                           ...s,
@@ -1346,6 +1395,12 @@ export default function Index() {
       </div>
 
       <ProcessingModal open={modalOpen} step={modalStep} detail={modalDetail} fileIndex={modalFileIdx} totalFiles={modalTotalFiles} />
+      {showBatchPanel && (
+        <BatchPanel
+          username={user?.username ?? 'unknown'}
+          onClose={() => setShowBatchPanel(false)}
+        />
+      )}
     </div>
   );
 }
