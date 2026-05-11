@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { X, Plus, Pencil, Trash2, ChevronDown, ChevronRight, Check, Loader2 } from 'lucide-react';
+import { X, Plus, Pencil, Trash2, ChevronDown, ChevronRight, Check, Loader2, CheckCircle2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000';
@@ -26,10 +26,12 @@ interface BatchRecord {
 
 interface Props {
   username: string;
+  activeBatchId?: number | null;
   onClose: () => void;
+  onSelect?: (id: number, name: string) => void;
 }
 
-export default function BatchPanel({ username, onClose }: Props) {
+export default function BatchPanel({ username, activeBatchId, onClose, onSelect }: Props) {
   const [batches, setBatches]         = useState<Batch[]>([]);
   const [loading, setLoading]         = useState(true);
 
@@ -229,6 +231,21 @@ export default function BatchPanel({ username, onClose }: Props) {
                     <span className="text-[10px] text-muted-foreground hidden md:block">
                       {fmtDate(b.created_at)}
                     </span>
+
+                    {onSelect && editingId !== b.id && (
+                      <button
+                        className={`flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-medium transition-all ${
+                          activeBatchId === b.id
+                            ? 'bg-primary text-primary-foreground'
+                            : 'bg-muted text-muted-foreground hover:bg-primary/20 hover:text-primary'
+                        }`}
+                        onClick={e => { e.stopPropagation(); onSelect(b.id, b.name); }}
+                        title={activeBatchId === b.id ? 'Active batch' : 'Use this batch'}
+                      >
+                        <CheckCircle2 className="w-3 h-3" />
+                        {activeBatchId === b.id ? 'Active' : 'Select'}
+                      </button>
+                    )}
 
                     {editingId === b.id ? (
                       <>

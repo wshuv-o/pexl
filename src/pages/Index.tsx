@@ -43,6 +43,7 @@ export default function Index() {
   const [backendDown, setBackendDown]           = useState(false);
   const [zippingOcr, setZippingOcr]             = useState(false);
   const [showBatchPanel, setShowBatchPanel]     = useState(false);
+  const [activeBatchId, setActiveBatchId]       = useState<number | null>(null);
   const [navCollapsed, setNavCollapsed]         = useState(false);
   const [pendingDocType, setPendingDocType]     = useState<DocumentType>('utility_bill');
   const [dragTabId, setDragTabId]               = useState<string | null>(null);
@@ -1362,6 +1363,7 @@ export default function Index() {
                       multiFile={sessions.filter(s => s.extractedData.length > 0).length > 1}
                       onDownload={() => trackDownload().catch(() => {})}
                       onRowClick={handleExcelRowClick}
+                      externalBatchId={activeBatchId}
                       onDeleteRow={(sessionId, page) => {
                         setSessions(prev => prev.map(s => {
                           if (s.id !== sessionId) return s;
@@ -1398,6 +1400,8 @@ export default function Index() {
       {showBatchPanel && (
         <BatchPanel
           username={user?.username ?? 'unknown'}
+          activeBatchId={activeBatchId}
+          onSelect={(id, name) => { setActiveBatchId(id); setShowBatchPanel(false); toast.success(`Batch "${name}" selected`); }}
           onClose={() => setShowBatchPanel(false)}
         />
       )}

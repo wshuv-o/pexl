@@ -28,6 +28,7 @@ interface Props {
   onDownload?: () => void;
   onRowClick?: (sessionId: string, page: number) => void;
   onDeleteRow?: (sessionId: string, page: number) => void;
+  externalBatchId?: number | null;
 }
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000';
@@ -148,7 +149,7 @@ const parseDateValue = (val: string): number => {
 const isDateField = (field: string): boolean => /date$/i.test(field);
 
 export default function ExcelPanel({
-  data, filename, provider, onClose, onReExtract, onReExtractPage, onDataChange, multiFile, onDownload, onRowClick, onDeleteRow,
+  data, filename, provider, onClose, onReExtract, onReExtractPage, onDataChange, multiFile, onDownload, onRowClick, onDeleteRow, externalBatchId,
 }: Props) {
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const [mergeGroups, setMergeGroups] = useState<MergeGroup[] | null>(null);
@@ -157,9 +158,32 @@ export default function ExcelPanel({
   const [selectedRowKey, setSelectedRowKey] = useState<string | null>(null);
   const [approvedKeys, setApprovedKeys] = useState<Set<string>>(new Set());
   const [approvingKey, setApprovingKey] = useState<string | null>(null);
-  const [batches, setBatches]           = useState<{ id: number; name: string }[]>([]);
-  const [activeBatchId, setActiveBatchId] = useState<number | null>(null);
+  const [batches, setBatches]               = useState<{ id: number; name: string }[]>([]);
+  const [activeBatchId, setActiveBatchId]   = useState<number | null>(externalBatchId ?? null);
+  const [batchSavedRows, setBatchSavedRows] = useState<ExtractedRow[]>([]);
   const [showBatchPanel, setShowBatchPanel] = useState(false);
+
+  useEffect(() => {
+    if (externalBatchId != null) setActiveBatchId(externalBatchId);
+  }, [externalBatchId]);
+
+  // Fetch saved batch records whenever the active batch changes
+  useEffect(() => {
+    if (!activeBatchId) { setBatchSavedRows([]); return; }
+    fetch(`${BACKEND_URL}/api/batches/${activeBatchId}/records`)
+      .then(r => r.json())
+      .then((d: any) => {
+        if (d.status !== 'ok') return;
+        const rows: ExtractedRow[] = [];
+        for (const rec of d.records) {
+          for (const [field, value] of Object.entries(rec.fields as Record<string, string>)) {
+            if (value) rows.push({ page: rec.page, field, value, confidence: 'high', wasOcr: false, filename: rec.filename, sessionId: rec.session_id });
+          }
+        }
+        setBatchSavedRows(rows);
+      })
+      .catch(() => {});
+  }, [activeBatchId]);
   const { user } = useAuth();
 
   // ── Build page rows grouped by PDF (multi-value cells) ─────────────────
@@ -326,6 +350,16 @@ export default function ExcelPanel({
     return out;
   }, [data, sortedGroups, fieldColumns]);
 
+  // Merge saved batch records with current session data for export.
+  // Batch records whose (sessionId, page) already appear in the current
+  // session are skipped — the live data takes precedence.
+  const exportData = useMemo(() => {
+    if (!batchSavedRows.length) return sortedFlat;
+    const liveKeys = new Set(sortedFlat.map(r => `${r.sessionId}|${r.page}`));
+    const prevOnly = batchSavedRows.filter(r => !liveKeys.has(`${r.sessionId}|${r.page}`));
+    return [...prevOnly, ...sortedFlat];
+  }, [batchSavedRows, sortedFlat]);
+
   const handleSort = (col: string) => {
     if (sortCol === col) setSortAsc(!sortAsc);
     else { setSortCol(col); setSortAsc(true); }
@@ -490,23 +524,24 @@ export default function ExcelPanel({
             size="sm"
             className="flex-1 h-8 text-xs bg-primary hover:bg-primary/90 text-primary-foreground font-semibold"
             onClick={() => {
+              if (exportData.length === 0) { toast.error('No data to export'); return; }
               // For utility bills run the utility-specific scan FIRST so we
               // surface provider_name groups too — the bank scan ignores
               // provider and would otherwise pre-empt this branch.
-              if (isUtilityExport(sortedFlat)) {
-                const utilGroups = findUtilityMergeOpportunities(sortedFlat);
+              if (isUtilityExport(exportData)) {
+                const utilGroups = findUtilityMergeOpportunities(exportData);
                 if (utilGroups.length > 0) {
                   setMergeGroups(utilGroups);
                   return;
                 }
               } else {
-                const bankGroups = findMergeOpportunities(sortedFlat);
+                const bankGroups = findMergeOpportunities(exportData);
                 if (bankGroups.length > 0) {
                   setMergeGroups(bankGroups);
                   return;
                 }
               }
-              exportToExcel(sortedFlat, filename, provider);
+              exportToExcel(exportData, filename, provider);
               onDownload?.();
             }}
           >
@@ -520,9 +555,14 @@ export default function ExcelPanel({
       {showBatchPanel && (
         <BatchPanel
           username={user?.username ?? 'unknown'}
+          activeBatchId={activeBatchId}
+          onSelect={(id, name) => {
+            setActiveBatchId(id);
+            setShowBatchPanel(false);
+            toast.success(`Batch "${name}" selected`);
+          }}
           onClose={() => {
             setShowBatchPanel(false);
-            // Refresh batch list after managing
             fetch(`${BACKEND_URL}/api/batches`)
               .then(r => r.json())
               .then(d => { if (d.status === 'ok') setBatches(d.batches.map((b: any) => ({ id: b.id, name: b.name }))); })
@@ -537,7 +577,7 @@ export default function ExcelPanel({
           groups={mergeGroups}
           onCancel={() => setMergeGroups(null)}
           onConfirm={(choices: MergeChoice[]) => {
-            const merged = choices.length > 0 ? applyMerges(sortedFlat, choices) : sortedFlat;
+            const merged = choices.length > 0 ? applyMerges(exportData, choices) : exportData;
             exportToExcel(merged, filename, provider);
             onDownload?.();
             setMergeGroups(null);
