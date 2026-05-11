@@ -471,13 +471,22 @@ export default function Index() {
     const pageHighlights = sess.highlights[page] ?? [];
     if (!pageHighlights.length) { toast('No highlights on this page', { icon: 'ℹ️' }); return; }
 
+    // Track the live session id — may be renewed once if the session expired.
+    let liveId = sessionId;
+
     setExtracting(true);
     try {
       const cleared = pageHighlights.map(h => ({ ...h, extractedValue: undefined, confidence: undefined, wasOcr: undefined }));
-      const results = await extractRegions(sessionId, cleared, sess.file, { strict: true });
+      const results = await extractRegions(liveId, cleared, sess.file, {
+        strict: true,
+        onSessionRenewed: (oldId, newId) => {
+          liveId = newId;
+          setSessions(prev => prev.map(s => s.id === oldId ? { ...s, id: newId } : s));
+        },
+      });
 
       setSessions(prev => prev.map(s => {
-        if (s.id !== sessionId) return s;
+        if (s.id !== liveId) return s;
         const newHls = { ...s.highlights };
         newHls[page] = (s.highlights[page] ?? []).map((h, i) => {
           const r = results[i];
@@ -496,7 +505,7 @@ export default function Index() {
           const idx = allResults.findIndex(r => r.sessionId === e.sessionId && r.page === e.page && r.field === e.field);
           if (idx >= 0) allResults[idx] = { ...allResults[idx], value: e.value, edited: true };
         }
-        return { ...s, highlights: newHls, extractedData: allResults };
+        return { ...s, highlights: newHls, extractedData: allResults, status: 'extracted' as const };
       }));
       toast.success(`Re-extracted page ${page}`);
     } catch (err: any) { toast.error(`Re-extraction failed: ${err.message}`); }
@@ -760,18 +769,27 @@ export default function Index() {
               w = p.valueWidth;
               h = p.valueHeight;
             } else {
+              // Constrain key search to the region where the key appeared on the
+              // source page (±35% X, ±25% Y). Handles layout drift across PDFs
+              // without grabbing a wrong same-named label elsewhere on the page.
+              const inSearchRegion = (c: { x: number; y: number; width: number; height: number }) => {
+                const cx = c.x + c.width / 2, cy = c.y + c.height / 2;
+                return cx >= Math.max(0, p.sourceKeyX - 0.35) && cx <= Math.min(1, p.sourceKeyX + 0.35)
+                    && cy >= Math.max(0, p.sourceKeyY - 0.25) && cy <= Math.min(1, p.sourceKeyY + 0.25);
+              };
               let match: { x: number; y: number; width: number; height: number } | null = null;
-              const backendMap = await fetchBackendKey(p.keyText);
-              match = await preferInTable(backendMap.get(pg) ?? [], pg);
+              const fetchedMap = await fetchBackendKey(p.keyText);
+              const backendAll = fetchedMap.get(pg) ?? [];
+              const backendRegion = backendAll.filter(inSearchRegion);
+              match = await preferInTable(backendRegion.length > 0 ? backendRegion : backendAll, pg);
               if (!match) {
-                const cands = await findAllTextPositionsInPdfPage(file, pg, p.keyText);
-                match = await preferInTable(cands, pg);
+                const allCands = await findAllTextPositionsInPdfPage(file, pg, p.keyText);
+                const regionCands = allCands.filter(inSearchRegion);
+                match = await preferInTable(regionCands.length > 0 ? regionCands : allCands, pg);
               }
+              // No key found anywhere — place value at the source coordinates on every
+              // page so layout drift is handled statically rather than skipping.
               if (!match) {
-                // Key readable (OCR got text) but not in the search index — the label
-                // is image-embedded (e.g. DocuSign form background). Fall back to the
-                // drawn box coordinates, but only for the matching source page.
-                if (pg !== p.sourcePage) continue;
                 x = clamp01(p.sourceKeyX + p.offsetX);
                 y = clamp01(p.sourceKeyY + p.offsetY);
                 w = p.valueWidth;

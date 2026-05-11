@@ -453,16 +453,27 @@ export default function PDFViewer({
               w = r.valueWidth;
               h = r.valueHeight;
             } else {
+              // Constrain key search to the region where the key appeared on the
+              // source page (±35% X, ±25% Y). Handles layout drift across pages
+              // without grabbing a wrong same-named label elsewhere on the page.
+              const inSearchRegion = (c: { x: number; y: number; width: number; height: number }) => {
+                const cx = c.x + c.width / 2, cy = c.y + c.height / 2;
+                return cx >= Math.max(0, r.sourceKeyX - 0.35) && cx <= Math.min(1, r.sourceKeyX + 0.35)
+                    && cy >= Math.max(0, r.sourceKeyY - 0.25) && cy <= Math.min(1, r.sourceKeyY + 0.25);
+              };
               let match: { x: number; y: number; width: number; height: number } | null = null;
               const map = await fetchBackendKey(r.keyText);
-              const backendList = map.get(pg) ?? [];
-              match = await preferInTable(backendList, pg);
+              const backendAll = map.get(pg) ?? [];
+              const backendRegion = backendAll.filter(inSearchRegion);
+              match = await preferInTable(backendRegion.length > 0 ? backendRegion : backendAll, pg);
               if (!match) {
-                const cands = await findAllTextPositionsInPdfPage(file, pg, r.keyText);
-                match = await preferInTable(cands, pg);
+                const allCands = await findAllTextPositionsInPdfPage(file, pg, r.keyText);
+                const regionCands = allCands.filter(inSearchRegion);
+                match = await preferInTable(regionCands.length > 0 ? regionCands : allCands, pg);
               }
+              // No key found anywhere — place value at the source coordinates on every
+              // page so layout drift is handled statically rather than skipping.
               if (!match) {
-                if (pg !== r.sourcePage) continue;
                 x = clamp01(r.sourceKeyX + r.offsetX);
                 y = clamp01(r.sourceKeyY + r.offsetY);
                 w = r.valueWidth;
