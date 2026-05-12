@@ -6,7 +6,7 @@ import ViewerToolbar from './ViewerToolbar';
 import HighlightOverlay from './HighlightOverlay';
 import FieldLabelPicker from './FieldLabelPicker';
 import HighlightLegend from './HighlightLegend';
-import { downloadOcrPdf, downloadExcel, fetchTableRegions, extractRegions, searchBackend, type SearchMode } from '@/lib/api';
+import { downloadOcrPdf, downloadExcel, fetchTableRegions, extractRegions, searchBackend, extractTableRegion, downloadTableRegionExcel, type SearchMode } from '@/lib/api';
 import { findAllTextPositionsInPdfPage, detectTableRegionsInPdfPage, getTextAtRect } from '@/lib/pdf-extract';
 import { toast } from 'sonner';
 
@@ -126,6 +126,21 @@ export default function PDFViewer({
   const [activeMatchIdx, setActiveMatchIdx] = useState<number>(-1);
   const [pdfLoaded, setPdfLoaded]       = useState(false);
   const [downloadingOcr, setDownloadingOcr] = useState(false);
+
+  // ── Table region selection ────────────────────────────────────────────────
+  type TableCell = { row: number; col: number; rowspan: number; colspan: number; text: string };
+  type TablePreview = {
+    rows: string[][];
+    ncols: number;
+    page: number;
+    region: { x: number; y: number; width: number; height: number };
+    cells?: TableCell[];
+    n_rows?: number;
+    n_cols?: number;
+    source?: string;
+  };
+  const [tablePreview, setTablePreview] = useState<TablePreview | null>(null);
+  const [tableSelectLoading, setTableSelectLoading] = useState(false);
 
   // ── Auto-extract setup mode (replaces the old guided auto-search) ─────
   // Click the magic-wand button to enter setup. The user draws value
@@ -756,7 +771,7 @@ export default function PDFViewer({
       return;
     }
 
-    if (tool === 'cursor' || tool === 'highlight' || tool === 'select') {
+    if (tool === 'cursor' || tool === 'highlight' || tool === 'select' || tool === 'table-select') {
       e.preventDefault();
       if (!e.shiftKey && !e.ctrlKey && !e.metaKey) setSelectedIds(new Set());
       setDrawingPage(pageNum);
@@ -783,6 +798,24 @@ export default function PDFViewer({
   }, [drawing, drawingPage, getRelativePos]);
 
   const handleMouseUp = useCallback(async (e: React.MouseEvent) => {
+    // Table-select mode: extract region as structured table
+    if (drawing && drawingPage !== null && tool === 'table-select') {
+      const r = { x: drawing.x, y: drawing.y, width: drawing.w, height: drawing.h };
+      setDrawing(null); setDrawingPage(null);
+      if (r.width > 0.005 && r.height > 0.005) {
+        setTableSelectLoading(true);
+        try {
+          const result = await extractTableRegion(session.id, drawingPage, r.x, r.y, r.width, r.height);
+          setTablePreview({ ...result, page: drawingPage, region: r });
+        } catch (err: unknown) {
+          toast.error(err instanceof Error ? err.message : 'Table extraction failed');
+        } finally {
+          setTableSelectLoading(false);
+        }
+      }
+      return;
+    }
+
     // Select mode: finish marquee — select all highlights whose center lies inside
     if (drawing && drawingPage !== null && tool === 'select') {
       const r = { x: drawing.x, y: drawing.y, w: drawing.w, h: drawing.h };
@@ -855,7 +888,7 @@ export default function PDFViewer({
       setDrawing(null);
       setDrawingPage(null);
     }
-  }, [drawing, drawingPage, tool, session.highlights, getRelativePos, autoSetupActive, autoNextStep]);
+  }, [drawing, drawingPage, tool, session.highlights, session.id, getRelativePos, autoSetupActive, autoNextStep]);
 
   // -----------------------------------------------------------------------
   // Text-select tool: when the browser finishes a character-level selection
@@ -1706,7 +1739,7 @@ export default function PDFViewer({
                   style={{
                     display:    'inline-block',
                     lineHeight: 0,
-                    cursor:     (tool === 'cursor' || tool === 'highlight') ? 'crosshair' : tool === 'text-select' ? 'text' : 'default',
+                    cursor:     (tool === 'cursor' || tool === 'highlight' || tool === 'table-select') ? 'crosshair' : tool === 'text-select' ? 'text' : 'default',
                     transform:  fineRotation !== 0 ? `rotate(${fineRotation}deg)` : undefined,
                     transition: 'transform 0.3s ease',
                     opacity:    isCover ? 0.5 : 1,
@@ -1726,10 +1759,10 @@ export default function PDFViewer({
                   {/* Highlights for this page */}
                   <HighlightOverlay
                     highlights={pgHls}
-                    drawing={drawingPage === pageNum && drawing && tool !== 'select'
+                    drawing={drawingPage === pageNum && drawing && tool !== 'select' && tool !== 'table-select'
                       ? { x: drawing.x, y: drawing.y, w: drawing.w, h: drawing.h }
                       : null}
-                    selectionBox={drawingPage === pageNum && drawing && tool === 'select'
+                    selectionBox={drawingPage === pageNum && drawing && (tool === 'select' || tool === 'table-select')
                       ? { x: drawing.x, y: drawing.y, w: drawing.w, h: drawing.h }
                       : null}
                     selectedIds={selectedIds}
@@ -1814,6 +1847,92 @@ export default function PDFViewer({
           <HighlightLegend highlights={allHighlights} />
         )}
       </div>
+
+      {/* Table-select loading indicator */}
+      {tableSelectLoading && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
+          <div className="bg-background rounded-lg px-6 py-4 flex items-center gap-3 shadow-lg text-sm">
+            <svg className="w-4 h-4 animate-spin text-primary" viewBox="0 0 24 24" fill="none">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
+            </svg>
+            Extracting table…
+          </div>
+        </div>
+      )}
+
+      {/* Table region preview modal */}
+      {tablePreview && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setTablePreview(null)}>
+          <div
+            className="bg-background rounded-xl shadow-2xl flex flex-col max-w-[90vw] max-h-[85vh] w-auto min-w-[320px]"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-4 py-3 border-b gap-3">
+              <span className="font-semibold text-sm shrink-0">
+                Table — Page {tablePreview.page}
+                {tablePreview.source && (
+                  <span className="ml-2 text-[10px] font-normal text-muted-foreground uppercase tracking-wider">
+                    {tablePreview.source}
+                  </span>
+                )}
+              </span>
+              <div className="flex items-center gap-2 flex-wrap justify-end">
+                <button
+                  className="text-xs bg-primary text-primary-foreground px-3 py-1.5 rounded-md font-medium hover:bg-primary/90"
+                  onClick={async () => {
+                    try {
+                      await downloadTableRegionExcel(
+                        session.id, tablePreview.page,
+                        tablePreview.region.x, tablePreview.region.y,
+                        tablePreview.region.width, tablePreview.region.height,
+                        session.filename.replace(/\.[^.]+$/, '') + `_region_p${tablePreview.page}.xlsx`,
+                      );
+                    } catch (err: unknown) {
+                      toast.error(err instanceof Error ? err.message : 'Export failed');
+                    }
+                  }}
+                >
+                  Export Excel
+                </button>
+                <button
+                  className="text-xs text-muted-foreground hover:text-foreground px-2 py-1.5 rounded-md"
+                  onClick={() => setTablePreview(null)}
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+            <div className="overflow-auto p-3">
+              <table className="text-xs border-collapse" style={{ tableLayout: 'auto' }}>
+                <tbody>
+                  {tablePreview.rows.map((row, ri) => {
+                    const isHeaderRow = ri === 0;
+                    const rowBg = isHeaderRow ? '' : ri % 2 === 1 ? 'bg-muted/30' : '';
+                    return (
+                      <tr key={ri} className={rowBg}>
+                        {row.map((cell, ci) => (
+                          <td
+                            key={ci}
+                            className={
+                              'border border-border px-2 py-1 align-top ' +
+                              (isHeaderRow ? 'bg-primary/10 font-semibold ' : '') +
+                              'whitespace-pre-wrap break-words'
+                            }
+                            style={{ minWidth: 60, maxWidth: 320 }}
+                          >
+                            {cell}
+                          </td>
+                        ))}
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

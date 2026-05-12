@@ -3,7 +3,7 @@ import {
   ChevronLeft, ChevronRight, ZoomIn, ZoomOut,
   MousePointer2, Eraser, Loader2, TextCursor,
   FileDown, FileInput, FileStack, Trash2, ListChecks, ChevronDown, Search,
-  SlidersHorizontal, Download, MousePointerClick, Wand2, Filter, Check, FileSpreadsheet,
+  SlidersHorizontal, Download, MousePointerClick, Wand2, Filter, Check, FileSpreadsheet, Table2,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -373,10 +373,11 @@ export default function ViewerToolbar({
 
       {/* Drawing tools */}
       <div className="flex items-center gap-0.5 shrink-0">
-        {toolBtn('cursor',      <MousePointer2     className="w-4 h-4" />, 'Cursor — drag to draw extraction boxes, click to edit')}
-        {toolBtn('select',      <MousePointerClick className="w-4 h-4" />, 'Select — click boxes or marquee-select, drag to move')}
-        {toolBtn('text-select', <TextCursor        className="w-4 h-4" />, 'Select text — copy from PDF')}
-        {toolBtn('eraser',      <Eraser            className="w-4 h-4" />, 'Erase all on this page')}
+        {toolBtn('cursor',       <MousePointer2     className="w-4 h-4" />, 'Cursor — drag to draw extraction boxes, click to edit')}
+        {toolBtn('select',       <MousePointerClick className="w-4 h-4" />, 'Select — click boxes or marquee-select, drag to move')}
+        {toolBtn('text-select',  <TextCursor        className="w-4 h-4" />, 'Select text — copy from PDF')}
+        {toolBtn('table-select', <Table2            className="w-4 h-4" />, 'Table select — draw a box to extract a table region as Excel')}
+        {toolBtn('eraser',       <Eraser            className="w-4 h-4" />, 'Erase all on this page')}
       </div>
 
       {/* Separator */}

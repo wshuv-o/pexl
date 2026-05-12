@@ -444,6 +444,57 @@ export async function downloadExcel(
   triggerDownload(blob, `${stem}_tables.xlsx`);
 }
 
+export interface TableRegionCell {
+  row: number;
+  col: number;
+  rowspan: number;
+  colspan: number;
+  text: string;
+}
+
+export interface TableRegionResult {
+  rows: string[][];
+  ncols: number;
+  source?: string;
+  cells?: TableRegionCell[];
+  n_rows?: number;
+  n_cols?: number;
+}
+
+export async function extractTableRegion(
+  sessionId: string,
+  page: number,
+  x: number, y: number, width: number, height: number,
+): Promise<TableRegionResult> {
+  const res = await fetch(`${BACKEND_URL}/api/utility/session/${sessionId}/extract-table-region`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ page, x, y, width, height }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error((data as any).error ?? `Extraction failed (${res.status})`);
+  return data as TableRegionResult;
+}
+
+export async function downloadTableRegionExcel(
+  sessionId: string,
+  page: number,
+  x: number, y: number, width: number, height: number,
+  filename: string,
+): Promise<void> {
+  const res = await fetch(`${BACKEND_URL}/api/utility/session/${sessionId}/extract-table-region/excel`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ page, x, y, width, height }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error((data as any).error ?? `Export failed (${res.status})`);
+  }
+  const blob = await res.blob();
+  triggerDownload(blob, filename);
+}
+
 export type SearchMode = 'exact' | 'partial' | 'fuzzy';
 
 export interface SearchMatch {

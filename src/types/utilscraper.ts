@@ -210,4 +210,4 @@ export interface ExtractedRow {
   sessionId?: string;    // which session this row belongs to
 }
 
-export type ViewerTool = 'cursor' | 'highlight' | 'eraser' | 'text-select' | 'select';
+export type ViewerTool = 'cursor' | 'highlight' | 'eraser' | 'text-select' | 'select' | 'table-select';
