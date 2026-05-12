@@ -420,6 +420,93 @@ function buildLeaseSheet(fileMap: Map<string, ExtractedRow[]>): XLSX.WorkSheet {
   return ws;
 }
 // ---------------------------------------------------------------------------
+// Tax export — one row per PDF, columns in user-selection order.
+//
+// Differences from buildUnifiedSheet:
+//   • All pages of a PDF collapse into a single row (first non-empty value
+//     per field wins).
+//   • Column order = order of field first-appearance across all rows. The
+//     declared tax-field schema only contributes labels; it does NOT pin
+//     a fixed column order. So if the user highlights "Total Tax Due"
+//     before "Tax Year", "Total Tax Due" becomes the first data column.
+function buildTaxSheet(fileMap: Map<string, ExtractedRow[]>): XLSX.WorkSheet {
+  const headerColor = HEADER_COLORS['tax'];
+
+  const declaredLabels = new Map<string, string>();
+  for (const f of getFieldLabelsForType('tax')) {
+    if (f.value !== 'custom') declaredLabels.set(f.value as string, f.label);
+  }
+
+  // Global selection order — first PDF's order wins, subsequent PDFs append
+  // any fields the first didn't cover.
+  const fieldOrder: string[] = [];
+  const fieldSeen = new Set<string>();
+
+  type PdfRec = { pdfNum: number; folder: string; fileName: string; values: Record<string, string> };
+  const records: PdfRec[] = [];
+
+  let pdfNum = 0;
+  for (const [filename, rows] of fileMap.entries()) {
+    pdfNum++;
+    let folder = '';
+    const values: Record<string, string> = {};
+    for (const row of rows) {
+      if (!fieldSeen.has(row.field)) {
+        fieldSeen.add(row.field);
+        fieldOrder.push(row.field);
+      }
+      if (row.folderName && !folder) folder = row.folderName;
+      if (!row.value) continue;
+      if (!values[row.field]) values[row.field] = row.value;
+    }
+    records.push({
+      pdfNum, folder,
+      fileName: filename.replace(/\.(pdf|docx?)$/i, ''),
+      values,
+    });
+  }
+
+  const wsData: any[][] = [];
+  const styles: { row: number; col: number; style: any }[] = [];
+  let ri = 0;
+  const push = (cs: any[]) => { wsData.push(cs); return ri++; };
+  const sc = (r: number, c: number, s: any) => styles.push({ row: r, col: c, style: s });
+
+  const headerCells = ['PDF #', 'Folder', 'File Name', ...fieldOrder.map(k => declaredLabels.get(k) ?? k)];
+  const r0 = push(headerCells);
+  for (let c = 0; c < headerCells.length; c++) {
+    sc(r0, c, hdr(headerColor.bg, headerColor.font));
+  }
+
+  for (const rec of records) {
+    const dataCells: any[] = [
+      rec.pdfNum,
+      rec.folder,
+      rec.fileName,
+      ...fieldOrder.map(k => coerceCell(k, rec.values[k] ?? '')),
+    ];
+    const r = push(dataCells);
+    sc(r, 0, cell(C.whiteBg, true,  'center', 10));
+    sc(r, 1, cell(C.whiteBg, false, 'left',   10));
+    sc(r, 2, cell(C.whiteBg, true,  'left',   10));
+    fieldOrder.forEach((k, idx) => {
+      sc(r, 3 + idx, cell(C.whiteBg, false, alignFor(k), 10));
+    });
+  }
+
+  const ws = XLSX.utils.aoa_to_sheet(wsData);
+  applyStyles(ws, wsData, styles);
+  ws['!cols'] = [
+    { wch: 7 },    // PDF #
+    { wch: 20 },   // Folder
+    { wch: 30 },   // File Name
+    ...fieldOrder.map(() => ({ wch: 22 })),
+  ];
+  (ws as any)['__sv__'] = { xSplit: 3, ySplit: 1 };
+  return ws;
+}
+
+// ---------------------------------------------------------------------------
 function buildUnifiedSheet(fileMap: Map<string, ExtractedRow[]>, docType: DocumentType): XLSX.WorkSheet {
   const headerColor = HEADER_COLORS[docType];
 
@@ -574,7 +661,7 @@ export async function exportToExcel(
     const ws = buildUnifiedSheet(fileMap, 'appraisal');
     XLSX.utils.book_append_sheet(wb, ws, 'Appraisals');
   } else if (overallType === 'tax') {
-    const ws = buildUnifiedSheet(fileMap, 'tax');
+    const ws = buildTaxSheet(fileMap);
     XLSX.utils.book_append_sheet(wb, ws, 'Tax');
 
   } else if (overallType === 'utility_bill') {
