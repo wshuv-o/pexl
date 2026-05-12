@@ -128,15 +128,19 @@ export default function PDFViewer({
   const [downloadingOcr, setDownloadingOcr] = useState(false);
 
   // ── Table region selection ────────────────────────────────────────────────
-  type TableCell = { row: number; col: number; rowspan: number; colspan: number; text: string };
+  type TableCell = {
+    row: number;
+    col: number;
+    rowspan: number;
+    colspan: number;
+    text: string;
+  };
   type TablePreview = {
     rows: string[][];
     ncols: number;
     page: number;
     region: { x: number; y: number; width: number; height: number };
     cells?: TableCell[];
-    n_rows?: number;
-    n_cols?: number;
     source?: string;
   };
   const [tablePreview, setTablePreview] = useState<TablePreview | null>(null);
@@ -328,7 +332,7 @@ export default function PDFViewer({
       );
     }
     return out;
-  }, [autoPairs, session.file, session.id]);
+  }, [autoPairs, session.file, onSessionRenewed]);
 
   const exitAutoSetup = useCallback(() => {
     setAutoSetupActive(false);
@@ -1862,77 +1866,131 @@ export default function PDFViewer({
       )}
 
       {/* Table region preview modal */}
-      {tablePreview && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setTablePreview(null)}>
-          <div
-            className="bg-background rounded-xl shadow-2xl flex flex-col max-w-[90vw] max-h-[85vh] w-auto min-w-[320px]"
-            onClick={e => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between px-4 py-3 border-b gap-3">
-              <span className="font-semibold text-sm shrink-0">
-                Table — Page {tablePreview.page}
-                {tablePreview.source && (
-                  <span className="ml-2 text-[10px] font-normal text-muted-foreground uppercase tracking-wider">
-                    {tablePreview.source}
-                  </span>
-                )}
-              </span>
-              <div className="flex items-center gap-2 flex-wrap justify-end">
-                <button
-                  className="text-xs bg-primary text-primary-foreground px-3 py-1.5 rounded-md font-medium hover:bg-primary/90"
-                  onClick={async () => {
-                    try {
-                      await downloadTableRegionExcel(
-                        session.id, tablePreview.page,
-                        tablePreview.region.x, tablePreview.region.y,
-                        tablePreview.region.width, tablePreview.region.height,
-                        session.filename.replace(/\.[^.]+$/, '') + `_region_p${tablePreview.page}.xlsx`,
+      {tablePreview && (() => {
+        const displayRows = tablePreview.rows;
+        const displayCells = tablePreview.cells ?? null;
+        // Build a (row,col) → cell lookup and a covered-slot set so we know
+        // which `<td>`s to skip during rowSpan/colSpan rendering.
+        let anchorMap: Map<string, TableCell> | null = null;
+        let coveredSlots: Set<string> | null = null;
+        let cellRows = 0;
+        let cellCols = 0;
+        if (displayCells) {
+          anchorMap = new Map();
+          coveredSlots = new Set();
+          for (const c of displayCells) {
+            anchorMap.set(`${c.row},${c.col}`, c);
+            for (let dr = 0; dr < c.rowspan; dr++) {
+              for (let dc = 0; dc < c.colspan; dc++) {
+                if (dr !== 0 || dc !== 0) coveredSlots.add(`${c.row + dr},${c.col + dc}`);
+              }
+            }
+            cellRows = Math.max(cellRows, c.row + c.rowspan);
+            cellCols = Math.max(cellCols, c.col + c.colspan);
+          }
+        }
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setTablePreview(null)}>
+            <div
+              className="bg-background rounded-xl shadow-2xl flex flex-col max-w-[90vw] max-h-[80vh] w-auto min-w-[320px]"
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between px-4 py-3 border-b gap-3">
+                <span className="font-semibold text-sm shrink-0">Table — Page {tablePreview.page}</span>
+                <div className="flex items-center gap-2 flex-wrap justify-end">
+                  <button
+                    className="text-xs bg-primary text-primary-foreground px-3 py-1.5 rounded-md font-medium hover:bg-primary/90"
+                    onClick={async () => {
+                      try {
+                        await downloadTableRegionExcel(
+                          session.id, tablePreview.page,
+                          tablePreview.region.x, tablePreview.region.y,
+                          tablePreview.region.width, tablePreview.region.height,
+                          session.filename.replace(/\.[^.]+$/, '') + `_region_p${tablePreview.page}.xlsx`,
+                        );
+                      } catch (err: unknown) {
+                        toast.error(err instanceof Error ? err.message : 'Export failed');
+                      }
+                    }}
+                  >
+                    Export Excel
+                  </button>
+                  <button
+                    className="text-xs text-muted-foreground hover:text-foreground px-2 py-1.5 rounded-md"
+                    onClick={() => setTablePreview(null)}
+                  >
+                    Close
+                  </button>
+                </div>
+              </div>
+              <div className="overflow-auto p-3">
+                <table className="text-xs border-collapse" style={{ tableLayout: 'auto' }}>
+                  <tbody>
+                    {displayCells && anchorMap && coveredSlots ? (
+                      Array.from({ length: cellRows }, (_, ri) => {
+                        const isHeaderRow = ri === 0;
+                        const rowBg = isHeaderRow ? '' : ri % 2 === 1 ? 'bg-muted/30' : '';
+                        return (
+                          <tr key={ri} className={rowBg}>
+                            {Array.from({ length: cellCols }, (_, ci) => {
+                              if (coveredSlots!.has(`${ri},${ci}`)) return null;
+                              const cell = anchorMap!.get(`${ri},${ci}`);
+                              const text = cell?.text ?? '';
+                              return (
+                                <td
+                                  key={ci}
+                                  rowSpan={cell?.rowspan && cell.rowspan > 1 ? cell.rowspan : undefined}
+                                  colSpan={cell?.colspan && cell.colspan > 1 ? cell.colspan : undefined}
+                                  className={
+                                    'border border-border px-2 py-1 align-top ' +
+                                    (isHeaderRow ? 'bg-primary/10 font-semibold ' : '') +
+                                    'whitespace-pre-wrap break-words'
+                                  }
+                                  style={{ minWidth: 60, maxWidth: 320 }}
+                                >
+                                  {text}
+                                </td>
+                              );
+                            })}
+                          </tr>
+                        );
+                      })
+                    ) : (
+                    displayRows.map((row, ri) => {
+                      const isHeaderRow = ri === 0;
+                      const rowBg = isHeaderRow
+                        ? ''
+                        : ri % 2 === 1
+                          ? 'bg-muted/30'
+                          : '';
+                      return (
+                        <tr key={ri} className={rowBg}>
+                          {row.map((cell, ci) => {
+                            return (
+                              <td
+                                key={ci}
+                                className={
+                                  'border border-border px-2 py-1 align-top ' +
+                                  (isHeaderRow ? 'bg-primary/10 font-semibold ' : '') +
+                                  'whitespace-pre-wrap break-words'
+                                }
+                                style={{ minWidth: 60, maxWidth: 320 }}
+                              >
+                                {cell}
+                              </td>
+                            );
+                          })}
+                        </tr>
                       );
-                    } catch (err: unknown) {
-                      toast.error(err instanceof Error ? err.message : 'Export failed');
-                    }
-                  }}
-                >
-                  Export Excel
-                </button>
-                <button
-                  className="text-xs text-muted-foreground hover:text-foreground px-2 py-1.5 rounded-md"
-                  onClick={() => setTablePreview(null)}
-                >
-                  Close
-                </button>
+                    })
+                    )}
+                  </tbody>
+                </table>
               </div>
             </div>
-            <div className="overflow-auto p-3">
-              <table className="text-xs border-collapse" style={{ tableLayout: 'auto' }}>
-                <tbody>
-                  {tablePreview.rows.map((row, ri) => {
-                    const isHeaderRow = ri === 0;
-                    const rowBg = isHeaderRow ? '' : ri % 2 === 1 ? 'bg-muted/30' : '';
-                    return (
-                      <tr key={ri} className={rowBg}>
-                        {row.map((cell, ci) => (
-                          <td
-                            key={ci}
-                            className={
-                              'border border-border px-2 py-1 align-top ' +
-                              (isHeaderRow ? 'bg-primary/10 font-semibold ' : '') +
-                              'whitespace-pre-wrap break-words'
-                            }
-                            style={{ minWidth: 60, maxWidth: 320 }}
-                          >
-                            {cell}
-                          </td>
-                        ))}
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
     </div>
   );
 }
