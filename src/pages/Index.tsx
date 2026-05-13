@@ -1325,6 +1325,14 @@ export default function Index() {
                     setOpenTabs(prev => prev.map(t => t === oldId ? newId : t));
                     setActiveTabId(prev => prev === oldId ? newId : prev);
                   }}
+                  onPdfReplaced={(newFile) => {
+                    // OCR download finished — swap the active session's File
+                    // so the viewer re-renders with the searchable copy and
+                    // text-select operates on the new OCR text layer.
+                    setSessions(prev => prev.map(s =>
+                      s.id === activeSession.id ? { ...s, file: newFile } : s,
+                    ));
+                  }}
                   onAutoApplyAllPdfs={handleAutoApplyAllPdfs}
                   onRemoveFieldFromAllPdfs={handleRemoveFieldFromAllPdfs}
                   onRemoveFieldFromSelectedPdfs={multiSelectedTabIds.size > 0

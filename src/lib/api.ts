@@ -297,7 +297,10 @@ export async function fetchOcrPdfBlobWithReason(sessionId: string): Promise<OcrF
 
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        const res = await fetch(url, { signal: AbortSignal.timeout(60_000) });
+        // OCR on multi-page PDFs can easily exceed a minute, especially on
+        // CPU-only Paddle with oneDNN disabled. 10 minutes is the upper bound
+        // before we assume something is actually stuck.
+        const res = await fetch(url, { signal: AbortSignal.timeout(600_000) });
         lastStatus = res.status;
         if (res.ok) {
           const b = await res.blob();
@@ -399,12 +402,13 @@ export async function downloadOcrPdf(
   sessionId: string,
   originalName: string,
   file?: File,
-): Promise<{ newSessionId?: string }> {
+): Promise<{ newSessionId?: string; blob: Blob; filename: string }> {
   const result = await fetchOcrPdfBlobWithRecovery(sessionId, file);
   if (!result.blob) throw new Error(ocrFetchErrorMessage(result, originalName));
   const stem = originalName.replace(/\.(docx?|pdf)$/i, '') || sessionId;
-  triggerDownload(result.blob, `${stem}_ocr.pdf`);
-  return { newSessionId: result.newSessionId };
+  const filename = `${stem}_ocr.pdf`;
+  triggerDownload(result.blob, filename);
+  return { newSessionId: result.newSessionId, blob: result.blob, filename };
 }
 
 export async function fetchTableRegions(

@@ -35,6 +35,11 @@ interface PDFViewerProps {
   onCustomFieldAdd: (name: string) => void;
   onSelectionChange?: (ids: Set<string>) => void;
   onSessionRenewed?: (oldId: string, newId: string) => void;
+  // Replace the PDF file backing the current session — used after the OCR
+  // download finishes so the in-viewer document switches to the searchable
+  // copy. The parent owns the session list; this callback hands it the new
+  // File so it can update `session.file`.
+  onPdfReplaced?: (newFile: File) => void;
   // Apply key-anchored auto-extract pairs to every other open PDF. Index
   // owns the session list so it iterates and calls onHighlightsChange per
   // session itself.
@@ -82,6 +87,7 @@ export default function PDFViewer({
   onCustomFieldAdd,
   onSelectionChange,
   onSessionRenewed,
+  onPdfReplaced,
   onAutoApplyAllPdfs,
   onRemoveFieldFromAllPdfs,
   onRemoveFieldFromSelectedPdfs,
@@ -594,9 +600,18 @@ export default function PDFViewer({
   const handleDownloadOcr = useCallback(async () => {
     setDownloadingOcr(true);
     try {
-      const { newSessionId } = await downloadOcrPdf(session.id, session.filename, session.file);
+      const { newSessionId, blob, filename } = await downloadOcrPdf(
+        session.id, session.filename, session.file,
+      );
       if (newSessionId && newSessionId !== session.id) {
         onSessionRenewed?.(session.id, newSessionId);
+      }
+      // Swap the in-viewer document to the freshly OCR'd copy so that
+      // text-select works on the new searchable layer without requiring
+      // the user to re-upload.
+      if (onPdfReplaced) {
+        const ocrFile = new File([blob], filename, { type: 'application/pdf' });
+        onPdfReplaced(ocrFile);
       }
       toast.success('OCR\'d PDF downloaded');
     } catch (err: unknown) {
@@ -604,7 +619,7 @@ export default function PDFViewer({
       toast.error(msg);
     }
     setDownloadingOcr(false);
-  }, [session.id, session.filename, session.file, onSessionRenewed]);
+  }, [session.id, session.filename, session.file, onSessionRenewed, onPdfReplaced]);
 
   const handleDownloadExcel = useCallback(async (pages?: string): Promise<void> => {
     try {
@@ -895,84 +910,16 @@ export default function PDFViewer({
   }, [drawing, drawingPage, tool, session.highlights, session.id, getRelativePos, autoSetupActive, autoNextStep]);
 
   // -----------------------------------------------------------------------
-  // Text-select tool: when the browser finishes a character-level selection
-  // (mouseup with an active Selection), compute the bounding box and open
-  // the field-label picker with the selected text pre-filled. Works exactly
-  // like dragging across text in Adobe Acrobat.
+  // Text-select tool: pure native browser selection.
+  //
+  // The tool just enables ``renderTextLayer`` on the active page so the
+  // transparent glyph spans become hit-testable. Everything else — drag to
+  // select, double-click to select a word, triple-click for a line,
+  // Ctrl+C to copy to the system clipboard, click elsewhere to deselect —
+  // is handled by the browser's built-in selection. No highlight is
+  // created, the selection is not cleared on mouseup, and the user can
+  // paste the copied text into any other application.
   // -----------------------------------------------------------------------
-  useEffect(() => {
-    if (tool !== 'text-select') return;
-
-    const onMouseUp = () => {
-      // Defer one tick so the selection is finalized before we read it.
-      setTimeout(() => {
-        const sel = window.getSelection();
-        if (!sel || sel.rangeCount === 0) return;
-        const selectedText = sel.toString().trim();
-        if (!selectedText) return;
-
-        const range = sel.getRangeAt(0);
-        const rects = Array.from(range.getClientRects()).filter(r => r.width > 0 && r.height > 0);
-        if (rects.length === 0) return;
-
-        // For each rect, find which page it lives on (click-through to the
-        // pageRef with the largest overlap).
-        const byPage = new Map<number, DOMRect[]>();
-        for (const rect of rects) {
-          const cx = (rect.left + rect.right) / 2;
-          const cy = (rect.top + rect.bottom) / 2;
-          for (const [pageStr, el] of Object.entries(pageRefs.current)) {
-            if (!el) continue;
-            const pageRect = el.getBoundingClientRect();
-            if (cx >= pageRect.left && cx <= pageRect.right
-             && cy >= pageRect.top  && cy <= pageRect.bottom) {
-              const page = Number(pageStr);
-              if (!byPage.has(page)) byPage.set(page, []);
-              byPage.get(page)!.push(rect);
-              break;
-            }
-          }
-        }
-        if (byPage.size === 0) return;
-
-        // If the selection spans multiple pages, take the first one the
-        // selection started on (typical for a single drag).
-        const firstPage = Math.min(...byPage.keys());
-        const pageRects = byPage.get(firstPage)!;
-        const pageEl = pageRefs.current[firstPage];
-        if (!pageEl) return;
-        const pageBB = pageEl.getBoundingClientRect();
-
-        // Union of all rects on this page → the highlight's bounding box.
-        const minX = Math.min(...pageRects.map(r => r.left))  - pageBB.left;
-        const minY = Math.min(...pageRects.map(r => r.top))   - pageBB.top;
-        const maxX = Math.max(...pageRects.map(r => r.right)) - pageBB.left;
-        const maxY = Math.max(...pageRects.map(r => r.bottom))- pageBB.top;
-
-        // Normalize to 0-1 so it matches every other highlight in the store.
-        const rect = {
-          x: minX / pageBB.width,
-          y: minY / pageBB.height,
-          w: (maxX - minX) / pageBB.width,
-          h: (maxY - minY) / pageBB.height,
-        };
-
-        // Position the picker just below-right of the selection end, clamped
-        // inside the page div so it doesn't overflow.
-        const pickerX = Math.min(maxX, pageEl.offsetWidth  - 160);
-        const pickerY = Math.min(maxY, pageEl.offsetHeight - 200);
-
-        setPickerPos({ x: pickerX, y: pickerY, rect, page: firstPage, selectedText });
-
-        // Clear the browser's visual selection so it doesn't stay behind
-        // the highlight box.
-        sel.removeAllRanges();
-      }, 0);
-    };
-
-    document.addEventListener('mouseup', onMouseUp);
-    return () => document.removeEventListener('mouseup', onMouseUp);
-  }, [tool]);
 
   // -----------------------------------------------------------------------
   // Label selection — uses pickerPos.page
