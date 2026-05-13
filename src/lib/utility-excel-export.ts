@@ -121,16 +121,46 @@ type UtilityTable = {
 };
 type SheetParams = {
   sortedTables:   UtilityTable[];
+  /**
+   * Optional list of utility fields to render in the *summary* tables
+   * (Utility Bills / Operating Statement / Variance). When omitted,
+   * defaults to ``sortedTables`` (existing single-property behavior).
+   *
+   * For portfolio mode we pass the union of utility fields seen across
+   * every property here so each property sheet shows the same set of
+   * summary rows — missing fields appear as empty rows on that
+   * property's sheet.
+   */
+  summaryTables?: UtilityTable[];
   sortedMonths:   string[];
   headerProperty: string;
   headerAddress:  string;
   isRecon:        boolean;
 };
 
+/**
+ * Row positions of summary-table cells inside a built sheet. Used by the
+ * portfolio roll-up to create cross-sheet aggregation formulas that point
+ * back at each property sheet's Utility Recon page.
+ */
+type BuildSheetResult = {
+  ubRowByField:  Map<string, number>;
+  osRowByField:  Map<string, number>;
+  varRowByField: Map<string, number>;
+  ubTotalRow:    number;
+  osTotalRow:    number;
+  varTotalRow:   number;
+};
+
 // ─── Sheet builder (called once per output sheet) ────────────────────────────
 
-function buildSheet(wb: ExcelJS.Workbook, sheetName: string, p: SheetParams): void {
+function buildSheet(wb: ExcelJS.Workbook, sheetName: string, p: SheetParams): BuildSheetResult {
   const { sortedTables, sortedMonths, headerProperty, headerAddress, isRecon } = p;
+  // For single-property exports this is the same list as sortedTables, so
+  // behavior is byte-identical. Portfolio exports pass the union of utility
+  // fields seen across the whole portfolio so every per-property sheet has
+  // matching summary rows.
+  const summaryTables = p.summaryTables ?? sortedTables;
 
   // Recon: B=UtilityItems, C=Provider, D=Account (FIXED_COLS=4)
   // Raw:   B=Folder, C=File, D=UtilityItems, E=Provider, F=Account (FIXED_COLS=6)
@@ -280,15 +310,32 @@ function buildSheet(wb: ExcelJS.Workbook, sheetName: string, p: SheetParams): vo
   }
 
   // ── Per-utility-type data tables ──────────────────────────────────────────────
+  // Iterate ``summaryTables`` (= globalSortedTables in portfolio mode,
+  // sortedTables in single-property mode). For each utility field we look
+  // up the *local* data table; if this sheet has no bills for that field
+  // we still render a "shell" orange table — header, an empty data row,
+  // and an empty Total row — so all property sheets in a portfolio line
+  // up with the same set of utility tables in the same order.
   const tableTotalRows = new Map<string, number>();
   let currentRow = isRecon ? 8 : 9;
 
-  for (const table of sortedTables) {
-    const sortedRows = Array.from(table.rows.values()).sort((a, b) =>
-      a.provider !== b.provider
-        ? a.provider.localeCompare(b.provider)
-        : a.account.localeCompare(b.account),
-    );
+  const localTablesByField = new Map<string, UtilityTable>();
+  for (const t of sortedTables) localTablesByField.set(t.utilityField, t);
+
+  for (const table of summaryTables) {
+    // Use only THIS property's rows for the orange table — globalSortedTables
+    // contains rows pooled from every property, which would leak other
+    // properties' bills onto this sheet if used directly. When the local
+    // map has no entry for this field, sortedRows is just empty and the
+    // table renders as a labelled shell with no data row.
+    const localTable = localTablesByField.get(table.utilityField);
+    const sortedRows = localTable
+      ? Array.from(localTable.rows.values()).sort((a, b) =>
+          a.provider !== b.provider
+            ? a.provider.localeCompare(b.provider)
+            : a.account.localeCompare(b.account),
+        )
+      : [];
 
     const tableStartRow = currentRow;
 
@@ -452,6 +499,9 @@ function buildSheet(wb: ExcelJS.Workbook, sheetName: string, p: SheetParams): vo
   const ubRows:  Map<string, number> = new Map();
   const osRows:  Map<string, number> = new Map();
   const varRows: Map<string, number> = new Map();
+  let ubTotalRow  = 0;
+  let osTotalRow  = 0;
+  let varTotalRow = 0;
 
   // Variance cells use red-bracket format for negatives
   const varFmt = '"$"#,##0.00;[Red]("$"#,##0.00)';
@@ -483,8 +533,11 @@ function buildSheet(wb: ExcelJS.Workbook, sheetName: string, p: SheetParams): vo
     G(currentRow, TOTAL_COL).value = 'Total';
     currentRow++;
 
-    // Per-utility rows
-    for (const table of sortedTables) {
+    // Per-utility rows. Loop summaryTables (= globalTables in portfolio
+    // mode, sortedTables otherwise) so portfolio property sheets show a
+    // matching row for every global utility — empty when this property
+    // has no bills for that utility.
+    for (const table of summaryTables) {
       ws.getRow(currentRow).height = 12.75;
       for (let c = 2; c <= LAST_COL; c++) G(currentRow, c).font = { name: 'Calibri', size: 10 };
       G(currentRow, utilityItemsCol).value = table.utilityLabel;
@@ -560,6 +613,274 @@ function buildSheet(wb: ExcelJS.Workbook, sheetName: string, p: SheetParams): vo
       tc.alignment = { horizontal: 'center', vertical: 'middle' };
     }
     const summaryEnd = currentRow;
+    if (section === 'Utility Bills')        ubTotalRow  = currentRow;
+    else if (section === 'Operating Statement') osTotalRow = currentRow;
+    else                                     varTotalRow = currentRow;
+    currentRow++;
+
+    applyBlockBorders(ws, summaryStart, summaryEnd, 2, LAST_COL, boldLeftSet);
+    if (si < sections.length - 1) currentRow += 1;
+  }
+
+  return {
+    ubRowByField:  ubRows,
+    osRowByField:  osRows,
+    varRowByField: varRows,
+    ubTotalRow, osTotalRow, varTotalRow,
+  };
+}
+
+// ─── Roll-up sheet builder (portfolio mode) ──────────────────────────────────
+
+type RollupProperty = {
+  /** Exact worksheet name of the property's Utility Recon sheet. */
+  sheetName: string;
+  /** Row positions returned from that sheet's buildSheet call. */
+  result:    BuildSheetResult;
+};
+
+/**
+ * Render the portfolio Roll-up sheet. Visually identical to a Utility Recon
+ * sheet (same column widths, header rows, fills, fonts, borders) but the
+ * orange per-utility tables are omitted and the 3 summary tables reference
+ * cells on each property sheet via cross-sheet formulas instead of using
+ * local table rows.
+ *
+ * Sheet contents:
+ *   • Row 1-6: standard property/address/month header block.
+ *   • Row 7  : empty buffer row.
+ *   • Row 8+ : the 3 summary tables (Utility Bills / Operating Statement
+ *              / Variance), each with one row per global utility field and
+ *              a final "Total Utilities" row.
+ *
+ * Each cell value is a SUM formula across every property's matching cell:
+ *   ='Prop A'!K8+'Prop B'!K8+'Prop C'!K8
+ * Properties that don't have data for a given utility have an empty cell
+ * at that position, which SUM correctly treats as zero — no special
+ * handling needed for missing fields.
+ */
+function buildRollupSheet(
+  wb: ExcelJS.Workbook,
+  sheetName: string,
+  p: {
+    summaryTables: UtilityTable[];
+    sortedMonths:  string[];
+    headerProperty: string;
+    headerAddress:  string;
+    perProperty:   RollupProperty[];
+  },
+): void {
+  const { summaryTables, sortedMonths, headerProperty, headerAddress, perProperty } = p;
+
+  // Same column layout as the recon sheet (FIXED_COLS = 4).
+  const FIXED_COLS      = 4;
+  const MONTH_COUNT     = sortedMonths.length;
+  const TOTAL_COL       = FIXED_COLS + MONTH_COUNT + 1;
+  const COMMENTS_COL    = TOTAL_COL + 1;
+  const LAST_COL        = COMMENTS_COL;
+  const utilityItemsCol = 2;
+  const providerCol     = 3;
+  const accountCol      = 4;
+  const boldLeftSet     = new Set([COMMENTS_COL]);
+
+  const ws = wb.addWorksheet(sheetName);
+  ws.views = [{ state: 'frozen', xSplit: 4, ySplit: 6, showGridLines: false, zoomScale: 85 }];
+
+  // ── Column widths (mirror recon) ─────────────────────────────────────────────
+  ws.getColumn(1).width = 2.5;
+  ws.getColumn(2).width = 30;
+  ws.getColumn(3).width = 33;
+  ws.getColumn(4).width = 23;
+  for (let i = 0; i < MONTH_COUNT; i++) ws.getColumn(FIXED_COLS + 1 + i).width = 13.14;
+  ws.getColumn(TOTAL_COL).width    = 11.43;
+  ws.getColumn(COMMENTS_COL).width = 16.43;
+
+  const G = (row: number, col: number) => ws.getCell(row, col);
+
+  // ── Row 1: Property ──────────────────────────────────────────────────────────
+  ws.getRow(1).height = 18.75;
+  G(1,2).value = 'Property:';
+  G(1,2).font  = { name: 'Calibri', size: 14, bold: true, italic: true, underline: true };
+  G(1,3).value = headerProperty;
+  G(1,3).font  = { name: 'Calibri', size: 14, bold: true, italic: true, underline: true };
+
+  // ── Row 2: Address + month numbers ───────────────────────────────────────────
+  ws.getRow(2).height = 12.75;
+  G(2,2).value = 'Address:';
+  G(2,2).font  = { name: 'Calibri', size: 10, bold: true, italic: true, underline: true };
+  G(2,3).value = headerAddress;
+  G(2,3).font  = { name: 'Calibri', size: 10, italic: true, underline: true };
+  for (let i = 0; i < MONTH_COUNT; i++) {
+    const cell = G(2, FIXED_COLS + 1 + i);
+    cell.value     = parseInt(sortedMonths[i].split('-')[1], 10);
+    cell.font      = { name: 'Calibri', size: 10 };
+    cell.alignment = { horizontal: 'center', vertical: 'middle' };
+  }
+
+  // ── Row 3: years ─────────────────────────────────────────────────────────────
+  ws.getRow(3).height = 12.75;
+  for (let i = 0; i < MONTH_COUNT; i++) {
+    const cell = G(3, FIXED_COLS + 1 + i);
+    cell.value     = parseInt(sortedMonths[i].split('-')[0], 10);
+    cell.font      = { name: 'Calibri', size: 10 };
+    cell.alignment = { horizontal: 'center', vertical: 'middle' };
+  }
+
+  // ── Rows 4-5: blank + decoration ─────────────────────────────────────────────
+  ws.getRow(4).height = 12.75;
+  ws.getRow(5).height = 13.5;
+  for (let c = 2; c <= LAST_COL; c++) {
+    G(5, c).border = {
+      top: medium, bottom: medium,
+      left:  c === 2 ? medium : undefined,
+      right: medium,
+    };
+  }
+  ws.mergeCells('B5:C5');
+  if (LAST_COL >= 5) ws.mergeCells(5, 5, 5, LAST_COL);
+
+  // ── Row 6: green column headers ──────────────────────────────────────────────
+  ws.getRow(6).height = 16.5;
+  for (const [c, label] of [[2,'Utility Items'],[3,'Utility Provider'],[4,'Account Number']] as [number,string][]) {
+    const cell = G(6, c);
+    cell.value = label;
+    cell.fill  = greenHeaderFill;
+    cell.font  = { name: 'Calibri', size: 12, bold: true };
+    cell.alignment = { horizontal: 'center', vertical: 'middle' };
+  }
+  for (let i = 0; i < MONTH_COUNT; i++) {
+    const cell = G(6, FIXED_COLS + 1 + i);
+    cell.value     = monthKeyLabel(sortedMonths[i]);
+    cell.fill      = greenHeaderFill;
+    cell.font      = { name: 'Calibri', size: 12, bold: true };
+    cell.alignment = { horizontal: 'center', vertical: 'middle' };
+  }
+  G(6, TOTAL_COL).value = 'Total';
+  G(6, TOTAL_COL).fill  = greenHeaderFill;
+  G(6, TOTAL_COL).font  = { name: 'Calibri', size: 12, bold: true, italic: true };
+  G(6, TOTAL_COL).alignment = { horizontal: 'center', vertical: 'middle' };
+  G(6, COMMENTS_COL).value = 'Comments';
+  G(6, COMMENTS_COL).fill  = greenHeaderFill;
+  G(6, COMMENTS_COL).font  = { name: 'Calibri', size: 12, bold: true };
+  G(6, COMMENTS_COL).alignment = { horizontal: 'center', vertical: 'middle' };
+  applyBlockBorders(ws, 6, 6, 2, LAST_COL, boldLeftSet);
+  ws.autoFilter = { from: { row: 6, column: 2 }, to: { row: 6, column: LAST_COL } };
+
+  // ── Row 7: empty buffer ──────────────────────────────────────────────────────
+  ws.getRow(7).height = 12.75;
+  let currentRow = 8;
+
+  // ── 3 summary tables with cross-sheet aggregation formulas ──────────────────
+  const monthLabels = sortedMonths.map(mk => monthKeyLabel(mk));
+  type Section = 'Utility Bills' | 'Operating Statement' | 'Variance';
+  const sections: Section[] = ['Utility Bills', 'Operating Statement', 'Variance'];
+  const varFmt = '"$"#,##0.00;[Red]("$"#,##0.00)';
+
+  // Build a cross-sheet SUM formula for a given utility row across all
+  // properties. Returns an empty string if no property contributed a row
+  // for this field (which means we leave the cell blank).
+  const sumAcross = (rowGetter: (r: BuildSheetResult) => number | undefined, colL: string): string => {
+    const parts: string[] = [];
+    for (const prop of perProperty) {
+      const row = rowGetter(prop.result);
+      if (row !== undefined && row > 0) {
+        // Single-quote the sheet name only if it contains spaces or non-word chars.
+        const ref = /[^A-Za-z0-9_]/.test(prop.sheetName)
+          ? `'${prop.sheetName.replace(/'/g, "''")}'!${colL}${row}`
+          : `${prop.sheetName}!${colL}${row}`;
+        parts.push(ref);
+      }
+    }
+    return parts.length ? parts.join('+') : '';
+  };
+
+  for (let si = 0; si < sections.length; si++) {
+    const section = sections[si];
+    const summaryStart = currentRow;
+    const isVariance = section === 'Variance';
+
+    // Header row
+    ws.getRow(currentRow).height = 12.75;
+    for (let c = 2; c <= LAST_COL; c++) {
+      if (c === COMMENTS_COL || c === accountCol) {
+        G(currentRow, c).fill = whiteFill;
+        G(currentRow, c).font = { name: 'Calibri', size: 10, bold: true };
+        G(currentRow, c).alignment = { horizontal: 'center', vertical: 'middle' };
+        continue;
+      }
+      const isNavy = (c === utilityItemsCol || c === providerCol);
+      G(currentRow, c).fill      = isNavy ? navyFill : greenHeaderFill;
+      G(currentRow, c).font      = {
+        name: 'Calibri', size: 10, bold: true,
+        color: { argb: isNavy ? 'FFFFFFFF' : 'FF000000' },
+      };
+      G(currentRow, c).alignment = { horizontal: c > FIXED_COLS ? 'center' : 'left', vertical: 'middle' };
+    }
+    G(currentRow, 2).value = section;
+    for (let i = 0; i < MONTH_COUNT; i++) G(currentRow, FIXED_COLS + 1 + i).value = monthLabels[i];
+    G(currentRow, TOTAL_COL).value = 'Total';
+    currentRow++;
+
+    // Per-utility rows
+    const sectionRows = new Map<string, number>();
+    for (const table of summaryTables) {
+      ws.getRow(currentRow).height = 12.75;
+      for (let c = 2; c <= LAST_COL; c++) G(currentRow, c).font = { name: 'Calibri', size: 10 };
+      G(currentRow, utilityItemsCol).value = table.utilityLabel;
+
+      const rowGetter =
+        section === 'Utility Bills'        ? (r: BuildSheetResult) => r.ubRowByField.get(table.utilityField)
+        : section === 'Operating Statement' ? (r: BuildSheetResult) => r.osRowByField.get(table.utilityField)
+        :                                     (r: BuildSheetResult) => r.varRowByField.get(table.utilityField);
+
+      for (let i = 0; i < MONTH_COUNT; i++) {
+        const colL = colLetter(FIXED_COLS + 1 + i);
+        const formula = sumAcross(rowGetter, colL);
+        const cell = G(currentRow, FIXED_COLS + 1 + i);
+        if (formula) cell.value = { formula };
+        cell.numFmt    = isVariance ? varFmt : '"$"#,##0.00';
+        cell.alignment = { horizontal: 'center', vertical: 'middle' };
+      }
+      {
+        const colL = colLetter(TOTAL_COL);
+        const formula = sumAcross(rowGetter, colL);
+        const tc = G(currentRow, TOTAL_COL);
+        if (formula) tc.value = { formula };
+        tc.numFmt    = isVariance ? varFmt : '"$"#,##0.00';
+        tc.alignment = { horizontal: 'center', vertical: 'middle' };
+      }
+      sectionRows.set(table.utilityField, currentRow);
+      currentRow++;
+    }
+
+    // Total Utilities row — sum across properties of each property's section total
+    ws.getRow(currentRow).height = 12.75;
+    for (let c = 2; c <= LAST_COL; c++) G(currentRow, c).font = { name: 'Calibri', size: 10, bold: true };
+    G(currentRow, utilityItemsCol).value = 'Total Utilities';
+
+    const totalRowGetter =
+      section === 'Utility Bills'        ? (r: BuildSheetResult) => r.ubTotalRow
+      : section === 'Operating Statement' ? (r: BuildSheetResult) => r.osTotalRow
+      :                                     (r: BuildSheetResult) => r.varTotalRow;
+
+    for (let i = 0; i < MONTH_COUNT; i++) {
+      const colL = colLetter(FIXED_COLS + 1 + i);
+      const formula = sumAcross(totalRowGetter, colL);
+      const cell = G(currentRow, FIXED_COLS + 1 + i);
+      if (formula) cell.value = { formula };
+      cell.numFmt    = isVariance ? varFmt : '"$"#,##0.00';
+      cell.alignment = { horizontal: 'center', vertical: 'middle' };
+    }
+    {
+      const colL = colLetter(TOTAL_COL);
+      const formula = sumAcross(totalRowGetter, colL);
+      const tc = G(currentRow, TOTAL_COL);
+      if (formula) tc.value = { formula };
+      tc.numFmt    = isVariance ? varFmt : '"$"#,##0.00';
+      tc.alignment = { horizontal: 'center', vertical: 'middle' };
+    }
+
+    const summaryEnd = currentRow;
     currentRow++;
 
     applyBlockBorders(ws, summaryStart, summaryEnd, 2, LAST_COL, boldLeftSet);
@@ -613,83 +934,166 @@ export async function downloadUtilityExcel(fileMap: Map<string, ExtractedRow[]>)
   const headerAddress  = mostCommon(pages.map(p => p.address ).filter(Boolean));
 
   // ── Step 3: build per-utility-type tables ─────────────────────────────────────
-  type TableRow = {
+  type TableRowL = {
     folder: string; fileName: string; provider: string; account: string;
     monthValues:     Map<string, number>;
     monthValuesList: Map<string, number[]>;
     otherCharges:    Map<string, number[]>;
     taxes:           Map<string, number[]>;
   };
-  type UtilityTable = {
+  type UtilityTableL = {
     utilityField: string; utilityLabel: string;
-    rows: Map<string, TableRow>;
+    rows: Map<string, TableRowL>;
     monthKeys: Set<string>;
     monthScrapedDates: Map<string, Set<string>>;
   };
-  const tables = new Map<string, UtilityTable>();
 
-  for (const pg of pages) {
-    for (const [field, label] of Object.entries(UTILITY_TOTAL_FIELDS)) {
-      const raw = pg.fieldValues[field];
-      if (!raw) continue;
-      const num = parseFloat(raw.replace(/[$,\s]/g, ''));
-      if (isNaN(num)) continue;
-      let table = tables.get(field);
-      if (!table) {
-        table = { utilityField: field, utilityLabel: label, rows: new Map(), monthKeys: new Set(), monthScrapedDates: new Map() };
-        tables.set(field, table);
-      }
-      const rowKey = `${pg.provider}__${pg.account || pg.fileName}`;
-      let tr = table.rows.get(rowKey);
-      if (!tr) {
-        tr = { folder: pg.folder, fileName: pg.fileName, provider: pg.provider, account: pg.account, monthValues: new Map(), monthValuesList: new Map(), otherCharges: new Map(), taxes: new Map() };
-        table.rows.set(rowKey, tr);
-      } else {
-        if (!tr.folder && pg.folder) tr.folder = pg.folder;
-        if (tr.fileName !== pg.fileName && !tr.fileName.split(' · ').includes(pg.fileName))
-          tr.fileName = `${tr.fileName} · ${pg.fileName}`;
-      }
-      if (pg.monthKey) {
-        tr.monthValues.set(pg.monthKey, (tr.monthValues.get(pg.monthKey) ?? 0) + num);
-        if (!tr.monthValuesList.has(pg.monthKey)) tr.monthValuesList.set(pg.monthKey, []);
-        tr.monthValuesList.get(pg.monthKey)!.push(num);
-        table.monthKeys.add(pg.monthKey);
-        const ocRaw  = pg.fieldValues['other_charges'];
-        if (ocRaw)  { const v = parseFloat(ocRaw.replace(/[$,\s]/g,  '')); if (!isNaN(v)) { if (!tr.otherCharges.has(pg.monthKey)) tr.otherCharges.set(pg.monthKey, []); tr.otherCharges.get(pg.monthKey)!.push(v); } }
-        const taxRaw = pg.fieldValues['taxes'];
-        if (taxRaw) { const v = parseFloat(taxRaw.replace(/[$,\s]/g, '')); if (!isNaN(v)) { if (!tr.taxes.has(pg.monthKey)) tr.taxes.set(pg.monthKey, []); tr.taxes.get(pg.monthKey)!.push(v); } }
-        const rawDate = pg.fieldValues.billing_date;
-        if (rawDate) {
-          if (!table.monthScrapedDates.has(pg.monthKey)) table.monthScrapedDates.set(pg.monthKey, new Set());
-          table.monthScrapedDates.get(pg.monthKey)!.add(rawDate.trim());
+  /** Build the {tables, sortedMonths, sortedTables} bundle for a subset of pages. */
+  const buildTablesFor = (pagesSubset: PageData[]) => {
+    const tables = new Map<string, UtilityTableL>();
+    for (const pg of pagesSubset) {
+      for (const [field, label] of Object.entries(UTILITY_TOTAL_FIELDS)) {
+        const raw = pg.fieldValues[field];
+        if (!raw) continue;
+        const num = parseFloat(raw.replace(/[$,\s]/g, ''));
+        if (isNaN(num)) continue;
+        let table = tables.get(field);
+        if (!table) {
+          table = { utilityField: field, utilityLabel: label, rows: new Map(), monthKeys: new Set(), monthScrapedDates: new Map() };
+          tables.set(field, table);
+        }
+        const rowKey = `${pg.provider}__${pg.account || pg.fileName}`;
+        let tr = table.rows.get(rowKey);
+        if (!tr) {
+          tr = { folder: pg.folder, fileName: pg.fileName, provider: pg.provider, account: pg.account, monthValues: new Map(), monthValuesList: new Map(), otherCharges: new Map(), taxes: new Map() };
+          table.rows.set(rowKey, tr);
+        } else {
+          if (!tr.folder && pg.folder) tr.folder = pg.folder;
+          if (tr.fileName !== pg.fileName && !tr.fileName.split(' · ').includes(pg.fileName))
+            tr.fileName = `${tr.fileName} · ${pg.fileName}`;
+        }
+        if (pg.monthKey) {
+          tr.monthValues.set(pg.monthKey, (tr.monthValues.get(pg.monthKey) ?? 0) + num);
+          if (!tr.monthValuesList.has(pg.monthKey)) tr.monthValuesList.set(pg.monthKey, []);
+          tr.monthValuesList.get(pg.monthKey)!.push(num);
+          table.monthKeys.add(pg.monthKey);
+          const ocRaw  = pg.fieldValues['other_charges'];
+          if (ocRaw)  { const v = parseFloat(ocRaw.replace(/[$,\s]/g,  '')); if (!isNaN(v)) { if (!tr.otherCharges.has(pg.monthKey)) tr.otherCharges.set(pg.monthKey, []); tr.otherCharges.get(pg.monthKey)!.push(v); } }
+          const taxRaw = pg.fieldValues['taxes'];
+          if (taxRaw) { const v = parseFloat(taxRaw.replace(/[$,\s]/g, '')); if (!isNaN(v)) { if (!tr.taxes.has(pg.monthKey)) tr.taxes.set(pg.monthKey, []); tr.taxes.get(pg.monthKey)!.push(v); } }
+          const rawDate = pg.fieldValues.billing_date;
+          if (rawDate) {
+            if (!table.monthScrapedDates.has(pg.monthKey)) table.monthScrapedDates.set(pg.monthKey, new Set());
+            table.monthScrapedDates.get(pg.monthKey)!.add(rawDate.trim());
+          }
         }
       }
     }
+    const utilityOrder = Object.keys(UTILITY_TOTAL_FIELDS);
+    const sortedTables = Array.from(tables.values()).sort(
+      (a, b) => utilityOrder.indexOf(a.utilityField) - utilityOrder.indexOf(b.utilityField),
+    );
+    return { tables, sortedTables };
+  };
+
+  // ── Step 4: group pages by property; if 2+ properties → portfolio mode ───────
+  const pagesByProperty = new Map<string, PageData[]>();
+  for (const pg of pages) {
+    const key = (pg.property || '').trim() || 'Unknown Property';
+    if (!pagesByProperty.has(key)) pagesByProperty.set(key, []);
+    pagesByProperty.get(key)!.push(pg);
   }
 
-  // ── Step 4: sorted month timeline ────────────────────────────────────────────
+  const propertyNames = Array.from(pagesByProperty.keys());
+  const isPortfolio   = propertyNames.length > 1;
+
+  // ── Step 5: global month timeline + global utility-field list ────────────────
+  // Both per-property sheets and the roll-up share these so dates and field
+  // rows line up across every sheet.
+  const { sortedTables: globalSortedTables } = buildTablesFor(pages);
   const allMonths = new Set<string>();
-  for (const t of tables.values()) for (const k of t.monthKeys) allMonths.add(k);
+  for (const t of globalSortedTables) for (const k of t.monthKeys) allMonths.add(k);
   const sortedMonths = Array.from(allMonths).sort();
 
-  // ── Step 5: sort tables ───────────────────────────────────────────────────────
-  const utilityOrder = Object.keys(UTILITY_TOTAL_FIELDS);
-  const sortedTables = Array.from(tables.values()).sort(
-    (a, b) => utilityOrder.indexOf(a.utilityField) - utilityOrder.indexOf(b.utilityField),
-  );
-
-  // ── Step 6: build workbook ────────────────────────────────────────────────────
+  // ── Step 6: build workbook ───────────────────────────────────────────────────
   const wb = new ExcelJS.Workbook();
-  const base = { sortedTables, sortedMonths, headerProperty, headerAddress };
-  buildSheet(wb, 'Utility Recon', { ...base, isRecon: true  });
-  buildSheet(wb, 'Raw Data',      { ...base, isRecon: false });
+
+  // Sheet names must be ≤31 chars and exclude \ / ? * [ ] :
+  const sanitizeSheetName = (name: string): string => {
+    const safe = name.replace(/[\\/?*[\]:]/g, ' ').replace(/\s+/g, ' ').trim();
+    return (safe || 'Property').slice(0, 31);
+  };
+  const ensureUnique = (used: Set<string>, base: string): string => {
+    if (!used.has(base)) { used.add(base); return base; }
+    for (let i = 2; i < 9999; i++) {
+      const cand = `${base.slice(0, 28)} ${i}`;
+      if (!used.has(cand)) { used.add(cand); return cand; }
+    }
+    return base;
+  };
+
+  if (!isPortfolio) {
+    // ── Single-property path (byte-identical to the prior implementation) ─────
+    buildSheet(wb, 'Utility Recon', {
+      sortedTables: globalSortedTables, sortedMonths, headerProperty, headerAddress, isRecon: true,
+    });
+    buildSheet(wb, 'Raw Data', {
+      sortedTables: globalSortedTables, sortedMonths, headerProperty, headerAddress, isRecon: false,
+    });
+  } else {
+    // ── Portfolio path ────────────────────────────────────────────────────────
+    // Per-property: one Utility Recon + one Raw Data sheet (existing template).
+    // Final: a Roll-up sheet that references each property sheet's totals.
+    const usedNames = new Set<string>();
+    const perProperty: RollupProperty[] = [];
+
+    for (const propName of propertyNames) {
+      const propPages = pagesByProperty.get(propName) ?? [];
+      const { sortedTables: localTables } = buildTablesFor(propPages);
+
+      const propAddress = mostCommon(propPages.map(p => p.address).filter(Boolean));
+
+      const reconName = ensureUnique(usedNames, sanitizeSheetName(propName));
+      const rawName   = ensureUnique(usedNames, sanitizeSheetName(`${propName} Raw`));
+
+      const result = buildSheet(wb, reconName, {
+        sortedTables:  localTables,
+        summaryTables: globalSortedTables,  // align field rows across all property sheets
+        sortedMonths,
+        headerProperty: propName,
+        headerAddress:  propAddress,
+        isRecon:        true,
+      });
+      buildSheet(wb, rawName, {
+        sortedTables:  localTables,
+        summaryTables: globalSortedTables,
+        sortedMonths,
+        headerProperty: propName,
+        headerAddress:  propAddress,
+        isRecon:        false,
+      });
+
+      perProperty.push({ sheetName: reconName, result });
+    }
+
+    // Roll-up: 3 summary tables, cross-sheet SUM formulas, NO raw data sheet.
+    const rollupName = ensureUnique(usedNames, 'Roll-up');
+    buildRollupSheet(wb, rollupName, {
+      summaryTables:  globalSortedTables,
+      sortedMonths,
+      headerProperty: 'Portfolio Roll-up',
+      headerAddress:  '',
+      perProperty,
+    });
+  }
 
   // ── Step 7: download ──────────────────────────────────────────────────────────
   const now     = new Date();
   const dateStr = now.toISOString().slice(0, 16).replace(/[T:]/g, '-');
   const buf     = await wb.xlsx.writeBuffer();
+  const stem    = isPortfolio ? 'Pexl_Portfolio_UtilityRecon' : 'Pexl_UtilityRecon';
   saveAs(
     new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }),
-    `Pexl_UtilityRecon_${dateStr}.xlsx`,
+    `${stem}_${dateStr}.xlsx`,
   );
 }
