@@ -307,6 +307,10 @@ function buildSheet(wb: ExcelJS.Workbook, sheetName: string, p: SheetParams): Bu
       cell.value     = dates && dates.size > 0 ? Array.from(dates).sort().join(' · ') : '';
       cell.alignment = { horizontal: 'center', vertical: 'middle' };
     }
+    // Box the entire date row with the same thin/medium border treatment
+    // used elsewhere — without this the orange band runs edge-to-edge
+    // with no visual separation.
+    applyBlockBorders(ws, 8, 8, 2, LAST_COL, boldLeftSet);
   }
 
   // ── Per-utility-type data tables ──────────────────────────────────────────────
@@ -1085,6 +1089,16 @@ export async function downloadUtilityExcel(fileMap: Map<string, ExtractedRow[]>)
       headerAddress:  '',
       perProperty,
     });
+
+    // Reorder so the Roll-up is the first tab in the workbook. ExcelJS
+    // sorts visible tabs by ``orderNo``; reassigning it puts Roll-up at
+    // position 1 with everything else shifted right by one.
+    const rollupSheet = wb.getWorksheet(rollupName);
+    if (rollupSheet) {
+      const others = wb.worksheets.filter(s => s.name !== rollupName);
+      rollupSheet.orderNo = 1;
+      others.forEach((s, i) => { s.orderNo = i + 2; });
+    }
   }
 
   // ── Step 7: download ──────────────────────────────────────────────────────────
