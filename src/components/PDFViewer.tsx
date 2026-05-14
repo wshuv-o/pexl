@@ -8,6 +8,7 @@ import FieldLabelPicker from './FieldLabelPicker';
 import HighlightLegend from './HighlightLegend';
 import { downloadOcrPdf, downloadExcel, fetchTableRegions, extractRegions, searchBackend, extractTableRegion, downloadTableRegionExcel, type SearchMode } from '@/lib/api';
 import { findAllTextPositionsInPdfPage, detectTableRegionsInPdfPage, getTextAtRect } from '@/lib/pdf-extract';
+import { useAuth } from '@/contexts/AuthContext';
 import { toast } from 'sonner';
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
@@ -93,6 +94,9 @@ export default function PDFViewer({
   onRemoveFieldFromSelectedPdfs,
   onDownloadExcelSelected,
 }: PDFViewerProps) {
+  // Usage trackers for OCR PDF download + table extraction. Errors are
+  // swallowed so a failed telemetry POST never blocks a user action.
+  const { trackOcrDownload, trackTableExtract } = useAuth();
   const [currentPage, setCurrentPage]   = useState(session.startPage || 1);
   const [zoom, setZoom]                 = useState<number | null>(null);
   const [fineRotation, setFineRotation] = useState(0);
@@ -619,22 +623,27 @@ export default function PDFViewer({
         onPdfReplaced(ocrFile);
       }
       toast.success('OCR\'d PDF downloaded');
+      // Bump the per-user OCR-download counter (Odin /pexl/usage).
+      // Errors are swallowed so telemetry never blocks the UX.
+      trackOcrDownload().catch(() => {});
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Download failed';
       toast.error(msg);
     }
     setDownloadingOcr(false);
-  }, [session.id, session.filename, session.file, onSessionRenewed, onPdfReplaced]);
+  }, [session.id, session.filename, session.file, onSessionRenewed, onPdfReplaced, trackOcrDownload]);
 
   const handleDownloadExcel = useCallback(async (pages?: string): Promise<void> => {
     try {
       await downloadExcel(session.id, session.filename, pages);
       toast.success('Excel tables downloaded');
+      // "Convert to Table" flow → counts as a table extract.
+      trackTableExtract().catch(() => {});
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Excel export failed';
       toast.error(msg);
     }
-  }, [session.id, session.filename]);
+  }, [session.id, session.filename, trackTableExtract]);
 
   const pageRefs  = useRef<Record<number, HTMLDivElement | null>>({});
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -1973,6 +1982,8 @@ export default function PDFViewer({
                         tablePreview.region.width, tablePreview.region.height,
                         session.filename.replace(/\.[^.]+$/, '') + `_region_p${tablePreview.page}.xlsx`,
                       );
+                      // Region Excel export counts as a table extract too.
+                      trackTableExtract().catch(() => {});
                     } catch (err: unknown) {
                       toast.error(err instanceof Error ? err.message : 'Export failed');
                     }

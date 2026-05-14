@@ -4,7 +4,7 @@ import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
 import ThemeToggle from "@/components/ThemeToggle";
 import {
-  Loader2, LogOut, ArrowLeft, FileText, BarChart2, Download, Users, Layers,
+  Loader2, LogOut, ArrowLeft, FileText, BarChart2, Download, Users, Layers, ScanText, Table2,
   Search, ChevronDown, Clock, ArrowUpDown,
 } from "lucide-react";
 
@@ -19,12 +19,14 @@ interface UsageRow {
   files_processed: number;
   statements_extracted: number;
   downloads: number;
+  ocr_downloads: number;
+  table_extracts: number;
   doc_types: string[] | null;
   used_at: string;
 }
 
 type TimeRange = 'today' | 'week' | 'all';
-type SortKey   = 'files' | 'extracted' | 'downloads' | 'lastActive';
+type SortKey   = 'files' | 'extracted' | 'downloads' | 'ocr_downloads' | 'table_extracts' | 'lastActive';
 
 // Parse a backend timestamp. The backend may send either:
 //   (a) naive UTC      — "2026-04-20T22:00:00"  (FastAPI datetime.utcnow)
@@ -85,7 +87,7 @@ const isInRange = (iso: string, range: TimeRange): boolean => {
 // ─── Stat card (top strip) ────────────────────────────────────────────────
 // Clickable. When expanded it reveals the top contributors to that metric —
 // e.g. "Downloads" shows which users downloaded the most.
-type MetricKey = 'users' | 'batches' | 'files' | 'extracted' | 'downloads';
+type MetricKey = 'users' | 'batches' | 'files' | 'extracted' | 'downloads' | 'ocr_downloads' | 'table_extracts';
 
 interface StatCardProps {
   icon: any;
@@ -109,11 +111,13 @@ const StatCard = ({ icon: Icon, label, value, metric, expanded, onToggle, users 
     }
     const getVal = (u: UserSummary): number => {
       switch (metric) {
-        case 'batches':   return u.sessions;
-        case 'files':     return u.files;
-        case 'extracted': return u.extracted;
-        case 'downloads': return u.downloads;
-        default:          return 0;
+        case 'batches':         return u.sessions;
+        case 'files':           return u.files;
+        case 'extracted':       return u.extracted;
+        case 'downloads':       return u.downloads;
+        case 'ocr_downloads':   return u.ocr_downloads;
+        case 'table_extracts':  return u.table_extracts;
+        default:                return 0;
       }
     };
     return [...users]
@@ -182,6 +186,8 @@ interface UserSummary {
   files: number;
   extracted: number;
   downloads: number;
+  ocr_downloads: number;
+  table_extracts: number;
   sessions: number;
   lastActive: string;    // ISO
   // Per-doc-type session counts (e.g. { appraisal: 2, utility_bill: 1 })
@@ -223,9 +229,11 @@ const UserCard = ({
 
         {/* Stats inline — hidden on narrow screens, shown as a grid below instead */}
         <div className="hidden md:flex items-center gap-5 flex-1 min-w-0">
-          <StatInline label="Files"     value={summary.files}     />
-          <StatInline label="Extracted" value={summary.extracted} />
-          <StatInline label="Downloads" value={summary.downloads} />
+          <StatInline label="Files"          value={summary.files}          />
+          <StatInline label="Extracted"      value={summary.extracted}      />
+          <StatInline label="Downloads"      value={summary.downloads}      />
+          <StatInline label="OCR Downloads"  value={summary.ocr_downloads}  />
+          <StatInline label="Table Extracts" value={summary.table_extracts} />
         </div>
 
         <div className="hidden lg:flex flex-col items-end text-[11px] text-muted-foreground shrink-0 min-w-[120px]">
@@ -240,8 +248,8 @@ const UserCard = ({
         <ChevronDown className={`w-4 h-4 text-muted-foreground shrink-0 transition-transform ${expanded ? 'rotate-180' : ''}`} />
       </button>
 
-      {/* Mobile fallback — stats in a compact 3-column grid under the header row */}
-      <div className="md:hidden grid grid-cols-3 gap-px bg-border">
+      {/* Mobile fallback — stats in a compact grid under the header row */}
+      <div className="md:hidden grid grid-cols-5 gap-px bg-border">
         <div className="bg-card py-2 text-center">
           <p className="text-sm font-bold tabular-nums leading-none">{summary.files}</p>
           <p className="text-[10px] text-muted-foreground mt-0.5 uppercase tracking-wide">Files</p>
@@ -253,6 +261,14 @@ const UserCard = ({
         <div className="bg-card py-2 text-center">
           <p className="text-sm font-bold tabular-nums leading-none">{summary.downloads}</p>
           <p className="text-[10px] text-muted-foreground mt-0.5 uppercase tracking-wide">Downloads</p>
+        </div>
+        <div className="bg-card py-2 text-center">
+          <p className="text-sm font-bold tabular-nums leading-none">{summary.ocr_downloads}</p>
+          <p className="text-[10px] text-muted-foreground mt-0.5 uppercase tracking-wide">OCR</p>
+        </div>
+        <div className="bg-card py-2 text-center">
+          <p className="text-sm font-bold tabular-nums leading-none">{summary.table_extracts}</p>
+          <p className="text-[10px] text-muted-foreground mt-0.5 uppercase tracking-wide">Tables</p>
         </div>
       </div>
       <div className="md:hidden bg-muted/40 px-4 py-1.5 flex items-center justify-between text-[11px] text-muted-foreground border-t border-border">
@@ -288,6 +304,8 @@ const UserCard = ({
                   <th className="text-right px-3 py-2 font-medium uppercase tracking-wide text-[10px]">Files</th>
                   <th className="text-right px-3 py-2 font-medium uppercase tracking-wide text-[10px]">Extracted</th>
                   <th className="text-right px-3 py-2 font-medium uppercase tracking-wide text-[10px]">Downloads</th>
+                  <th className="text-right px-3 py-2 font-medium uppercase tracking-wide text-[10px]">OCR Downloads</th>
+                  <th className="text-right px-3 py-2 font-medium uppercase tracking-wide text-[10px]">Table Extracts</th>
                   <th className="text-left px-4 py-2 font-medium uppercase tracking-wide text-[10px]">Doc Types</th>
                 </tr>
               </thead>
@@ -303,6 +321,12 @@ const UserCard = ({
                     </td>
                     <td className="px-3 py-2 text-right tabular-nums">
                       {r.downloads > 0 ? r.downloads : <span className="text-muted-foreground/50">—</span>}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums">
+                      {(r.ocr_downloads ?? 0) > 0 ? r.ocr_downloads : <span className="text-muted-foreground/50">—</span>}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums">
+                      {(r.table_extracts ?? 0) > 0 ? r.table_extracts : <span className="text-muted-foreground/50">—</span>}
                     </td>
                     <td className="px-4 py-2">
                       {r.doc_types && r.doc_types.length > 0
@@ -354,12 +378,14 @@ const Admin = () => {
   );
 
   const totals = useMemo(() => {
-    const t = { batches: 0, files: 0, extracted: 0, downloads: 0, users: 0 };
+    const t = { batches: 0, files: 0, extracted: 0, downloads: 0, ocr_downloads: 0, table_extracts: 0, users: 0 };
     for (const r of filteredRows) {
       if (r.files_processed > 0) t.batches++;
-      t.files     += r.files_processed;
-      t.extracted += r.statements_extracted;
-      t.downloads += r.downloads;
+      t.files          += r.files_processed;
+      t.extracted      += r.statements_extracted;
+      t.downloads      += r.downloads;
+      t.ocr_downloads  += r.ocr_downloads ?? 0;
+      t.table_extracts += r.table_extracts ?? 0;
     }
     t.users = new Set(filteredRows.map(r => r.user_id)).size;
     return t;
@@ -371,10 +397,12 @@ const Admin = () => {
     for (const r of filteredRows) {
       const cur = map.get(r.user_id);
       if (cur) {
-        cur.files     += r.files_processed;
-        cur.extracted += r.statements_extracted;
-        cur.downloads += r.downloads;
-        cur.sessions  += 1;
+        cur.files          += r.files_processed;
+        cur.extracted      += r.statements_extracted;
+        cur.downloads      += r.downloads;
+        cur.ocr_downloads  += r.ocr_downloads ?? 0;
+        cur.table_extracts += r.table_extracts ?? 0;
+        cur.sessions       += 1;
         if (parseTimestamp(r.used_at) > parseTimestamp(cur.lastActive)) cur.lastActive = r.used_at;
         for (const t of r.doc_types ?? []) {
           cur.typeCounts[t] = (cur.typeCounts[t] || 0) + 1;
@@ -384,17 +412,19 @@ const Admin = () => {
         const typeCounts: Record<string, number> = {};
         for (const t of r.doc_types ?? []) typeCounts[t] = (typeCounts[t] || 0) + 1;
         map.set(r.user_id, {
-          user_id:     r.user_id,
-          username:    r.username,
-          full_name:   r.full_name,
-          designation: r.designation,
-          files:       r.files_processed,
-          extracted:   r.statements_extracted,
-          downloads:   r.downloads,
-          sessions:    1,
-          lastActive:  r.used_at,
+          user_id:        r.user_id,
+          username:       r.username,
+          full_name:      r.full_name,
+          designation:    r.designation,
+          files:          r.files_processed,
+          extracted:      r.statements_extracted,
+          downloads:      r.downloads,
+          ocr_downloads:  r.ocr_downloads ?? 0,
+          table_extracts: r.table_extracts ?? 0,
+          sessions:       1,
+          lastActive:     r.used_at,
           typeCounts,
-          rows:        [r],
+          rows:           [r],
         });
       }
     }
@@ -416,19 +446,23 @@ const Admin = () => {
 
     return [...filtered].sort((a, b) => {
       switch (sortKey) {
-        case 'files':      return b.files - a.files;
-        case 'extracted':  return b.extracted - a.extracted;
-        case 'downloads':  return b.downloads - a.downloads;
-        case 'lastActive': return parseTimestamp(b.lastActive).getTime() - parseTimestamp(a.lastActive).getTime();
+        case 'files':          return b.files - a.files;
+        case 'extracted':      return b.extracted - a.extracted;
+        case 'downloads':      return b.downloads - a.downloads;
+        case 'ocr_downloads':  return b.ocr_downloads - a.ocr_downloads;
+        case 'table_extracts': return b.table_extracts - a.table_extracts;
+        case 'lastActive':     return parseTimestamp(b.lastActive).getTime() - parseTimestamp(a.lastActive).getTime();
       }
     });
   }, [userSummaries, search, sortKey]);
 
   const sortOptions: { key: SortKey; label: string }[] = [
-    { key: 'lastActive', label: 'Last active' },
-    { key: 'files',      label: 'Files' },
-    { key: 'extracted',  label: 'Extracted' },
-    { key: 'downloads',  label: 'Downloads' },
+    { key: 'lastActive',     label: 'Last active' },
+    { key: 'files',          label: 'Files' },
+    { key: 'extracted',      label: 'Extracted' },
+    { key: 'downloads',      label: 'Downloads' },
+    { key: 'ocr_downloads',  label: 'OCR Downloads' },
+    { key: 'table_extracts', label: 'Table Extracts' },
   ];
 
   const timeOptions: { key: TimeRange; label: string }[] = [
@@ -492,12 +526,14 @@ const Admin = () => {
         {!loading && !error && (() => {
           const toggle = (m: MetricKey) => () => setExpandedStat(prev => prev === m ? null : m);
           return (
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 items-start">
-              <StatCard icon={Users}     label="Active users"     value={totals.users}     metric="users"     users={userSummaries} expanded={expandedStat === 'users'}     onToggle={toggle('users')} />
-              <StatCard icon={Layers}    label="Sessions"         value={totals.batches}   metric="batches"   users={userSummaries} expanded={expandedStat === 'batches'}   onToggle={toggle('batches')} />
-              <StatCard icon={FileText}  label="Files processed"  value={totals.files}     metric="files"     users={userSummaries} expanded={expandedStat === 'files'}     onToggle={toggle('files')} />
-              <StatCard icon={BarChart2} label="Values extracted" value={totals.extracted} metric="extracted" users={userSummaries} expanded={expandedStat === 'extracted'} onToggle={toggle('extracted')} />
-              <StatCard icon={Download}  label="Downloads"        value={totals.downloads} metric="downloads" users={userSummaries} expanded={expandedStat === 'downloads'} onToggle={toggle('downloads')} />
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-3 items-start">
+              <StatCard icon={Users}     label="Active users"     value={totals.users}          metric="users"          users={userSummaries} expanded={expandedStat === 'users'}          onToggle={toggle('users')} />
+              <StatCard icon={Layers}    label="Sessions"         value={totals.batches}        metric="batches"        users={userSummaries} expanded={expandedStat === 'batches'}        onToggle={toggle('batches')} />
+              <StatCard icon={FileText}  label="Files processed"  value={totals.files}          metric="files"          users={userSummaries} expanded={expandedStat === 'files'}          onToggle={toggle('files')} />
+              <StatCard icon={BarChart2} label="Values extracted" value={totals.extracted}      metric="extracted"      users={userSummaries} expanded={expandedStat === 'extracted'}      onToggle={toggle('extracted')} />
+              <StatCard icon={Download}  label="Downloads"        value={totals.downloads}      metric="downloads"      users={userSummaries} expanded={expandedStat === 'downloads'}      onToggle={toggle('downloads')} />
+              <StatCard icon={ScanText}  label="OCR Downloads"    value={totals.ocr_downloads}  metric="ocr_downloads"  users={userSummaries} expanded={expandedStat === 'ocr_downloads'}  onToggle={toggle('ocr_downloads')} />
+              <StatCard icon={Table2}    label="Table Extracts"   value={totals.table_extracts} metric="table_extracts" users={userSummaries} expanded={expandedStat === 'table_extracts'} onToggle={toggle('table_extracts')} />
             </div>
           );
         })()}

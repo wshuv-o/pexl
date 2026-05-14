@@ -22,6 +22,11 @@ export interface UsageStats {
   files_processed: number;
   statements_extracted: number;
   downloads: number;
+  /** Number of OCR'd PDFs the user has downloaded. */
+  ocr_downloads: number;
+  /** Number of table extracts performed
+   *  (table-region Excel export + full-document "Convert to Table" Excel). */
+  table_extracts: number;
   last_used: string | null;
 }
 
@@ -33,9 +38,20 @@ interface AuthContextType {
   logout: () => void;
   trackUsage: (filesCount: number, statementsCount: number, docTypes?: string[]) => Promise<void>;
   trackDownload: () => Promise<void>;
+  /** Bumps the ocr_downloads counter by 1. */
+  trackOcrDownload: () => Promise<void>;
+  /** Bumps the table_extracts counter by 1. */
+  trackTableExtract: () => Promise<void>;
 }
 
-const EMPTY_USAGE: UsageStats = { files_processed: 0, statements_extracted: 0, downloads: 0, last_used: null };
+const EMPTY_USAGE: UsageStats = {
+  files_processed: 0,
+  statements_extracted: 0,
+  downloads: 0,
+  ocr_downloads: 0,
+  table_extracts: 0,
+  last_used: null,
+};
 const AuthContext = createContext<AuthContextType | null>(null);
 
 const getToken = () => localStorage.getItem(TOKEN_KEY);
@@ -166,8 +182,32 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     setUsage(await apiFetchUsage());
   };
 
+  const trackOcrDownload = async (): Promise<void> => {
+    await apiPostUsage({
+      files_processed: 0,
+      statements_extracted: 0,
+      downloads: 0,
+      ocr_downloads: 1,
+    });
+    setUsage(await apiFetchUsage());
+  };
+
+  const trackTableExtract = async (): Promise<void> => {
+    await apiPostUsage({
+      files_processed: 0,
+      statements_extracted: 0,
+      downloads: 0,
+      table_extracts: 1,
+    });
+    setUsage(await apiFetchUsage());
+  };
+
   return (
-    <AuthContext.Provider value={{ user, usage, authLoading, login, logout, trackUsage, trackDownload }}>
+    <AuthContext.Provider value={{
+      user, usage, authLoading,
+      login, logout,
+      trackUsage, trackDownload, trackOcrDownload, trackTableExtract,
+    }}>
       {children}
     </AuthContext.Provider>
   );
