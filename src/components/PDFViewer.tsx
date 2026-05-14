@@ -151,6 +151,11 @@ export default function PDFViewer({
   };
   const [tablePreview, setTablePreview] = useState<TablePreview | null>(null);
   const [tableSelectLoading, setTableSelectLoading] = useState(false);
+  // Position + minimize state for the floating preview panel. Initialised
+  // to a sensible centre on first open via the useEffect below.
+  const [tablePanelPos, setTablePanelPos] = useState<{ x: number; y: number } | null>(null);
+  const [tablePanelMinimized, setTablePanelMinimized] = useState(false);
+  const tablePanelDragRef = useRef<{ offsetX: number; offsetY: number } | null>(null);
 
   // ── Auto-extract setup mode (replaces the old guided auto-search) ─────
   // Click the magic-wand button to enter setup. The user draws value
@@ -826,6 +831,14 @@ export default function PDFViewer({
         try {
           const result = await extractTableRegion(session.id, drawingPage, r.x, r.y, r.width, r.height);
           setTablePreview({ ...result, page: drawingPage, region: r });
+          // Open the panel near top-right by default. The user can drag
+          // anywhere afterwards; the position persists across re-renders
+          // until the panel closes.
+          setTablePanelPos({
+            x: Math.max(20, window.innerWidth - 720),
+            y: 80,
+          });
+          setTablePanelMinimized(false);
         } catch (err: unknown) {
           toast.error(err instanceof Error ? err.message : 'Table extraction failed');
         } finally {
@@ -1194,9 +1207,17 @@ export default function PDFViewer({
 
   // PageUp / PageDown → previous / next PDF page. Skipped if focus is in
   // an input field so search-bar / label-picker typing isn't broken.
+  // Ctrl+PageUp / Ctrl+PageDown is reserved for switching PDF *tabs*
+  // (handled at the Index level), so we explicitly opt out when Ctrl is
+  // held — otherwise the page scroll fires + preventDefault swallows the
+  // event before the tab handler ever sees it.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'PageDown' && e.key !== 'PageUp') return;
+      // Alt-modified PageUp/PageDown is reserved for PDF *tab* switching
+      // (handled at Index level). Ctrl/Meta is also skipped so future
+      // shortcuts don't conflict with PDF page scrolling.
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
       const t = e.target as HTMLElement | null;
       if (t) {
         const tag = t.tagName;
@@ -1812,8 +1833,8 @@ export default function PDFViewer({
         </div>
       )}
 
-      {/* Table region preview modal */}
-      {tablePreview && (() => {
+      {/* Table region preview — floating, draggable, minimizable panel */}
+      {tablePreview && tablePanelPos && (() => {
         const displayRows = tablePreview.rows;
         const displayCells = tablePreview.cells ?? null;
         // Build a (row,col) → cell lookup and a covered-slot set so we know
@@ -1836,40 +1857,147 @@ export default function PDFViewer({
             cellCols = Math.max(cellCols, c.col + c.colspan);
           }
         }
+
+        // ── Drag handlers ───────────────────────────────────────────────
+        const onHeaderMouseDown = (e: React.MouseEvent) => {
+          // Ignore drags that started on a button inside the header
+          if ((e.target as HTMLElement).closest('button')) return;
+          tablePanelDragRef.current = {
+            offsetX: e.clientX - tablePanelPos.x,
+            offsetY: e.clientY - tablePanelPos.y,
+          };
+          const onMove = (ev: MouseEvent) => {
+            if (!tablePanelDragRef.current) return;
+            const x = ev.clientX - tablePanelDragRef.current.offsetX;
+            const y = ev.clientY - tablePanelDragRef.current.offsetY;
+            setTablePanelPos({
+              x: Math.max(0, Math.min(window.innerWidth - 200, x)),
+              y: Math.max(0, Math.min(window.innerHeight - 40,  y)),
+            });
+          };
+          const onUp = () => {
+            tablePanelDragRef.current = null;
+            window.removeEventListener('mousemove', onMove);
+            window.removeEventListener('mouseup',   onUp);
+          };
+          window.addEventListener('mousemove', onMove);
+          window.addEventListener('mouseup',   onUp);
+        };
+
+        // ── Build HTML + TSV strings for clipboard copy ────────────────
+        const buildClipboardPayload = (): { html: string; tsv: string } => {
+          const tsvRows: string[] = [];
+          const htmlRows: string[] = [];
+          if (displayCells && anchorMap && coveredSlots) {
+            for (let ri = 0; ri < cellRows; ri++) {
+              const tsvCells: string[] = [];
+              const htmlCells: string[] = [];
+              for (let ci = 0; ci < cellCols; ci++) {
+                if (coveredSlots.has(`${ri},${ci}`)) continue;
+                const cell = anchorMap.get(`${ri},${ci}`);
+                const text = cell?.text ?? '';
+                tsvCells.push(text.replace(/\t/g, ' ').replace(/\n/g, ' '));
+                const rs = cell?.rowspan && cell.rowspan > 1 ? ` rowspan="${cell.rowspan}"` : '';
+                const cs = cell?.colspan && cell.colspan > 1 ? ` colspan="${cell.colspan}"` : '';
+                htmlCells.push(`<td${rs}${cs}>${text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</td>`);
+              }
+              tsvRows.push(tsvCells.join('\t'));
+              htmlRows.push(`<tr>${htmlCells.join('')}</tr>`);
+            }
+          } else {
+            for (const row of displayRows) {
+              tsvRows.push(row.map(c => String(c ?? '').replace(/\t/g, ' ').replace(/\n/g, ' ')).join('\t'));
+              htmlRows.push('<tr>' + row.map(c => `<td>${String(c ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</td>`).join('') + '</tr>');
+            }
+          }
+          return {
+            tsv:  tsvRows.join('\n'),
+            html: `<table border="1" cellspacing="0" cellpadding="2">${htmlRows.join('')}</table>`,
+          };
+        };
+
+        const onCopy = async () => {
+          const { html, tsv } = buildClipboardPayload();
+          try {
+            if (navigator.clipboard && 'write' in navigator.clipboard && typeof ClipboardItem !== 'undefined') {
+              await navigator.clipboard.write([
+                new ClipboardItem({
+                  'text/html':  new Blob([html], { type: 'text/html' }),
+                  'text/plain': new Blob([tsv],  { type: 'text/plain' }),
+                }),
+              ]);
+            } else {
+              await navigator.clipboard.writeText(tsv);
+            }
+            toast.success('Table copied — paste into Excel');
+          } catch (err) {
+            toast.error(err instanceof Error ? err.message : 'Copy failed');
+          }
+        };
+
         return (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setTablePreview(null)}>
+          <div
+            className="fixed z-50 bg-background/90 backdrop-blur-sm rounded-xl shadow-2xl border flex flex-col"
+            style={{
+              left: tablePanelPos.x,
+              top:  tablePanelPos.y,
+              maxWidth:  '85vw',
+              maxHeight: tablePanelMinimized ? undefined : '70vh',
+              minWidth:  280,
+              opacity:   0.95,
+            }}
+          >
+            {/* Header — draggable; clicks on buttons inside are exempted */}
             <div
-              className="bg-background rounded-xl shadow-2xl flex flex-col max-w-[90vw] max-h-[80vh] w-auto min-w-[320px]"
-              onClick={e => e.stopPropagation()}
+              onMouseDown={onHeaderMouseDown}
+              className="flex items-center justify-between px-4 py-2 border-b gap-3 cursor-move select-none bg-muted/60 rounded-t-xl"
             >
-              <div className="flex items-center justify-between px-4 py-3 border-b gap-3">
-                <span className="font-semibold text-sm shrink-0">Table — Page {tablePreview.page}</span>
-                <div className="flex items-center gap-2 flex-wrap justify-end">
-                  <button
-                    className="text-xs bg-primary text-primary-foreground px-3 py-1.5 rounded-md font-medium hover:bg-primary/90"
-                    onClick={async () => {
-                      try {
-                        await downloadTableRegionExcel(
-                          session.id, tablePreview.page,
-                          tablePreview.region.x, tablePreview.region.y,
-                          tablePreview.region.width, tablePreview.region.height,
-                          session.filename.replace(/\.[^.]+$/, '') + `_region_p${tablePreview.page}.xlsx`,
-                        );
-                      } catch (err: unknown) {
-                        toast.error(err instanceof Error ? err.message : 'Export failed');
-                      }
-                    }}
-                  >
-                    Export Excel
-                  </button>
-                  <button
-                    className="text-xs text-muted-foreground hover:text-foreground px-2 py-1.5 rounded-md"
-                    onClick={() => setTablePreview(null)}
-                  >
-                    Close
-                  </button>
-                </div>
+              <span className="font-semibold text-sm shrink-0">
+                Table — Page {tablePreview.page}
+              </span>
+              <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                <button
+                  className="text-xs px-2 py-1 rounded-md font-medium border bg-background hover:bg-muted"
+                  onClick={onCopy}
+                  title="Copy the table to the clipboard (paste into Excel preserves the layout)"
+                >
+                  Copy
+                </button>
+                <button
+                  className="text-xs bg-primary text-primary-foreground px-2.5 py-1 rounded-md font-medium hover:bg-primary/90"
+                  onClick={async () => {
+                    try {
+                      await downloadTableRegionExcel(
+                        session.id, tablePreview.page,
+                        tablePreview.region.x, tablePreview.region.y,
+                        tablePreview.region.width, tablePreview.region.height,
+                        session.filename.replace(/\.[^.]+$/, '') + `_region_p${tablePreview.page}.xlsx`,
+                      );
+                    } catch (err: unknown) {
+                      toast.error(err instanceof Error ? err.message : 'Export failed');
+                    }
+                  }}
+                >
+                  Export Excel
+                </button>
+                <button
+                  className="text-xs px-2 py-1 rounded-md font-medium border bg-background hover:bg-muted"
+                  onClick={() => setTablePanelMinimized(m => !m)}
+                  title={tablePanelMinimized ? 'Restore panel' : 'Minimize panel (data preserved)'}
+                >
+                  {tablePanelMinimized ? '▢' : '–'}
+                </button>
+                <button
+                  className="text-xs text-muted-foreground hover:text-foreground px-2 py-1 rounded-md"
+                  onClick={() => setTablePreview(null)}
+                >
+                  ✕
+                </button>
               </div>
+            </div>
+
+            {/* Body — hidden when minimized; data stays in state */}
+            {!tablePanelMinimized && (
               <div className="overflow-auto p-3">
                 <table className="text-xs border-collapse" style={{ tableLayout: 'auto' }}>
                   <tbody>
@@ -1903,17 +2031,16 @@ export default function PDFViewer({
                         );
                       })
                     ) : (
-                    displayRows.map((row, ri) => {
-                      const isHeaderRow = ri === 0;
-                      const rowBg = isHeaderRow
-                        ? ''
-                        : ri % 2 === 1
-                          ? 'bg-muted/30'
-                          : '';
-                      return (
-                        <tr key={ri} className={rowBg}>
-                          {row.map((cell, ci) => {
-                            return (
+                      displayRows.map((row, ri) => {
+                        const isHeaderRow = ri === 0;
+                        const rowBg = isHeaderRow
+                          ? ''
+                          : ri % 2 === 1
+                            ? 'bg-muted/30'
+                            : '';
+                        return (
+                          <tr key={ri} className={rowBg}>
+                            {row.map((cell, ci) => (
                               <td
                                 key={ci}
                                 className={
@@ -1925,16 +2052,15 @@ export default function PDFViewer({
                               >
                                 {cell}
                               </td>
-                            );
-                          })}
-                        </tr>
-                      );
-                    })
+                            ))}
+                          </tr>
+                        );
+                      })
                     )}
                   </tbody>
                 </table>
               </div>
-            </div>
+            )}
           </div>
         );
       })()}

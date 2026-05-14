@@ -112,7 +112,22 @@ export default function Index() {
   // event. Alt+Tab is OS-level and can't be intercepted at all.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Tab' || !e.ctrlKey) return;
+      // PDF tab switching keybinds:
+      //   Ctrl+Tab / Ctrl+Shift+Tab  → next / previous tab
+      //   Alt+PageDown / Alt+PageUp  → next / previous tab
+      //
+      // We intentionally do NOT bind Ctrl+PageUp / Ctrl+PageDown because
+      // Chrome (and most browsers) reserves those at the window-manager
+      // level for switching *browser* tabs — JavaScript receives the
+      // event but cannot suppress the browser's default tab switch.
+      // Alt+PageUp / Alt+PageDown is the standard non-reserved
+      // alternative (used by Gmail, GitHub, etc.).
+      let delta = 0;
+      if (e.ctrlKey && e.key === 'Tab')               delta = e.shiftKey ? -1 : 1;
+      else if (e.altKey && !e.ctrlKey && e.key === 'PageDown') delta = 1;
+      else if (e.altKey && !e.ctrlKey && e.key === 'PageUp')   delta = -1;
+      else return;
+
       const t = e.target as HTMLElement | null;
       if (t) {
         const tag = t.tagName;
@@ -121,7 +136,6 @@ export default function Index() {
       if (openTabs.length === 0) return;
       e.preventDefault();
       const curIdx = activeTabId ? openTabs.indexOf(activeTabId) : -1;
-      const delta  = e.shiftKey ? -1 : 1;
       const nextIdx = ((curIdx + delta) % openTabs.length + openTabs.length) % openTabs.length;
       setActiveTabId(openTabs[nextIdx]);
     };

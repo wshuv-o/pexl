@@ -374,8 +374,8 @@ export default function ViewerToolbar({
       {/* Drawing tools */}
       <div className="flex items-center gap-0.5 shrink-0">
         {toolBtn('cursor',       <MousePointer2     className="w-4 h-4" />, 'Cursor — drag to draw extraction boxes, click to edit')}
-        {toolBtn('select',       <MousePointerClick className="w-4 h-4" />, 'Select — click boxes or marquee-select, drag to move')}
-        {toolBtn('text-select',  <TextCursor        className="w-4 h-4" />, 'Select text — copy from PDF')}
+        {toolBtn('select',       <MousePointerClick className="w-4 h-4" />, 'Select — click boxes or marquee-select, drag to move  (Ctrl+S)')}
+        {toolBtn('text-select',  <TextCursor        className="w-4 h-4" />, 'Select text — copy from PDF  (Ctrl+T)')}
         {toolBtn('table-select', <Table2            className="w-4 h-4" />, 'Table select — draw a box to extract a table region as Excel')}
         {toolBtn('eraser',       <Eraser            className="w-4 h-4" />, 'Erase all on this page')}
       </div>
@@ -388,8 +388,8 @@ export default function ViewerToolbar({
         {bulkBtn(
           <FileDown className="w-4 h-4" />,
           selectedIds && selectedIds.size > 0
-            ? `Copy ${selectedIds.size} selected highlight${selectedIds.size !== 1 ? 's' : ''} to all pages`
-            : 'Copy highlights to all pages in this PDF',
+            ? `Copy ${selectedIds.size} selected highlight${selectedIds.size !== 1 ? 's' : ''} to all pages    (select with Ctrl+A, copy with Ctrl+C, paste on any page with Ctrl+V; Ctrl+X cuts)`
+            : 'Copy highlights to all pages in this PDF    (select with Ctrl+A, copy with Ctrl+C, paste on any page with Ctrl+V; Ctrl+X cuts)',
           () => onApplyToAllPages(selectedIds && selectedIds.size > 0 ? selectedIds : undefined),
           !hasHighlightsOnPage,
         )}
