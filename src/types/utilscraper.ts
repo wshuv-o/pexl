@@ -49,6 +49,7 @@ export type FieldLabel =
   | 'account_number'
   | 'address'
   | 'billing_date'
+  | 'date'
   | 'total_gas_bill'
   | 'total_electricity_bill'
   | 'total_internet_bill'
@@ -124,6 +125,7 @@ export const FIELD_LABELS: FieldLabelOption[] = [
   { value: 'account_number',        label: 'Account Number',      color: '#0891b2', bgColor: 'rgba(8,145,178,0.18)',   docTypes: ['utility_bill', 'bank_statement', 'tax'] },
   { value: 'address',               label: 'Address',             color: '#0284c7', bgColor: 'rgba(2,132,199,0.18)',   docTypes: ['utility_bill', 'bank_statement', 'tax', 'lease_contract'] },
   { value: 'billing_date',          label: 'Billing Date',        color: '#7c3aed', bgColor: 'rgba(124,58,237,0.18)',  docTypes: ['utility_bill'] },
+  { value: 'date',                  label: 'Date',                color: '#a855f7', bgColor: 'rgba(168,85,247,0.18)',  docTypes: ['utility_bill'] },
   { value: 'total_gas_bill',        label: 'Total Gas',           color: '#dc2626', bgColor: 'rgba(220,38,38,0.18)',   docTypes: ['utility_bill'] },
   { value: 'total_electricity_bill',label: 'Total Electricity',   color: '#d97706', bgColor: 'rgba(217,119,6,0.18)',   docTypes: ['utility_bill'] },
   { value: 'total_water_bill',      label: 'Total Water',         color: '#0ea5e9', bgColor: 'rgba(14,165,233,0.18)',  docTypes: ['utility_bill'] },

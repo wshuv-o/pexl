@@ -153,6 +153,9 @@ export default function ExcelPanel({
 }: Props) {
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const [mergeGroups, setMergeGroups] = useState<MergeGroup[] | null>(null);
+  // Date-source selector for utility exports. 'auto' picks billing_date
+  // when any row has it, otherwise falls back to the 'date' field.
+  const [utilityDateField, setUtilityDateField] = useState<'auto' | 'billing_date' | 'date'>('auto');
   const [sortCol, setSortCol]       = useState<string | null>(null);
   const [sortAsc, setSortAsc]       = useState(true);
   const [selectedRowKey, setSelectedRowKey] = useState<string | null>(null);
@@ -516,6 +519,28 @@ export default function ExcelPanel({
           </Button>
         </div>
 
+        {/* Date source — only meaningful for utility exports. Lets the user
+            pick which scraped field is used to bucket bills into month
+            columns: billing_date (with the before-the-15th period
+            roll-back) or the plain 'date' field (no day adjustment, the
+            named month is the month the bill lands under). 'auto' uses
+            billing_date when present and falls back to 'date'. */}
+        {isUtilityExport(exportData) && (
+          <div className="flex items-center gap-2 text-xs">
+            <span className="text-muted-foreground shrink-0">Use date field:</span>
+            <select
+              className="h-7 px-2 rounded border border-border bg-background text-xs"
+              value={utilityDateField}
+              onChange={e => setUtilityDateField(e.target.value as 'auto' | 'billing_date' | 'date')}
+              title="Pick which scraped field is used to bucket bills into month columns"
+            >
+              <option value="auto">Auto (billing_date, else date)</option>
+              <option value="billing_date">Billing Date (rolls early bills to prior month)</option>
+              <option value="date">Date (use the month as-is)</option>
+            </select>
+          </div>
+        )}
+
         <div className="flex gap-2">
           <Button variant="outline" size="sm" className="flex-1 h-8 text-xs" onClick={onReExtract}>
             <RefreshCw className="w-3.5 h-3.5 mr-1.5" /> Re-extract
@@ -541,7 +566,7 @@ export default function ExcelPanel({
                   return;
                 }
               }
-              exportToExcel(exportData, filename, provider);
+              exportToExcel(exportData, filename, provider, { dateField: utilityDateField });
               onDownload?.();
             }}
           >
@@ -578,7 +603,7 @@ export default function ExcelPanel({
           onCancel={() => setMergeGroups(null)}
           onConfirm={(choices: MergeChoice[]) => {
             const merged = choices.length > 0 ? applyMerges(exportData, choices) : exportData;
-            exportToExcel(merged, filename, provider);
+            exportToExcel(merged, filename, provider, { dateField: utilityDateField });
             onDownload?.();
             setMergeGroups(null);
           }}

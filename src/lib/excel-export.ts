@@ -4,7 +4,7 @@ import JSZip from 'jszip';
 import type { ExtractedRow } from '@/types/utilscraper';
 import { getFieldLabelsForType, FIELD_LABELS, type DocumentType } from '@/types/utilscraper';
 import { downloadBankStatementExcel } from './bank-excel-export';
-import { downloadUtilityExcel } from './utility-excel-export';
+import { downloadUtilityExcel, type UtilityDateField } from './utility-excel-export';
 
 const C = {
   whiteBg:     'FFFFFF',
@@ -544,7 +544,7 @@ export async function exportToExcel(
   data: ExtractedRow[],
   _filename: string,
   provider: string,
-  _options: { utilityMerge?: UtilityMergeOptions } = {},
+  _options: { utilityMerge?: UtilityMergeOptions; dateField?: UtilityDateField } = {},
 ) {
   const now     = new Date();
   const dateStr = now.toISOString().slice(0, 16).replace(/[T:]/g, '-');
@@ -578,7 +578,8 @@ export async function exportToExcel(
     XLSX.utils.book_append_sheet(wb, ws, 'Tax');
 
   } else if (overallType === 'utility_bill') {
-    downloadUtilityExcel(fileMap).catch(err => console.error('Utility export failed:', err));
+    downloadUtilityExcel(fileMap, _options.dateField ?? 'auto')
+      .catch(err => console.error('Utility export failed:', err));
     return;
 
   } else if (overallType === 'lease_contract') {

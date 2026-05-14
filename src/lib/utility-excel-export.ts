@@ -81,12 +81,24 @@ function parseDateValue(raw: string): Date | null {
   return isNaN(d.getTime()) ? null : d;
 }
 
-function billDateToMonthKey(dateStr: string): string | null {
+/**
+ * Convert a date string to a YYYY-MM month key used to bucket bills into
+ * timeline columns.
+ *
+ * Two modes:
+ *  - ``adjustToPeriod=true`` (default, for ``billing_date``): bills dated
+ *    before the 15th roll into the *previous* month, because utility
+ *    bills usually cover most of the period before their issue date.
+ *  - ``adjustToPeriod=false`` (for the explicit ``date`` field): take the
+ *    month off the date as-is. The user wants the date to land in the
+ *    month it actually names, with no inference about service period.
+ */
+function billDateToMonthKey(dateStr: string, adjustToPeriod: boolean = true): string | null {
   const d = parseDateValue(dateStr);
   if (!d) return null;
   let m = d.getUTCMonth();
   let y = d.getUTCFullYear();
-  if (d.getUTCDate() < 15) { m -= 1; if (m < 0) { m = 11; y -= 1; } }
+  if (adjustToPeriod && d.getUTCDate() < 15) { m -= 1; if (m < 0) { m = 11; y -= 1; } }
   return `${y}-${String(m + 1).padStart(2, '0')}`;
 }
 
@@ -894,7 +906,41 @@ function buildRollupSheet(
 
 // ─── Main export function ─────────────────────────────────────────────────────
 
-export async function downloadUtilityExcel(fileMap: Map<string, ExtractedRow[]>): Promise<void> {
+/** Which scraped field decides the month a bill lands under. */
+export type UtilityDateField = 'billing_date' | 'date' | 'auto';
+
+export async function downloadUtilityExcel(
+  fileMap: Map<string, ExtractedRow[]>,
+  /**
+   * Controls how each page is bucketed into a month column.
+   *  - ``'billing_date'``: use scraped ``billing_date`` with the
+   *    before-the-15th roll-back rule (existing default).
+   *  - ``'date'``: use scraped ``date`` with no day adjustment — the
+   *    month named on the date is the month the bill lands under.
+   *  - ``'auto'`` (default): use ``billing_date`` when present anywhere
+   *    in the data; otherwise fall back to ``date`` with no adjustment.
+   */
+  dateField: UtilityDateField = 'auto',
+): Promise<void> {
+
+  // ── Decide which scraped field to consult for each page ─────────────────────
+  // For 'auto', look at the whole dataset once: if anything has billing_date
+  // we use that across the board; otherwise we fall back to 'date'.
+  const allRows = Array.from(fileMap.values()).flat();
+  const anyBilling = allRows.some(r => r.field === 'billing_date' && r.value);
+  let effectiveField: 'billing_date' | 'date';
+  if      (dateField === 'billing_date') effectiveField = 'billing_date';
+  else if (dateField === 'date')         effectiveField = 'date';
+  else                                    effectiveField = anyBilling ? 'billing_date' : 'date';
+  const adjustToPeriod = effectiveField === 'billing_date';
+
+  const monthKeyFor = (vals: Record<string, string>): string => {
+    const raw = vals[effectiveField];
+    if (!raw) return '';
+    return billDateToMonthKey(raw, adjustToPeriod) ?? '';
+  };
+  const rawDateFor = (vals: Record<string, string>): string =>
+    (vals[effectiveField] ?? '').trim();
 
   // ── Step 1: collect per-page data with carry-forward provider/account ─────────
   type PageData = {
@@ -927,7 +973,7 @@ export async function downloadUtilityExcel(fileMap: Map<string, ExtractedRow[]>)
         fileNum: pdfNum, folder, fileName: cleanedFilename, page,
         provider: lastProvider, account: lastAccount,
         property: lastProperty, address: lastAddress,
-        monthKey: vals.billing_date ? (billDateToMonthKey(vals.billing_date) ?? '') : '',
+        monthKey: monthKeyFor(vals),
         fieldValues: vals,
       });
     }
@@ -985,10 +1031,12 @@ export async function downloadUtilityExcel(fileMap: Map<string, ExtractedRow[]>)
           if (ocRaw)  { const v = parseFloat(ocRaw.replace(/[$,\s]/g,  '')); if (!isNaN(v)) { if (!tr.otherCharges.has(pg.monthKey)) tr.otherCharges.set(pg.monthKey, []); tr.otherCharges.get(pg.monthKey)!.push(v); } }
           const taxRaw = pg.fieldValues['taxes'];
           if (taxRaw) { const v = parseFloat(taxRaw.replace(/[$,\s]/g, '')); if (!isNaN(v)) { if (!tr.taxes.has(pg.monthKey)) tr.taxes.set(pg.monthKey, []); tr.taxes.get(pg.monthKey)!.push(v); } }
-          const rawDate = pg.fieldValues.billing_date;
+          // Use whichever date field the user selected so the
+          // "Bill Dates" row in Raw Data matches the bucketing logic.
+          const rawDate = rawDateFor(pg.fieldValues);
           if (rawDate) {
             if (!table.monthScrapedDates.has(pg.monthKey)) table.monthScrapedDates.set(pg.monthKey, new Set());
-            table.monthScrapedDates.get(pg.monthKey)!.add(rawDate.trim());
+            table.monthScrapedDates.get(pg.monthKey)!.add(rawDate);
           }
         }
       }
