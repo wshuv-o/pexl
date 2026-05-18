@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import type { PageInfo, Highlight, ExtractedRow } from '@/types/utilscraper';
+import type { PageInfo, Highlight, ExtractedRow, OcrProgress } from '@/types/utilscraper';
 import { extractFromRegions } from './pdf-extract';
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000' ;
@@ -886,4 +886,16 @@ export async function extractRegions(
 
 function delay(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+export async function getOcrProgress(sessionId: string): Promise<OcrProgress | null> {
+  try {
+    const res = await fetch(`${BACKEND_URL}/api/utility/session/${sessionId}/ocr-progress`, {
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) return null;
+    return await res.json() as OcrProgress;
+  } catch {
+    return null;
+  }
 }
