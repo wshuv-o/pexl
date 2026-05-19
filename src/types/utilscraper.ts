@@ -35,6 +35,7 @@ export interface PDFSession {
   extractedData: ExtractedRow[];
   startPage: number;         // first "content" page (1-based) — pages before this are cover pages
   ocrProgress?: OcrProgress | null;
+  forceOcr?: boolean;
 }
 
 export interface Highlight {

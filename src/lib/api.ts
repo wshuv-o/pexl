@@ -888,6 +888,19 @@ function delay(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+export async function triggerForceOcr(sessionId: string): Promise<{ total_pages: number } | null> {
+  try {
+    const res = await fetch(`${BACKEND_URL}/api/utility/session/${sessionId}/force-ocr`, {
+      method: 'POST',
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
 export async function getOcrProgress(sessionId: string): Promise<OcrProgress | null> {
   try {
     const res = await fetch(`${BACKEND_URL}/api/utility/session/${sessionId}/ocr-progress`, {

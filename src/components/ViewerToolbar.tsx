@@ -3,7 +3,7 @@ import {
   ChevronLeft, ChevronRight, ZoomIn, ZoomOut,
   MousePointer2, Eraser, Loader2, TextCursor,
   FileDown, FileInput, FileStack, Trash2, ListChecks, ChevronDown, Search,
-  SlidersHorizontal, Download, MousePointerClick, Wand2, Filter, Check, FileSpreadsheet, Table2,
+  SlidersHorizontal, Download, MousePointerClick, Wand2, Filter, Check, FileSpreadsheet, Table2, ScanLine,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -62,6 +62,10 @@ interface ViewerToolbarProps {
   // over their adjacent values. Available for all doc types.
   onAutoSearch: () => void;
   autoSearching: boolean;
+  // Force Re-OCR
+  onForceOcr: () => void;
+  forcingOcr: boolean;
+  forceOcrActive: boolean;
 }
 
 const ZOOM_OPTIONS = [
@@ -93,6 +97,7 @@ export default function ViewerToolbar({
   onDownloadOcr, downloadingOcr,
   onDownloadExcel, onDownloadExcelSelected, onDownloadExcelRange,
   onAutoSearch, autoSearching,
+  onForceOcr, forcingOcr, forceOcrActive,
 }: ViewerToolbarProps) {
   // Relative page numbering when startPage > 1 (cover pages skipped)
   const hasOffset    = startPage > 1;
@@ -548,6 +553,32 @@ export default function ViewerToolbar({
         onDownloadSelected={onDownloadExcelSelected}
         onDownloadRange={onDownloadExcelRange}
       />
+
+      {/* Force Re-OCR */}
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            className={`p-1.5 rounded transition-colors shrink-0 disabled:opacity-40 disabled:cursor-not-allowed ${
+              forceOcrActive
+                ? 'bg-amber-500/15 text-amber-600 dark:text-amber-400 ring-1 ring-amber-500/40'
+                : 'text-muted-foreground hover:text-foreground hover:bg-muted'
+            }`}
+            onClick={onForceOcr}
+            disabled={forcingOcr}
+            aria-label="Force Re-OCR"
+          >
+            {forcingOcr
+              ? <Loader2 className="w-4 h-4 animate-spin" />
+              : <ScanLine className="w-4 h-4" />}
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="bottom" className="max-w-[220px] text-xs">
+          {forceOcrActive
+            ? 'Force OCR active — all pages are being treated as scanned images'
+            : 'Force Re-OCR — ignore existing text layer and re-scan all pages from scratch (use for badly OCR\'d PDFs)'}
+        </TooltipContent>
+      </Tooltip>
 
       {/* Extract */}
       <Button

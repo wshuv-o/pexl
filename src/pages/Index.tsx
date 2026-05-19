@@ -16,7 +16,7 @@ import BatchPanel from '@/components/BatchPanel';
 import ThemeToggle from '@/components/ThemeToggle';
 import type { PDFSession, Highlight, ExtractedRow, DocumentType } from '@/types/utilscraper';
 import { DOCUMENT_TYPES } from '@/types/utilscraper';
-import { processFile, extractRegions, downloadAllOcrPdfsAsZip, downloadExcel, getOcrProgress } from '@/lib/api';
+import { processFile, extractRegions, downloadAllOcrPdfsAsZip, downloadExcel, getOcrProgress, triggerForceOcr } from '@/lib/api';
 import { rasterizeIfVectorOnly } from '@/lib/vector-pdf-rasterizer';
 import { sessionsCache } from '@/lib/sessions-cache';
 import { useAuth } from '@/contexts/AuthContext';
@@ -42,6 +42,7 @@ export default function Index() {
   const [excelWidth, setExcelWidth]             = useState(480); // px, draggable
   const [backendDown, setBackendDown]           = useState(false);
   const [zippingOcr, setZippingOcr]             = useState(false);
+  const [forcingOcrId, setForcingOcrId]         = useState<string | null>(null);
   const [showBatchPanel, setShowBatchPanel]     = useState(false);
   const [activeBatchId, setActiveBatchId]       = useState<number | null>(null);
   const [navCollapsed, setNavCollapsed]         = useState(false);
@@ -1338,7 +1339,7 @@ export default function Index() {
                   <div className="bg-primary/5 border-b border-primary/20 px-4 py-1.5 flex items-center gap-3 shrink-0">
                     <Loader2 className="w-3.5 h-3.5 animate-spin text-primary shrink-0" />
                     <span className="text-xs text-primary/80 whitespace-nowrap">
-                      OCR indexing — page {activeSession.ocrProgress.current_page}/{activeSession.ocrProgress.total_pages}
+                      {activeSession.forceOcr ? 'Force Re-OCR' : 'OCR indexing'} — page {activeSession.ocrProgress.current_page}/{activeSession.ocrProgress.total_pages}
                       {activeSession.ocrProgress.elapsed_sec > 0 && ` · ${activeSession.ocrProgress.elapsed_sec.toFixed(0)}s`}
                     </span>
                     <div className="flex-1 h-1.5 bg-primary/10 rounded-full overflow-hidden">
@@ -1392,6 +1393,24 @@ export default function Index() {
                   onDownloadExcelSelected={multiSelectedTabIds.size > 0
                     ? handleDownloadExcelSelected
                     : undefined}
+                  forcingOcr={forcingOcrId === activeSession.id}
+                  onForceOcr={async () => {
+                    if (forcingOcrId === activeSession.id) return;
+                    if (!confirm('Re-OCR this PDF from scratch, ignoring its existing text layer?\n\nUse this when the PDF has a corrupt or unreadable text layer.')) return;
+                    setForcingOcrId(activeSession.id);
+                    setSessions(prev => prev.map(s => s.id === activeSession.id
+                      ? { ...s, forceOcr: true, ocrProgress: { current_page: 0, total_pages: s.total_pages, done: false, elapsed_sec: 0 } }
+                      : s
+                    ));
+                    const result = await triggerForceOcr(activeSession.id);
+                    setForcingOcrId(null);
+                    if (!result) {
+                      toast.error('Force Re-OCR failed — session may have expired, try re-uploading');
+                      return;
+                    }
+                    startOcrPolling(activeSession.id);
+                    toast.success('Force Re-OCR started — all pages will be scanned from the image layer');
+                  }}
                 />
               </div>
 

@@ -50,6 +50,9 @@ interface PDFViewerProps {
   onRemoveFieldFromSelectedPdfs?: (field: string) => void;
   // Excel export for the selected (ctrl/cmd-clicked) PDFs — handled by Index.
   onDownloadExcelSelected?: () => Promise<void>;
+  // Force Re-OCR
+  onForceOcr?: () => void;
+  forcingOcr?: boolean;
 
   onAutoApplyAllPdfs?: (
     pairs: ReadonlyArray<{
@@ -93,6 +96,8 @@ export default function PDFViewer({
   onRemoveFieldFromAllPdfs,
   onRemoveFieldFromSelectedPdfs,
   onDownloadExcelSelected,
+  onForceOcr,
+  forcingOcr = false,
 }: PDFViewerProps) {
   // Usage trackers for OCR PDF download + table extraction. Errors are
   // swallowed so a failed telemetry POST never blocks a user action.
@@ -1522,6 +1527,9 @@ export default function PDFViewer({
         onAutoSearch={handleAutoSearch}
         autoSearching={false}
         selectedIds={selectedIds}
+        onForceOcr={onForceOcr ?? (() => {})}
+        forcingOcr={forcingOcr}
+        forceOcrActive={session.forceOcr ?? false}
       />
 
       {/* Auto-extract setup banner — visible while setup active AND bar not toggled off */}
