@@ -7,6 +7,7 @@ import HighlightOverlay from './HighlightOverlay';
 import FieldLabelPicker from './FieldLabelPicker';
 import HighlightLegend from './HighlightLegend';
 import { downloadOcrPdf, downloadExcel, fetchTableRegions, extractRegions, searchBackend, extractTableRegion, downloadTableRegionExcel, type SearchMode } from '@/lib/api';
+import TableSanitizeDialog from './TableSanitizeDialog';
 import { findAllTextPositionsInPdfPage, detectTableRegionsInPdfPage, getTextAtRect } from '@/lib/pdf-extract';
 import { useAuth } from '@/contexts/AuthContext';
 import { toast } from 'sonner';
@@ -165,6 +166,7 @@ export default function PDFViewer({
   const [tablePanelPos, setTablePanelPos] = useState<{ x: number; y: number } | null>(null);
   const [tablePanelMinimized, setTablePanelMinimized] = useState(false);
   const tablePanelDragRef = useRef<{ offsetX: number; offsetY: number } | null>(null);
+  const [sanitizeOpen, setSanitizeOpen] = useState(false);
 
   // ── Auto-extract setup mode (replaces the old guided auto-search) ─────
   // Click the magic-wand button to enter setup. The user draws value
@@ -1981,14 +1983,31 @@ export default function PDFViewer({
                   Copy
                 </button>
                 <button
+                  className="text-xs px-2 py-1 rounded-md font-medium border bg-background hover:bg-muted"
+                  onClick={() => setSanitizeOpen(true)}
+                  title="Find similar / misspelled values and merge them"
+                >
+                  Sanitize
+                </button>
+                <button
                   className="text-xs bg-primary text-primary-foreground px-2.5 py-1 rounded-md font-medium hover:bg-primary/90"
                   onClick={async () => {
                     try {
+                      // Build flat rows from cells (respects sanitized state) or use rows directly
+                      const exportRows: string[][] = displayCells && anchorMap
+                        ? Array.from({ length: cellRows }, (_, ri) =>
+                            Array.from({ length: cellCols }, (_, ci) => {
+                              if (coveredSlots!.has(`${ri},${ci}`)) return '';
+                              return anchorMap!.get(`${ri},${ci}`)?.text ?? '';
+                            })
+                          )
+                        : displayRows.map(r => r.map(c => String(c ?? '')));
                       await downloadTableRegionExcel(
                         session.id, tablePreview.page,
                         tablePreview.region.x, tablePreview.region.y,
                         tablePreview.region.width, tablePreview.region.height,
                         session.filename.replace(/\.[^.]+$/, '') + `_region_p${tablePreview.page}.xlsx`,
+                        exportRows,
                       );
                       // Region Excel export counts as a table extract too.
                       trackTableExtract().catch(() => {});
@@ -2083,6 +2102,35 @@ export default function PDFViewer({
           </div>
         );
       })()}
+
+      {/* Table sanitize dialog */}
+      {sanitizeOpen && tablePreview && (
+        <TableSanitizeDialog
+          rows={
+            tablePreview.cells
+              ? (() => {
+                  const maxRow = Math.max(...tablePreview.cells.map(c => c.row + c.rowspan));
+                  const maxCol = Math.max(...tablePreview.cells.map(c => c.col + c.colspan));
+                  const grid: string[][] = Array.from({ length: maxRow }, () => Array(maxCol).fill(''));
+                  for (const c of tablePreview.cells) grid[c.row][c.col] = c.text;
+                  return grid;
+                })()
+              : tablePreview.rows
+          }
+          onCancel={() => setSanitizeOpen(false)}
+          onConfirm={(replacements) => {
+            setSanitizeOpen(false);
+            if (Object.keys(replacements).length === 0) return;
+            const applyReplace = (text: string) => replacements[text] ?? text;
+            setTablePreview(prev => {
+              if (!prev) return prev;
+              const rows = prev.rows.map(row => row.map(applyReplace));
+              const cells = prev.cells?.map(c => ({ ...c, text: applyReplace(c.text) }));
+              return { ...prev, rows, cells };
+            });
+          }}
+        />
+      )}
     </div>
   );
 }

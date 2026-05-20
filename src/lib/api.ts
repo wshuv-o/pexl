@@ -484,12 +484,12 @@ export async function downloadTableRegionExcel(
   page: number,
   x: number, y: number, width: number, height: number,
   filename: string,
-  transposed = false,
+  rows?: string[][],
 ): Promise<void> {
   const res = await fetch(`${BACKEND_URL}/api/utility/session/${sessionId}/extract-table-region/excel`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ page, x, y, width, height, transposed }),
+    body: JSON.stringify({ page, x, y, width, height, ...(rows ? { rows } : {}) }),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
