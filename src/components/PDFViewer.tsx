@@ -1742,6 +1742,7 @@ export default function PDFViewer({
                     scale={zoom ?? 1}
                     renderTextLayer={tool === 'text-select'}
                     renderAnnotationLayer={false}
+                    canvasBackground="white"
                     loading={
                       <div className="w-[600px] h-[800px] bg-white/5 animate-pulse rounded" />
                     }

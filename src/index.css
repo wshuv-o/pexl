@@ -161,6 +161,17 @@ canvas,
   transition: none !important;
 }
 
+/* Chrome GPU compositing fix: react-pdf sets canvas.style.visibility='hidden'
+   while rendering, but Chrome may not propagate canvas draw calls to the GPU
+   texture when the element is hidden. When visibility is restored the GPU
+   texture is stale/empty, so the page appears permanently blank. Forcing
+   visibility:visible prevents Chrome from discarding the GPU layer.
+   canvasBackground="white" on <Page> ensures the canvas initializes white
+   (not opaque-black) before PDF.js draws content, so there is no dark flash. */
+.react-pdf__Page__canvas {
+  visibility: visible !important;
+}
+
 .textLayer {
   user-select: none;
   -webkit-user-select: none;
