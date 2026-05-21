@@ -624,26 +624,27 @@ export default function PDFViewer({
       }
       toast.success('OCR\'d PDF downloaded');
       // Bump the per-user OCR-download counter (Odin /pexl/usage).
-      // Errors are swallowed so telemetry never blocks the UX.
-      trackOcrDownload().catch(() => {});
+      // Pass session.uploadedAt + now so the backend records the time
+      // span; Errors are swallowed so telemetry never blocks the UX.
+      trackOcrDownload(session.uploadedAt, Date.now()).catch(() => {});
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Download failed';
       toast.error(msg);
     }
     setDownloadingOcr(false);
-  }, [session.id, session.filename, session.file, onSessionRenewed, onPdfReplaced, trackOcrDownload]);
+  }, [session.id, session.filename, session.file, session.uploadedAt, onSessionRenewed, onPdfReplaced, trackOcrDownload]);
 
   const handleDownloadExcel = useCallback(async (pages?: string): Promise<void> => {
     try {
       await downloadExcel(session.id, session.filename, pages);
       toast.success('Excel tables downloaded');
       // "Convert to Table" flow → counts as a table extract.
-      trackTableExtract().catch(() => {});
+      trackTableExtract(session.uploadedAt, Date.now()).catch(() => {});
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Excel export failed';
       toast.error(msg);
     }
-  }, [session.id, session.filename, trackTableExtract]);
+  }, [session.id, session.filename, session.uploadedAt, trackTableExtract]);
 
   const pageRefs  = useRef<Record<number, HTMLDivElement | null>>({});
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -1983,7 +1984,7 @@ export default function PDFViewer({
                         session.filename.replace(/\.[^.]+$/, '') + `_region_p${tablePreview.page}.xlsx`,
                       );
                       // Region Excel export counts as a table extract too.
-                      trackTableExtract().catch(() => {});
+                      trackTableExtract(session.uploadedAt, Date.now()).catch(() => {});
                     } catch (err: unknown) {
                       toast.error(err instanceof Error ? err.message : 'Export failed');
                     }

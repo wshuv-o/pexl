@@ -27,6 +27,11 @@ export interface PDFSession {
   highlights: Record<number, Highlight[]>;
   extractedData: ExtractedRow[];
   startPage: number;         // first "content" page (1-based) — pages before this are cover pages
+  /** Epoch-ms when the file upload started — used by usage trackers to
+   *  compute (finished_at - uploaded_at) per usage event so the admin
+   *  dashboard can later show "time saved" per user. Optional because
+   *  sessions hydrated from a cache may not have it. */
+  uploadedAt?: number;
 }
 
 export interface Highlight {

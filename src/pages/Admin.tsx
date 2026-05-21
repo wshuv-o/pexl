@@ -23,6 +23,14 @@ interface UsageRow {
   table_extracts: number;
   doc_types: string[] | null;
   used_at: string;
+  /** Wall-clock moment the user kicked off the upload that produced
+   *  this event. Optional — older rows (before this column existed)
+   *  return ``null`` from the backend. Used by Odin EMS to compute
+   *  ``finished_at - uploaded_at`` for the "time saved" report. */
+  uploaded_at?: string | null;
+  /** Wall-clock moment this usage event completed. Optional for the
+   *  same backward-compat reason. */
+  finished_at?: string | null;
 }
 
 type TimeRange = 'today' | 'week' | 'all';

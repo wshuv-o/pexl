@@ -202,6 +202,9 @@ export default function Index() {
         total_pages: 0, pages: [], status: 'processing',
         highlights: {}, extractedData: [],
         startPage: 1,
+        // Stamp the upload start for usage-timing math; trackers later
+        // compute (finished_at - uploaded_at) to report time saved.
+        uploadedAt: Date.now(),
       }]);
       setModalOpen(true); setModalStep(0); setModalDetail('');
       setModalFileIdx(i + 1);
@@ -475,8 +478,15 @@ export default function Index() {
 
     // Track usage — also report each session's doc type so the admin
     // dashboard can show "user X scraped N appraisal, M utility_bill, …".
+    // Use the *earliest* session uploadedAt as the batch start so
+    // (finished_at − uploaded_at) reflects the user's full waiting time.
     const docTypes = targets.map(t => t.docType);
-    trackUsage(targets.length, totalExtracted, docTypes).catch(() => {});
+    const uploadStarts = targets
+      .map(t => t.uploadedAt)
+      .filter((n): n is number => typeof n === 'number');
+    const batchUploadedAt = uploadStarts.length > 0 ? Math.min(...uploadStarts) : undefined;
+    trackUsage(targets.length, totalExtracted, docTypes, batchUploadedAt, Date.now())
+      .catch(() => {});
   }, [sessions, openTabs, trackUsage]);
 
   const handleReExtractPage = useCallback(async (sessionId: string, page: number) => {
@@ -1401,7 +1411,17 @@ export default function Index() {
                         })));
                       }}
                       multiFile={sessions.filter(s => s.extractedData.length > 0).length > 1}
-                      onDownload={() => trackDownload().catch(() => {})}
+                      onDownload={() => {
+                        // For the multi-file Excel download, anchor
+                        // uploaded_at to the earliest session in the
+                        // batch and finished_at to right now.
+                        const uploads = sessions
+                          .filter(s => s.extractedData.length > 0)
+                          .map(s => s.uploadedAt)
+                          .filter((n): n is number => typeof n === 'number');
+                        const startedAt = uploads.length > 0 ? Math.min(...uploads) : undefined;
+                        trackDownload(startedAt, Date.now()).catch(() => {});
+                      }}
                       onRowClick={handleExcelRowClick}
                       externalBatchId={activeBatchId}
                       onDeleteRow={(sessionId, page) => {

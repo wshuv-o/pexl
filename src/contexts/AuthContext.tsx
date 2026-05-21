@@ -30,18 +30,41 @@ export interface UsageStats {
   last_used: string | null;
 }
 
+/**
+ * Either a Date, an epoch-ms number, or an ISO string. Trackers
+ * normalise to ISO before POSTing so the backend stores one canonical
+ * timestamp shape.
+ */
+export type UsageTime = Date | number | string;
+
 interface AuthContextType {
   user: User | null;
   usage: UsageStats;
   authLoading: boolean;
   login: (username: string, password: string) => Promise<{ ok: boolean; error?: string }>;
   logout: () => void;
-  trackUsage: (filesCount: number, statementsCount: number, docTypes?: string[]) => Promise<void>;
-  trackDownload: () => Promise<void>;
+  /**
+   * Records a batch processing event.
+   *
+   * @param uploadedAt — optional moment the user kicked off the upload
+   *   (e.g. ``session.uploadedAt``). Used together with ``finishedAt``
+   *   on the backend to compute "time saved" for the per-user
+   *   dashboard.
+   * @param finishedAt — optional moment the operation completed.
+   *   Defaults to ``Date.now()`` if omitted.
+   */
+  trackUsage: (
+    filesCount: number,
+    statementsCount: number,
+    docTypes?: string[],
+    uploadedAt?: UsageTime,
+    finishedAt?: UsageTime,
+  ) => Promise<void>;
+  trackDownload:     (uploadedAt?: UsageTime, finishedAt?: UsageTime) => Promise<void>;
   /** Bumps the ocr_downloads counter by 1. */
-  trackOcrDownload: () => Promise<void>;
+  trackOcrDownload:  (uploadedAt?: UsageTime, finishedAt?: UsageTime) => Promise<void>;
   /** Bumps the table_extracts counter by 1. */
-  trackTableExtract: () => Promise<void>;
+  trackTableExtract: (uploadedAt?: UsageTime, finishedAt?: UsageTime) => Promise<void>;
 }
 
 const EMPTY_USAGE: UsageStats = {
@@ -160,10 +183,33 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     setUsage(EMPTY_USAGE);
   };
 
+  // ── Timestamp normalisation ──────────────────────────────────────
+  // Trackers accept Date | epoch-ms | ISO string. Normalise to ISO
+  // before POSTing so the backend always stores one canonical shape
+  // (ISO 8601 UTC). Returns ``undefined`` when no timestamp was given,
+  // which keeps the body lean and lets the backend default to ``NOW()``.
+  const toIso = (t?: UsageTime): string | undefined => {
+    if (t == null) return undefined;
+    if (t instanceof Date) return t.toISOString();
+    if (typeof t === "number") return new Date(t).toISOString();
+    return t;  // already a string — assume ISO
+  };
+
+  const timingPayload = (uploadedAt?: UsageTime, finishedAt?: UsageTime) => {
+    const out: { uploaded_at?: string; finished_at?: string } = {};
+    const u = toIso(uploadedAt);
+    const f = toIso(finishedAt) ?? new Date().toISOString();   // default end = now
+    if (u) out.uploaded_at = u;
+    out.finished_at = f;
+    return out;
+  };
+
   const trackUsage = async (
     filesCount: number,
     statementsCount: number,
     docTypes?: string[],
+    uploadedAt?: UsageTime,
+    finishedAt?: UsageTime,
   ): Promise<void> => {
     // doc_types is an array, one entry per session processed (e.g.
     // ['appraisal', 'utility_bill', 'appraisal']) so the backend can
@@ -173,31 +219,48 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
       statements_extracted: statementsCount,
       downloads: 0,
       ...(docTypes && docTypes.length > 0 ? { doc_types: docTypes } : {}),
+      ...timingPayload(uploadedAt, finishedAt),
     });
     setUsage(await apiFetchUsage());
   };
 
-  const trackDownload = async (): Promise<void> => {
-    await apiPostUsage({ files_processed: 0, statements_extracted: 0, downloads: 1 });
+  const trackDownload = async (
+    uploadedAt?: UsageTime,
+    finishedAt?: UsageTime,
+  ): Promise<void> => {
+    await apiPostUsage({
+      files_processed: 0,
+      statements_extracted: 0,
+      downloads: 1,
+      ...timingPayload(uploadedAt, finishedAt),
+    });
     setUsage(await apiFetchUsage());
   };
 
-  const trackOcrDownload = async (): Promise<void> => {
+  const trackOcrDownload = async (
+    uploadedAt?: UsageTime,
+    finishedAt?: UsageTime,
+  ): Promise<void> => {
     await apiPostUsage({
       files_processed: 0,
       statements_extracted: 0,
       downloads: 0,
       ocr_downloads: 1,
+      ...timingPayload(uploadedAt, finishedAt),
     });
     setUsage(await apiFetchUsage());
   };
 
-  const trackTableExtract = async (): Promise<void> => {
+  const trackTableExtract = async (
+    uploadedAt?: UsageTime,
+    finishedAt?: UsageTime,
+  ): Promise<void> => {
     await apiPostUsage({
       files_processed: 0,
       statements_extracted: 0,
       downloads: 0,
       table_extracts: 1,
+      ...timingPayload(uploadedAt, finishedAt),
     });
     setUsage(await apiFetchUsage());
   };
