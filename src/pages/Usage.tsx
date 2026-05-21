@@ -31,6 +31,11 @@ interface UsageRow {
   /** Wall-clock moment this usage event completed. Optional for the
    *  same backward-compat reason. */
   finished_at?: string | null;
+  /** Server-computed gap in seconds (MySQL TIMESTAMPDIFF). Preferred
+   *  over recomputing on the client because the timestamps are stored
+   *  naively and the parse-as-UTC-or-local heuristic can drift; doing
+   *  the math server-side sidesteps that entirely. */
+  duration_seconds?: number | null;
 }
 
 type TimeRange = 'today' | 'week' | 'all';
@@ -60,11 +65,40 @@ const parseTimestamp = (iso: string): Date => {
   return asUtc;
 };
 
+// All usage timestamps are surfaced in Bangladesh Standard Time so the
+// dashboard reads the same regardless of where the viewer is sitting.
+const BD_TZ = 'Asia/Dhaka';
+
 const fmtDateTime = (iso: string) =>
   parseTimestamp(iso).toLocaleString(undefined, {
     year: "numeric", month: "short", day: "numeric",
     hour: "2-digit", minute: "2-digit",
+    timeZone: BD_TZ,
   });
+
+/** Format a duration given in seconds as "4.6 s" / "1m 12s" / "1h 5m". */
+const fmtDurationSec = (totalSec: number): string => {
+  if (!Number.isFinite(totalSec) || totalSec < 0) return '—';
+  if (totalSec < 60) return `${totalSec.toFixed(1)} s`;
+  const secs = Math.round(totalSec);
+  const mins = Math.floor(secs / 60);
+  const remS = secs % 60;
+  if (mins < 60) return `${mins}m ${remS}s`;
+  const hrs = Math.floor(mins / 60);
+  const remM = mins % 60;
+  return `${hrs}h ${remM}m`;
+};
+
+/** Format the gap between two ISO timestamps. Used as the client-side
+ *  fallback for old rows where the server didn't populate
+ *  duration_seconds. */
+const fmtDuration = (fromIso?: string | null, toIso?: string | null): string => {
+  if (!fromIso || !toIso) return '—';
+  const a = parseTimestamp(fromIso).getTime();
+  const b = parseTimestamp(toIso).getTime();
+  if (!Number.isFinite(a) || !Number.isFinite(b) || b < a) return '—';
+  return fmtDurationSec((b - a) / 1000);
+};
 
 const fmtRelative = (iso: string): string => {
   const then = parseTimestamp(iso).getTime();
@@ -309,6 +343,9 @@ const UserCard = ({
               <thead className="sticky top-0 bg-muted text-muted-foreground">
                 <tr>
                   <th className="text-left px-4 py-2 font-medium uppercase tracking-wide text-[10px]">Date & Time</th>
+                  <th className="text-left px-4 py-2 font-medium uppercase tracking-wide text-[10px]">Uploaded</th>
+                  <th className="text-left px-4 py-2 font-medium uppercase tracking-wide text-[10px]">Finished</th>
+                  <th className="text-right px-3 py-2 font-medium uppercase tracking-wide text-[10px]">Duration</th>
                   <th className="text-right px-3 py-2 font-medium uppercase tracking-wide text-[10px]">Files</th>
                   <th className="text-right px-3 py-2 font-medium uppercase tracking-wide text-[10px]">Extracted</th>
                   <th className="text-right px-3 py-2 font-medium uppercase tracking-wide text-[10px]">Downloads</th>
@@ -321,6 +358,17 @@ const UserCard = ({
                 {summary.rows.map((r, i) => (
                   <tr key={r.id} className={`border-b border-border last:border-0 ${i % 2 === 0 ? '' : 'bg-muted/20'}`}>
                     <td className="px-4 py-2 text-muted-foreground whitespace-nowrap">{fmtDateTime(r.used_at)}</td>
+                    <td className="px-4 py-2 text-muted-foreground whitespace-nowrap">
+                      {r.uploaded_at ? fmtDateTime(r.uploaded_at) : <span className="text-muted-foreground/50">—</span>}
+                    </td>
+                    <td className="px-4 py-2 text-muted-foreground whitespace-nowrap">
+                      {r.finished_at ? fmtDateTime(r.finished_at) : <span className="text-muted-foreground/50">—</span>}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums text-muted-foreground whitespace-nowrap">
+                      {typeof r.duration_seconds === 'number'
+                        ? fmtDurationSec(r.duration_seconds)
+                        : fmtDuration(r.uploaded_at, r.finished_at)}
+                    </td>
                     <td className="px-3 py-2 text-right tabular-nums">
                       {r.files_processed > 0 ? r.files_processed : <span className="text-muted-foreground/50">—</span>}
                     </td>
@@ -353,7 +401,7 @@ const UserCard = ({
 };
 
 // ─── Main page ──────────────────────────────────────────────────────────
-const Admin = () => {
+const Usage = () => {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const [rows, setRows]     = useState<UsageRow[]>([]);
@@ -367,7 +415,7 @@ const Admin = () => {
 
   useEffect(() => {
     const token = localStorage.getItem("auth_token");
-    fetch(`${ODIN_API}/pexl/admin/usage`, {
+    fetch(`${ODIN_API}/pexl/usage/all`, {
       headers: { Authorization: `Bearer ${token}` },
     })
       .then(r => {
@@ -615,4 +663,4 @@ const Admin = () => {
   );
 };
 
-export default Admin;
+export default Usage;

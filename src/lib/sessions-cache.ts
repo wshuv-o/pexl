@@ -1,5 +1,5 @@
 // Module-level cache that survives React component unmounts (e.g. when
-// navigating to /admin and back). Lives as long as the JS module — does
+// navigating to /usage and back). Lives as long as the JS module — does
 // NOT survive a hard refresh, which is fine because File blobs can't be
 // rehydrated from anywhere else either.
 import type { PDFSession } from '@/types/utilscraper';

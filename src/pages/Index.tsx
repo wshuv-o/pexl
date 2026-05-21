@@ -24,7 +24,7 @@ import { useAuth } from '@/contexts/AuthContext';
 export default function Index() {
   const { user, trackUsage, trackDownload, logout } = useAuth();
   const navigate = useNavigate();
-  // Hydrate from the module-level cache so navigating to /admin and back
+  // Hydrate from the module-level cache so navigating to /usage and back
   // doesn't drop the open PDFs / extracted data. The cache lives as long
   // as the JS module — does NOT survive a hard refresh.
   const [sessions, setSessions]                 = useState<PDFSession[]>(() => sessionsCache.sessions);
@@ -76,7 +76,7 @@ export default function Index() {
   }, [sessions.length, pendingFiles.length]);
 
   // Mirror tab/session state into the module-level cache so it survives
-  // unmounts (e.g. when navigating to /admin and back).
+  // unmounts (e.g. when navigating to /usage and back).
   useEffect(() => { sessionsCache.sessions = sessions;       }, [sessions]);
   useEffect(() => { sessionsCache.openTabs = openTabs;       }, [openTabs]);
   useEffect(() => { sessionsCache.activeTabId = activeTabId; }, [activeTabId]);
@@ -496,7 +496,7 @@ export default function Index() {
     if (totalNull > 0) toast.warning(`${totalNull} field${totalNull !== 1 ? 's' : ''} returned empty`);
     setExtracting(false);
 
-    // Track usage — also report each session's doc type so the admin
+    // Track usage — also report each session's doc type so the usage
     // dashboard can show "user X scraped N appraisal, M utility_bill, …".
     // Use the *earliest* session uploadedAt as the batch start so
     // (finished_at − uploaded_at) reflects the user's full waiting time.
@@ -1196,16 +1196,14 @@ export default function Index() {
               <Eraser className="w-3.5 h-3.5" />
               <span className="hidden sm:inline">Clear</span>
             </button>
-            {user?.roles.includes('admin') && (
-              <button
-                onClick={() => navigate('/admin')}
-                className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-all duration-200 px-2 py-1.5 rounded-lg hover:bg-muted"
-                title="Usage Dashboard"
-              >
-                <ShieldCheck className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">Usage</span>
-              </button>
-            )}
+            <button
+              onClick={() => navigate('/usage')}
+              className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-all duration-200 px-2 py-1.5 rounded-lg hover:bg-muted"
+              title="Usage Dashboard"
+            >
+              <ShieldCheck className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Usage</span>
+            </button>
             <button
               onClick={() => setShowBatchPanel(true)}
               className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-all duration-200 px-2 py-1.5 rounded-lg hover:bg-muted"

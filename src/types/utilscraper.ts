@@ -37,7 +37,7 @@ export interface PDFSession {
   ocrProgress?: OcrProgress | null;
   forceOcr?: boolean;
   /** Epoch-ms when the file upload started — used by usage trackers to
-   *  compute (finished_at - uploaded_at) per usage event so the admin
+   *  compute (finished_at - uploaded_at) per usage event so the usage
    *  dashboard can later show "time saved" per user. Optional because
    *  sessions hydrated from a cache may not have it. */
   uploadedAt?: number;

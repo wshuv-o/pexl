@@ -126,7 +126,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   useEffect(() => {
     // ── Localhost dev bypass ──────────────────────────────────────────────
     // When running `npm run dev` on localhost / 127.0.0.1 we inject a
-    // synthetic admin user so the ProtectedRoute doesn't bounce you to
+    // synthetic user so the ProtectedRoute doesn't bounce you to
     // /login during local testing. Never fires in a production build
     // (Vite's import.meta.env.DEV is false there).
     if (import.meta.env.DEV && typeof window !== 'undefined') {
@@ -213,7 +213,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   ): Promise<void> => {
     // doc_types is an array, one entry per session processed (e.g.
     // ['appraisal', 'utility_bill', 'appraisal']) so the backend can
-    // surface per-type breakdowns in the admin usage view.
+    // surface per-type breakdowns in the usage view.
     await apiPostUsage({
       files_processed: filesCount,
       statements_extracted: statementsCount,
