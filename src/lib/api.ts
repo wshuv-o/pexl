@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import type { PageInfo, Highlight, ExtractedRow } from '@/types/utilscraper';
+import type { PageInfo, Highlight, ExtractedRow, OcrProgress } from '@/types/utilscraper';
 import { extractFromRegions } from './pdf-extract';
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000' ;
@@ -484,12 +484,12 @@ export async function downloadTableRegionExcel(
   page: number,
   x: number, y: number, width: number, height: number,
   filename: string,
-  transposed = false,
+  rows?: string[][],
 ): Promise<void> {
   const res = await fetch(`${BACKEND_URL}/api/utility/session/${sessionId}/extract-table-region/excel`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ page, x, y, width, height, transposed }),
+    body: JSON.stringify({ page, x, y, width, height, ...(rows ? { rows } : {}) }),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
@@ -886,4 +886,29 @@ export async function extractRegions(
 
 function delay(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+export async function triggerForceOcr(sessionId: string): Promise<{ total_pages: number } | null> {
+  try {
+    const res = await fetch(`${BACKEND_URL}/api/utility/session/${sessionId}/force-ocr`, {
+      method: 'POST',
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+export async function getOcrProgress(sessionId: string): Promise<OcrProgress | null> {
+  try {
+    const res = await fetch(`${BACKEND_URL}/api/utility/session/${sessionId}/ocr-progress`, {
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) return null;
+    return await res.json() as OcrProgress;
+  } catch {
+    return null;
+  }
 }

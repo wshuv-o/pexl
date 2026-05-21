@@ -149,6 +149,29 @@
   border-radius: 3px;
 }
 
+/* The global `* { transition: ... }` rule must not animate PDF rendering
+   elements. The react-pdf page wrapper fades its white background in from
+   transparent (dark viewer bg bleeds through for 200ms), and text-layer
+   spans briefly show the inherited foreground color before transitioning to
+   transparent — both make the PDF content look colorless on upload. */
+canvas,
+.react-pdf__Page,
+.textLayer,
+.textLayer :is(span, br) {
+  transition: none !important;
+}
+
+/* Chrome GPU compositing fix: react-pdf sets canvas.style.visibility='hidden'
+   while rendering, but Chrome may not propagate canvas draw calls to the GPU
+   texture when the element is hidden. When visibility is restored the GPU
+   texture is stale/empty, so the page appears permanently blank. Forcing
+   visibility:visible prevents Chrome from discarding the GPU layer.
+   canvasBackground="white" on <Page> ensures the canvas initializes white
+   (not opaque-black) before PDF.js draws content, so there is no dark flash. */
+.react-pdf__Page__canvas {
+  visibility: visible !important;
+}
+
 .textLayer {
   user-select: none;
   -webkit-user-select: none;
@@ -167,6 +190,9 @@
   /* Pixel-snap the per-span transform so sub-pixel rounding doesn't
      offset the hit-box from the rendered character. */
   transform-origin: 0% 0%;
+  /* Ensure spans are instantly transparent — prevents the 0.15 s color
+     flash caused by the global color-transition rule. */
+  color: transparent;
 }
 
 .textLayer ::selection,

@@ -15,6 +15,13 @@ export interface PageInfo {
   status: 'native' | 'ocr';
 }
 
+export interface OcrProgress {
+  current_page: number;
+  total_pages: number;
+  done: boolean;
+  elapsed_sec: number;
+}
+
 export interface PDFSession {
   id: string;
   filename: string;
@@ -27,6 +34,8 @@ export interface PDFSession {
   highlights: Record<number, Highlight[]>;
   extractedData: ExtractedRow[];
   startPage: number;         // first "content" page (1-based) — pages before this are cover pages
+  ocrProgress?: OcrProgress | null;
+  forceOcr?: boolean;
   /** Epoch-ms when the file upload started — used by usage trackers to
    *  compute (finished_at - uploaded_at) per usage event so the admin
    *  dashboard can later show "time saved" per user. Optional because

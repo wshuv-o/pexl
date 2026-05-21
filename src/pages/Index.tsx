@@ -16,7 +16,7 @@ import BatchPanel from '@/components/BatchPanel';
 import ThemeToggle from '@/components/ThemeToggle';
 import type { PDFSession, Highlight, ExtractedRow, DocumentType } from '@/types/utilscraper';
 import { DOCUMENT_TYPES } from '@/types/utilscraper';
-import { processFile, extractRegions, downloadAllOcrPdfsAsZip, downloadExcel } from '@/lib/api';
+import { processFile, extractRegions, downloadAllOcrPdfsAsZip, downloadExcel, getOcrProgress, triggerForceOcr } from '@/lib/api';
 import { rasterizeIfVectorOnly } from '@/lib/vector-pdf-rasterizer';
 import { sessionsCache } from '@/lib/sessions-cache';
 import { useAuth } from '@/contexts/AuthContext';
@@ -42,6 +42,7 @@ export default function Index() {
   const [excelWidth, setExcelWidth]             = useState(480); // px, draggable
   const [backendDown, setBackendDown]           = useState(false);
   const [zippingOcr, setZippingOcr]             = useState(false);
+  const [forcingOcrId, setForcingOcrId]         = useState<string | null>(null);
   const [showBatchPanel, setShowBatchPanel]     = useState(false);
   const [activeBatchId, setActiveBatchId]       = useState<number | null>(null);
   const [navCollapsed, setNavCollapsed]         = useState(false);
@@ -95,6 +96,7 @@ export default function Index() {
 
   // Close a tab; if it was active, switch to the nearest neighbour
   const closeTab = useCallback((id: string) => {
+    ocrPollStopsRef.current[id] = true;
     setOpenTabs(prev => {
       const next = prev.filter(t => t !== id);
       if (activeTabId === id) {
@@ -234,6 +236,7 @@ export default function Index() {
         newSessionIds.push(result.session_id);
         setModalOpen(false);
         toast.success(`PDF ready — ${ocrCount > 0 ? `${ocrCount} pages OCR'd` : 'all native text'}`);
+        if (ocrCount > 0) startOcrPolling(result.session_id);
         if (ocrCount > 0) toast('Draw boxes over the values you want, then click Extract', { duration: 5000, icon: 'ℹ️' });
       } catch (err: any) {
         setModalOpen(false);
@@ -257,6 +260,23 @@ export default function Index() {
     }
     setPendingFiles([]); setProcessing(false);
   }, [pendingFiles, pendingDocType, activeTabId]);
+
+  // Tracks which sessions have active OCR polls running. Setting to true stops the loop.
+  const ocrPollStopsRef = useRef<Record<string, boolean>>({});
+
+  const startOcrPolling = useCallback((sessionId: string) => {
+    ocrPollStopsRef.current[sessionId] = false;
+    const poll = async () => {
+      if (ocrPollStopsRef.current[sessionId]) return;
+      const progress = await getOcrProgress(sessionId);
+      if (!progress) return;
+      setSessions(prev => prev.map(s => s.id === sessionId ? { ...s, ocrProgress: progress } : s));
+      if (!progress.done && !ocrPollStopsRef.current[sessionId]) {
+        setTimeout(poll, 2000);
+      }
+    };
+    poll();
+  }, []);
 
   const undoStacks = useRef<Record<string, Record<number, Highlight[]>[]>>({});
   const redoStacks = useRef<Record<string, Record<number, Highlight[]>[]>>({});
@@ -1324,6 +1344,24 @@ export default function Index() {
           {hasActiveViewer ? (
             <div className="flex-1 flex overflow-hidden">
               <div className="flex-1 flex flex-col overflow-hidden min-w-0">
+                {/* OCR progress banner — shown while background index build is running */}
+                {activeSession?.ocrProgress && !activeSession.ocrProgress.done && activeSession.ocrProgress.total_pages > 0 && activeSession.ocrProgress.current_page > 0 && (
+                  <div className="bg-primary/5 border-b border-primary/20 px-4 py-1.5 flex items-center gap-3 shrink-0">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin text-primary shrink-0" />
+                    <span className="text-xs text-primary/80 whitespace-nowrap">
+                      {activeSession.forceOcr ? 'Force Re-OCR' : 'OCR indexing'} — page {activeSession.ocrProgress.current_page}/{activeSession.ocrProgress.total_pages}
+                      {activeSession.ocrProgress.elapsed_sec > 0 && ` · ${activeSession.ocrProgress.elapsed_sec.toFixed(0)}s`}
+                    </span>
+                    <div className="flex-1 h-1.5 bg-primary/10 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-primary rounded-full transition-all duration-500"
+                        style={{
+                          width: `${Math.round((activeSession.ocrProgress.current_page / activeSession.ocrProgress.total_pages) * 100)}%`,
+                        }}
+                      />
+                    </div>
+                  </div>
+                )}
                 <PDFViewer
                   key={activeSession.id}
                   session={activeSession}
@@ -1365,6 +1403,24 @@ export default function Index() {
                   onDownloadExcelSelected={multiSelectedTabIds.size > 0
                     ? handleDownloadExcelSelected
                     : undefined}
+                  forcingOcr={forcingOcrId === activeSession.id}
+                  onForceOcr={async () => {
+                    if (forcingOcrId === activeSession.id) return;
+                    if (!confirm('Re-OCR this PDF from scratch, ignoring its existing text layer?\n\nUse this when the PDF has a corrupt or unreadable text layer.')) return;
+                    setForcingOcrId(activeSession.id);
+                    setSessions(prev => prev.map(s => s.id === activeSession.id
+                      ? { ...s, forceOcr: true, ocrProgress: { current_page: 0, total_pages: s.total_pages, done: false, elapsed_sec: 0 } }
+                      : s
+                    ));
+                    const result = await triggerForceOcr(activeSession.id);
+                    setForcingOcrId(null);
+                    if (!result) {
+                      toast.error('Force Re-OCR failed — session may have expired, try re-uploading');
+                      return;
+                    }
+                    startOcrPolling(activeSession.id);
+                    toast.success('Force Re-OCR started — all pages will be scanned from the image layer');
+                  }}
                 />
               </div>
 
