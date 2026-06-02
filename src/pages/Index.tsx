@@ -16,7 +16,7 @@ import BatchPanel from '@/components/BatchPanel';
 import ThemeToggle from '@/components/ThemeToggle';
 import type { PDFSession, Highlight, ExtractedRow, DocumentType } from '@/types/utilscraper';
 import { DOCUMENT_TYPES } from '@/types/utilscraper';
-import { processFile, extractRegions, downloadAllOcrPdfsAsZip, downloadExcel, getOcrProgress, triggerForceOcr } from '@/lib/api';
+import { processFile, extractRegions, downloadAllOcrPdfsAsZip, downloadExcel, getOcrProgress, triggerForceOcr, rotateSessionPdf, fetchConvertedPdf } from '@/lib/api';
 import { rasterizeIfVectorOnly } from '@/lib/vector-pdf-rasterizer';
 import { sessionsCache } from '@/lib/sessions-cache';
 import { useAuth } from '@/contexts/AuthContext';
@@ -43,6 +43,7 @@ export default function Index() {
   const [backendDown, setBackendDown]           = useState(false);
   const [zippingOcr, setZippingOcr]             = useState(false);
   const [forcingOcrId, setForcingOcrId]         = useState<string | null>(null);
+  const [rotatingId, setRotatingId]             = useState<string | null>(null);
   const [showBatchPanel, setShowBatchPanel]     = useState(false);
   const [activeBatchId, setActiveBatchId]       = useState<number | null>(null);
   const [navCollapsed, setNavCollapsed]         = useState(false);
@@ -1401,6 +1402,44 @@ export default function Index() {
                   onDownloadExcelSelected={multiSelectedTabIds.size > 0
                     ? handleDownloadExcelSelected
                     : undefined}
+                  rotatingAll={rotatingId === activeSession.id}
+                  onRotateAll={async () => {
+                    if (rotatingId === activeSession.id) return;
+                    if (!confirm(
+                      'Rotate all pages 90° clockwise?\n\n' +
+                      'The rotation is baked into the PDF (vector pages become images). ' +
+                      'Existing highlights and extracted data will be cleared because their ' +
+                      'page coordinates won\'t match the new orientation.'
+                    )) return;
+
+                    setRotatingId(activeSession.id);
+                    const result = await rotateSessionPdf(activeSession.id, 90);
+                    if (!result) {
+                      setRotatingId(null);
+                      toast.error('Rotate failed — session may have expired, try re-uploading');
+                      return;
+                    }
+
+                    // Refetch the now-rotated PDF blob so pdf.js renders the new pages.
+                    const newFile = await fetchConvertedPdf(activeSession.id, activeSession.filename);
+                    setRotatingId(null);
+
+                    setSessions(prev => prev.map(s => s.id === activeSession.id
+                      ? {
+                          ...s,
+                          file: newFile ?? s.file,
+                          total_pages: result.page_count ?? s.total_pages,
+                          highlights: {},
+                          extractedData: [],
+                          status: 'ready',
+                          // After baking, every page is a scanned image; force-ocr
+                          // is cleared because the user can re-trigger if needed.
+                          forceOcr: false,
+                          ocrProgress: null,
+                        }
+                      : s
+                    ));
+                  }}
                   forcingOcr={forcingOcrId === activeSession.id}
                   onForceOcr={async () => {
                     if (forcingOcrId === activeSession.id) return;

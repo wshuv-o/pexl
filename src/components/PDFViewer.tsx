@@ -54,6 +54,9 @@ interface PDFViewerProps {
   // Force Re-OCR
   onForceOcr?: () => void;
   forcingOcr?: boolean;
+  // Rotate all pages 90° CW (handled by Index — re-fetches PDF after)
+  onRotateAll?: () => void;
+  rotatingAll?: boolean;
 
   onAutoApplyAllPdfs?: (
     pairs: ReadonlyArray<{
@@ -99,6 +102,8 @@ export default function PDFViewer({
   onDownloadExcelSelected,
   onForceOcr,
   forcingOcr = false,
+  onRotateAll,
+  rotatingAll = false,
 }: PDFViewerProps) {
   // Usage trackers for OCR PDF download + table extraction. Errors are
   // swallowed so a failed telemetry POST never blocks a user action.
@@ -1533,6 +1538,8 @@ export default function PDFViewer({
         onForceOcr={onForceOcr ?? (() => {})}
         forcingOcr={forcingOcr}
         forceOcrActive={session.forceOcr ?? false}
+        onRotateAll={onRotateAll ?? (() => {})}
+        rotatingAll={rotatingAll}
       />
 
       {/* Auto-extract setup banner — visible while setup active AND bar not toggled off */}

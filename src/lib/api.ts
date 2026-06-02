@@ -901,6 +901,28 @@ export async function triggerForceOcr(sessionId: string): Promise<{ total_pages:
   }
 }
 
+/** Rotate every page in the session's PDF by `delta` degrees (multiple
+ *  of 90) and bake the rotation in. After this returns the session's
+ *  PDF has rotation=0 on every page; the caller should refetch
+ *  /pdf and any derived data. */
+export async function rotateSessionPdf(
+  sessionId: string,
+  delta: number,
+): Promise<{ page_count: number } | null> {
+  try {
+    const res = await fetch(`${BACKEND_URL}/api/utility/session/${sessionId}/rotate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ delta }),
+      signal: AbortSignal.timeout(60_000),  // rotation re-renders every page
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
 export async function getOcrProgress(sessionId: string): Promise<OcrProgress | null> {
   try {
     const res = await fetch(`${BACKEND_URL}/api/utility/session/${sessionId}/ocr-progress`, {

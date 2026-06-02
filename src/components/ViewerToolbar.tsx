@@ -3,7 +3,7 @@ import {
   ChevronLeft, ChevronRight, ZoomIn, ZoomOut,
   MousePointer2, Eraser, Loader2, TextCursor,
   FileDown, FileInput, FileStack, Trash2, ListChecks, ChevronDown, Search,
-  SlidersHorizontal, Download, MousePointerClick, Wand2, Filter, Check, FileSpreadsheet, Table2, ScanLine,
+  SlidersHorizontal, Download, MousePointerClick, Wand2, Filter, Check, FileSpreadsheet, Table2, ScanLine, RotateCw,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -66,6 +66,10 @@ interface ViewerToolbarProps {
   onForceOcr: () => void;
   forcingOcr: boolean;
   forceOcrActive: boolean;
+  // Rotate all pages 90° CW; backend bakes rotation so OCR/highlight
+  // coordinates stay correct.
+  onRotateAll: () => void;
+  rotatingAll: boolean;
 }
 
 const ZOOM_OPTIONS = [
@@ -98,6 +102,7 @@ export default function ViewerToolbar({
   onDownloadExcel, onDownloadExcelSelected, onDownloadExcelRange,
   onAutoSearch, autoSearching,
   onForceOcr, forcingOcr, forceOcrActive,
+  onRotateAll, rotatingAll,
 }: ViewerToolbarProps) {
   // Relative page numbering when startPage > 1 (cover pages skipped)
   const hasOffset    = startPage > 1;
@@ -314,7 +319,7 @@ export default function ViewerToolbar({
       {/* Separator */}
       <div className="w-px h-5 bg-border shrink-0" />
 
-      {/* Rotation — fine straighten only */}
+      {/* Rotation — fine straighten + bake-90° */}
       <div className="flex items-center gap-0.5 shrink-0">
         <Tooltip>
           <TooltipTrigger asChild>
@@ -333,6 +338,27 @@ export default function ViewerToolbar({
           </TooltipTrigger>
           <TooltipContent side="bottom" className="text-xs">
             Straighten ({fineRotation !== 0 ? `${fineRotation > 0 ? '+' : ''}${fineRotation}°` : 'fine rotate'})
+          </TooltipContent>
+        </Tooltip>
+
+        {/* Rotate-all 90° CW — bakes rotation into the PDF so OCR works */}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              className="p-1.5 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed text-muted-foreground hover:text-foreground hover:bg-muted"
+              onClick={onRotateAll}
+              disabled={rotatingAll}
+              aria-label="Rotate all pages 90° clockwise"
+            >
+              {rotatingAll
+                ? <Loader2 className="w-4 h-4 animate-spin" />
+                : <RotateCw className="w-4 h-4" />}
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom" className="max-w-[220px] text-xs">
+            Rotate all pages 90° CW — bakes the rotation in so OCR and
+            table extraction work on misoriented scans
           </TooltipContent>
         </Tooltip>
 
