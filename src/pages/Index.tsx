@@ -1405,13 +1405,6 @@ export default function Index() {
                   rotatingAll={rotatingId === activeSession.id}
                   onRotateAll={async () => {
                     if (rotatingId === activeSession.id) return;
-                    if (!confirm(
-                      'Rotate all pages 90° clockwise?\n\n' +
-                      'The rotation is baked into the PDF (vector pages become images). ' +
-                      'Existing highlights and extracted data will be cleared because their ' +
-                      'page coordinates won\'t match the new orientation.'
-                    )) return;
-
                     setRotatingId(activeSession.id);
                     const result = await rotateSessionPdf(activeSession.id, 90);
                     if (!result) {
