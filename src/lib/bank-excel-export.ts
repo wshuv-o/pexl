@@ -609,15 +609,23 @@ const addRollupTable = (
     const deposits    = entry?.deposits    ?? 0;
     const withdrawals = entry?.withdrawals ?? 0;
 
+    // Distinguish "no statement this month" (leave blank) from "statement
+    // with a real $0.00" (show $0.00). `deposits || ''` collapsed both into
+    // an empty string, hiding legitimate zero values from the user.
+    const dCell = entry ? deposits : '';
+    const wCell = entry ? withdrawals : '';
     const dataRow = startAtRow1
-      ? ws.addRow(['', monthKey, deposits || '', withdrawals || '', '', '', 0, '', 0, '', ''])
-      : ws.addRow(['', monthKey, deposits || '', withdrawals || '', '', '', '', '', '', '', '']);
+      ? ws.addRow(['', monthKey, dCell, wCell, '', '', 0, '', 0, '', ''])
+      : ws.addRow(['', monthKey, dCell, wCell, '', '', '', '', '', '', '']);
     const rn = dataRow.number;
     if (firstDataRn === null) firstDataRn = rn;
     lastDataRn = rn;
 
-    dataRow.getCell(3).numFmt = blankZeroCurrencyFmt;
-    dataRow.getCell(4).numFmt = blankZeroCurrencyFmt;
+    // Plain currency format — Excel shows $0.00 for zero values and the
+    // string '' for missing months. blankZeroCurrencyFmt would have
+    // re-hidden any real zeros.
+    dataRow.getCell(3).numFmt = currencyFmt;
+    dataRow.getCell(4).numFmt = currencyFmt;
 
     if (startAtRow1) {
       // Match per-property sheet: E/F balance chain, H = C - G, J = H - I
@@ -812,8 +820,11 @@ export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilen
       adjRow.getCell(6).numFmt = currencyFmt;
 
       const applyRowFormulas = (row: ExcelJS.Row, rn: number) => {
-        row.getCell(3).numFmt  = blankZeroCurrencyFmt;
-        row.getCell(4).numFmt  = blankZeroCurrencyFmt;
+        // Plain currency format on C/D so legitimate $0.00 values render
+        // (blankZeroCurrencyFmt blanked them; missing months still show
+        // blank because the cell value is '' rather than a number).
+        row.getCell(3).numFmt  = currencyFmt;
+        row.getCell(4).numFmt  = currencyFmt;
         row.getCell(5).value   = { formula: `IFERROR(E${rn - 1}+N(C${rn})-N(D${rn}),0)` };
         row.getCell(5).numFmt  = currencyFmt;
         row.getCell(6).value   = { formula: `IFERROR(F${rn - 1}+N(H${rn})-N(D${rn}),0)` };
@@ -856,11 +867,15 @@ export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilen
         const depositsRaw = it?.totalCredits ?? 0;
         const withdrawRaw = it?.totalDebits  ?? 0;
 
+        // Same as the roll-up fix: only blank when the month has no
+        // statement at all. A real $0.00 statement should still show $0.00.
+        const dCell = it ? depositsRaw : '';
+        const wCell = it ? withdrawRaw : '';
         const dataRow = ws.addRow([
           '',
           monthKey,
-          depositsRaw || '',
-          withdrawRaw || '',
+          dCell,
+          wCell,
           '', '', 0, '', 0, '', '',
         ]);
         const rn = dataRow.number;
