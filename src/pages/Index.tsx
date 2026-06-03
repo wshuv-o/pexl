@@ -512,7 +512,18 @@ export default function Index() {
 
   const handleReExtractPage = useCallback(async (sessionId: string, page: number) => {
     const sess = sessions.find(s => s.id === sessionId);
-    if (!sess?.file) return;
+    if (!sess) {
+      toast.error('Session not found — try re-uploading the file');
+      return;
+    }
+    if (!sess.file) {
+      // File blob is gone (cache-hydrated session). Without it we can't
+      // recover the session if the backend has evicted it. Tell the user
+      // instead of silently failing — that's what made the per-row
+      // Re-extract button feel broken.
+      toast.error('Original file is no longer in this tab — re-upload to re-extract');
+      return;
+    }
     const pageHighlights = sess.highlights[page] ?? [];
     if (!pageHighlights.length) { toast('No highlights on this page', { icon: 'ℹ️' }); return; }
 

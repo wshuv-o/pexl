@@ -59,6 +59,27 @@ const MONTH_MAP: Record<string, number> = {
 function normalizeDateValue(raw: string): string {
   let s = raw;
 
+  // --- Strip an arbitrary "<label>:" prefix that OCR glued onto the value
+  // (e.g. "Thisstatement:December 15 2025" → "December 15 2025"). Matches
+  // the backend's _strip_inline_label so dates are normalized consistently
+  // whether the value came from /api/utility/extract-regions (server) or
+  // from the client-side pdfjs fallback (which has no normalization).
+  //
+  // Only the leftmost colon NOT preceded by a digit is considered (skips
+  // time patterns like "12:30 PM"). Only strip if what comes after the
+  // colon actually looks date-ish; otherwise leave the value alone.
+  {
+    const colonMatch = s.match(/(?<!\d):\s*/);
+    if (colonMatch && colonMatch.index !== undefined) {
+      const rest = s.slice(colonMatch.index + colonMatch[0].length).trim();
+      const looksDateish =
+        /(?:19|20)\d{2}/.test(rest) ||
+        /\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december)\b/i.test(rest) ||
+        /\b\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4}\b/.test(rest);
+      if (rest && looksDateish) s = rest;
+    }
+  }
+
   // --- OCR digit/letter fixes ---
   s = s.replace(/\bIst\b/gi, '1st');
   s = s.replace(/\bI(\d)/g, '1$1');        // "I5" → "15"
