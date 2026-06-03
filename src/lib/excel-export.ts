@@ -16,7 +16,7 @@ const HEADER_COLORS: Record<DocumentType, { bg: string; font: string }> = {
   utility_bill:   { bg: '1F7D3A', font: 'FFFFFF' },  // dark green
   bank_statement: { bg: '1F497D', font: 'FFFFFF' },  // dark navy blue
   appraisal:      { bg: '4B1F7D', font: 'FFFFFF' },  // dark purple
-  lease_contract: { bg: '7D4B1F', font: 'FFFFFF' },  // dark orange/brown
+  lease_contract: { bg: '4A148C', font: 'FFFFFF' },  // deep purple
   tax:            { bg: '7D1F1F', font: 'FFFFFF' },  // dark red
 };
 
@@ -293,7 +293,7 @@ function buildLeaseSheet(fileMap: Map<string, ExtractedRow[]>): XLSX.WorkSheet {
   };
 
   type CoreKey =
-    | 'lease_date' | 'executed' | 'parties' | 'utilities_included'
+    | 'lease_date' | 'parties' | 'utilities_included'
     | 'lease_begin_date' | 'lease_end_date' | 'lease_term'
     | 'security_deposit' | 'monthly_rent' | 'lease_value';
 
@@ -302,121 +302,183 @@ function buildLeaseSheet(fileMap: Map<string, ExtractedRow[]>): XLSX.WorkSheet {
     field: string | null;   // ExtractedRow.field value (null = computed column)
     label: string;
     width: number;
-    type?: 'checkbox' | 'money';
-    formula?: (row1: number, L: Record<CoreKey, string>) => string;
+    type?: 'money';
+    formula?: (row1: number, L: Record<string, string>) => string;
+    /** Other CoreKeys this formula depends on. The column is dropped from
+     *  the sheet if any dependency was filtered out for being empty. */
+    dependsOn?: CoreKey[];
   }
 
-  const core: CoreCol[] = [
+  // ``executed`` removed per request — the user said no Executed column.
+  const coreAll: CoreCol[] = [
     { key: 'lease_date',         field: 'lease_date',         label: 'Contract Date', width: 13 },
-    { key: 'executed',           field: 'executed',           label: 'Executed?', width: 10, type: 'checkbox' },
     { key: 'parties',            field: 'parties',            label: 'Tenant Name(s)', width: 20 },
     { key: 'utilities_included', field: 'utilities_included', label: 'Utilities included in Rent', width: 24 },
     { key: 'lease_begin_date',   field: 'lease_begin_date',   label: 'Lease Start', width: 12 },
     { key: 'lease_end_date',     field: 'lease_end_date',     label: 'Lease End', width: 12 },
     { key: 'lease_term', field: null, label: 'Lease Term', width: 10,
-      formula: (r, L) => `IFERROR((${L.lease_end_date}${r}-${L.lease_begin_date}${r})/365.25,0)` },
+      formula: (r, L) => `IFERROR((${L.lease_end_date}${r}-${L.lease_begin_date}${r})/365.25,0)`,
+      dependsOn: ['lease_begin_date', 'lease_end_date'] },
     { key: 'security_deposit',   field: 'security_deposit',   label: 'Security Deposit', width: 15, type: 'money' },
     { key: 'monthly_rent',       field: 'monthly_rent',       label: 'Monthly Rent', width: 13, type: 'money' },
     { key: 'lease_value', field: null, label: 'Lease Value', width: 14,
-      formula: (r, L) => `IFERROR(${L.monthly_rent}${r}*${L.lease_term}${r}*12,0)` },
+      formula: (r, L) => `IFERROR(${L.monthly_rent}${r}*${L.lease_term}${r}*12,0)`,
+      dependsOn: ['monthly_rent', 'lease_term'] },
   ];
 
-  const coreFields = new Set(core.map(c => c.field).filter((f): f is string => !!f));
-  const extras = new Set<string>();
-  for (const rows of fileMap.values()) {
+  // Group rows by (filename, page) — one Excel row per page, per request.
+  // Maintains insertion order so output follows upload order.
+  type PageKey = string;
+  const pageBuckets = new Map<PageKey, {
+    filename: string;
+    folderName: string;
+    page: number;
+    rows: ExtractedRow[];
+  }>();
+  for (const [filename, rows] of fileMap.entries()) {
     for (const row of rows) {
-      if (coreFields.has(row.field)) continue;
-      extras.add(row.field);
+      const pk = `${filename}::${row.page}`;
+      const bucket = pageBuckets.get(pk);
+      if (bucket) {
+        bucket.rows.push(row);
+        if (!bucket.folderName && row.folderName) bucket.folderName = row.folderName;
+      } else {
+        pageBuckets.set(pk, {
+          filename,
+          folderName: row.folderName ?? '',
+          page: row.page,
+          rows: [row],
+        });
+      }
+    }
+  }
+
+  // Collect every field that actually carries a value somewhere. Used to
+  // drop empty columns (request #3 — only show fields the user highlighted
+  // and got values for).
+  const fieldsWithValues = new Set<string>();
+  for (const bucket of pageBuckets.values()) {
+    for (const row of bucket.rows) {
+      if (row.value && row.value.trim()) fieldsWithValues.add(row.field);
+    }
+  }
+
+  // Filter core columns: keep field-backed columns that have data; for
+  // formula columns, keep only if every dependency survived.
+  const coreFieldKept = new Set<CoreKey>();
+  const coreFiltered: CoreCol[] = [];
+  for (const col of coreAll) {
+    if (col.field) {
+      if (fieldsWithValues.has(col.field)) {
+        coreFieldKept.add(col.key);
+        coreFiltered.push(col);
+      }
+    }
+    // formula columns handled in a second pass so they can see kept keys
+  }
+  for (const col of coreAll) {
+    if (col.field) continue;
+    if (col.dependsOn && col.dependsOn.every(k => coreFieldKept.has(k))) {
+      coreFiltered.push(col);
+    }
+  }
+  // Restore original order
+  const orderIndex = new Map(coreAll.map((c, i) => [c.key, i]));
+  coreFiltered.sort((a, b) => (orderIndex.get(a.key)! - orderIndex.get(b.key)!));
+
+  // Extras = user-highlighted fields not in coreAll. They're always shown
+  // (they only exist if highlighted), and they go after file/page metadata.
+  const coreFieldNames = new Set(coreAll.map(c => c.field).filter((f): f is string => !!f));
+  const extras = new Set<string>();
+  for (const bucket of pageBuckets.values()) {
+    for (const row of bucket.rows) {
+      if (coreFieldNames.has(row.field)) continue;
+      if (row.value && row.value.trim()) extras.add(row.field);
     }
   }
   const extraFields = Array.from(extras);
 
-  const startExtraIdx = 1;
+  // Column layout: Folder | File | Page | extras... | core (filtered)
+  const META_FOLDER = 0;
+  const META_FILE   = 1;
+  const META_PAGE   = 2;
+  const startExtraIdx = 3;
   const startCoreIdx  = startExtraIdx + extraFields.length;
-  const totalCols     = startCoreIdx + core.length;
+  const totalCols     = startCoreIdx + coreFiltered.length;
 
   // Column letter for each core key, for formula references.
-  const L = {} as Record<CoreKey, string>;
-  core.forEach((c, i) => { L[c.key] = XLSX.utils.encode_col(startCoreIdx + i); });
+  const L = {} as Record<string, string>;
+  coreFiltered.forEach((c, i) => { L[c.key] = XLSX.utils.encode_col(startCoreIdx + i); });
 
   const wsData: any[][] = [];
   const styles: { row: number; col: number; style: any }[] = [];
-  const merges: { s: { r: number; c: number }; e: { r: number; c: number } }[] = [];
   let ri = 0;
   const push = (cells: any[]) => { wsData.push(cells); return ri++; };
   const sc   = (r: number, c: number, s: any) => styles.push({ row: r, col: c, style: s });
 
-  // Row 0 — "Lease" title merged over the core columns.
-  const titleRow = Array(totalCols).fill('');
-  titleRow[startCoreIdx] = 'Lease';
-  const titleR = push(titleRow);
-  merges.push({ s: { r: titleR, c: startCoreIdx }, e: { r: titleR, c: totalCols - 1 } });
-  sc(titleR, startCoreIdx, hdr(headerColor.bg, headerColor.font, true, 11));
-  for (let c = 0; c < startCoreIdx; c++) sc(titleR, c, cell(C.whiteBg, false, 'left', 10));
-
-  // Row 1 — column headers.
-  const headerCells = [
-    'file_name',
-    ...extraFields,
-    ...core.map(c => c.label),
-  ];
+  // Header row (no merged title row anymore — request #4).
+  const headerCells = Array(totalCols).fill('');
+  headerCells[META_FOLDER] = 'Folder';
+  headerCells[META_FILE]   = 'File Name';
+  headerCells[META_PAGE]   = 'Page';
+  extraFields.forEach((f, i) => { headerCells[startExtraIdx + i] = f; });
+  coreFiltered.forEach((c, i) => { headerCells[startCoreIdx + i] = c.label; });
   const hr = push(headerCells);
   for (let c = 0; c < totalCols; c++) sc(hr, c, hdr(headerColor.bg, headerColor.font));
 
-  // One data row per PDF.
-  for (const [filename, rows] of fileMap.entries()) {
+  // One row per (filename, page).
+  for (const bucket of pageBuckets.values()) {
     const values: Record<string, string> = {};
-    for (const row of rows) {
+    for (const row of bucket.rows) {
       if (!row.value) continue;
       if (values[row.field]) continue; // first-wins
       values[row.field] = row.value;
     }
 
     const row1 = ri + 1;
-    const rowCells: any[] = [
-      filename.replace(/\.(pdf|docx?)$/i, ''),
-      ...extraFields.map(k => values[k] ?? ''),
-    ];
+    const rowCells: any[] = Array(totalCols).fill('');
+    rowCells[META_FOLDER] = bucket.folderName;
+    rowCells[META_FILE]   = bucket.filename.replace(/\.(pdf|docx?)$/i, '');
+    rowCells[META_PAGE]   = bucket.page;
+    extraFields.forEach((f, i) => { rowCells[startExtraIdx + i] = values[f] ?? ''; });
 
-    for (const col of core) {
+    coreFiltered.forEach((col, i) => {
+      const colIdx = startCoreIdx + i;
       if (col.formula) {
-        rowCells.push({ t: 'n', v: 0, f: col.formula(row1, L) });
-      } else if (col.type === 'checkbox') {
-        const raw = (col.field ? values[col.field] : '') ?? '';
-        const checked = /^(y|yes|true|executed|signed|checked|x|✓|☒|☑|1)$/i.test(raw.trim());
-        rowCells.push(checked ? '☒' : '☐');
+        rowCells[colIdx] = { t: 'n', v: 0, f: col.formula(row1, L) };
       } else if (col.type === 'money') {
         const raw = col.field ? values[col.field] : '';
         const n = raw ? parseMoney(raw) : null;
-        if (n !== null) rowCells.push({ t: 'n', v: n, z: '"$"#,##0.00' });
-        else rowCells.push(raw ?? '');
+        rowCells[colIdx] = n !== null ? { t: 'n', v: n, z: '"$"#,##0.00' } : (raw ?? '');
       } else {
         const raw = col.field ? values[col.field] ?? '' : '';
-        rowCells.push(coerceCell(col.field ?? '', raw));
+        rowCells[colIdx] = coerceCell(col.field ?? '', raw);
       }
-    }
+    });
 
     const r = push(rowCells);
-    sc(r, 0, cell(C.whiteBg, true, 'left', 10));
+    sc(r, META_FOLDER, cell(C.whiteBg, false, 'left',   10));
+    sc(r, META_FILE,   cell(C.whiteBg, true,  'left',   10));
+    sc(r, META_PAGE,   cell(C.whiteBg, false, 'center', 10));
     for (let c = startExtraIdx; c < startCoreIdx; c++) sc(r, c, cell(C.whiteBg, false, 'left', 10));
-    core.forEach((col, i) => {
+    coreFiltered.forEach((col, i) => {
       const isTyped = col.field ? cellKindFor(col.field) !== 'text' : false;
       const align: 'left' | 'center' | 'right' =
-        col.type === 'checkbox' ? 'center' :
         col.type === 'money' || col.formula || isTyped ? 'right' : 'left';
-      sc(r, startCoreIdx + i, cell(C.whiteBg, false, align, col.type === 'checkbox' ? 12 : 10));
+      sc(r, startCoreIdx + i, cell(C.whiteBg, false, align, 10));
     });
   }
 
   const ws = XLSX.utils.aoa_to_sheet(wsData);
   applyStyles(ws, wsData, styles);
-  if (merges.length > 0) ws['!merges'] = merges;
   ws['!cols'] = [
-    { wch: 30 },
+    { wch: 22 },                                                  // Folder
+    { wch: 30 },                                                  // File Name
+    { wch: 6 },                                                   // Page
     ...extraFields.map(() => ({ wch: 18 })),
-    ...core.map(c => ({ wch: c.width })),
+    ...coreFiltered.map(c => ({ wch: c.width })),
   ];
-  (ws as any)['__sv__'] = { xSplit: 1, ySplit: 2 };
+  (ws as any)['__sv__'] = { xSplit: 3, ySplit: 1 };
   return ws;
 }
 // ---------------------------------------------------------------------------
