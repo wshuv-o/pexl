@@ -57,6 +57,9 @@ interface PDFViewerProps {
   // Rotate all pages 90° CW (handled by Index — re-fetches PDF after)
   onRotateAll?: () => void;
   rotatingAll?: boolean;
+  // Rotate every open PDF 90° CW (loops over all sessions in Index).
+  onRotateAllPdfs?: () => void;
+  rotatingAllPdfs?: boolean;
 
   onAutoApplyAllPdfs?: (
     pairs: ReadonlyArray<{
@@ -104,6 +107,8 @@ export default function PDFViewer({
   forcingOcr = false,
   onRotateAll,
   rotatingAll = false,
+  onRotateAllPdfs,
+  rotatingAllPdfs = false,
 }: PDFViewerProps) {
   // Usage trackers for OCR PDF download + table extraction. Errors are
   // swallowed so a failed telemetry POST never blocks a user action.
@@ -1039,6 +1044,48 @@ export default function PDFViewer({
     [session.highlights, updateHighlights, selectedIds],
   );
 
+  // Move every currently-selected highlight to a target page. Used by
+  // both the "Move to current page" action in the selection action bar
+  // and the Ctrl+M shortcut. Source pages keep the rest of their
+  // highlights; the moved ones land at the target page with a small
+  // jitter so they don't all stack on top of each other.
+  const handleMoveSelectedToPage = useCallback((targetPage: number) => {
+    if (selectedIds.size === 0) return;
+    if (targetPage < 1 || targetPage > totalPages) return;
+
+    const moved: Highlight[] = [];
+    const nextHls: Record<number, Highlight[]> = {};
+    for (const [pageStr, hls] of Object.entries(session.highlights)) {
+      const page = Number(pageStr);
+      const keep: Highlight[] = [];
+      for (const h of hls) {
+        if (selectedIds.has(h.id) && page !== targetPage) {
+          // Clear extracted data — coordinates are about to live on a
+          // different page, the old value is no longer meaningful.
+          moved.push({ ...h, page: targetPage, extractedValue: undefined, confidence: undefined, wasOcr: undefined });
+        } else {
+          keep.push(h);
+        }
+      }
+      if (keep.length > 0) nextHls[page] = keep;
+    }
+
+    if (moved.length === 0) return; // nothing actually moves (already on target)
+
+    // Light jitter so stacked moves don't all sit at identical x/y.
+    const jittered = moved.map((h, i) => ({
+      ...h,
+      x: Math.min(1 - h.width,  Math.max(0, h.x + (i * 0.005))),
+      y: Math.min(1 - h.height, Math.max(0, h.y + (i * 0.005))),
+    }));
+    const existing = nextHls[targetPage] ?? [];
+    nextHls[targetPage] = [...existing, ...jittered];
+
+    onHighlightsChange(session.id, nextHls);
+    // Keep the moved highlights selected so the user can see them land.
+    setSelectedIds(new Set(jittered.map(h => h.id)));
+  }, [selectedIds, session.highlights, session.id, onHighlightsChange, totalPages]);
+
   const handleDeleteHighlight = useCallback(
     (id: string, pageNum: number) => {
       const hls = session.highlights[pageNum] ?? [];
@@ -1471,6 +1518,13 @@ export default function PDFViewer({
         onHighlightsChange(session.id, next);
         setSelectedIds(new Set(newHls.map(h => h.id)));
       }
+      // Ctrl+M → move selected highlights to the currently visible page.
+      // Solves the "I can't drag highlights to another page" workflow:
+      // select on page A, scroll to page B, Ctrl+M.
+      if ((e.ctrlKey || e.metaKey) && e.key === 'm' && !isEditing && selectedIds.size > 0) {
+        e.preventDefault();
+        handleMoveSelectedToPage(currentPageRef.current);
+      }
       // Ctrl+S → activate the "select" tool (click/drag highlight boxes)
       if ((e.ctrlKey || e.metaKey) && e.key === 's' && !isEditing) {
         e.preventDefault();          // block browser's "save page" dialog
@@ -1484,7 +1538,7 @@ export default function PDFViewer({
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [searchOpen, selectedIds, session.highlights, session.id, onHighlightsChange, currentPage]);
+  }, [searchOpen, selectedIds, session.highlights, session.id, onHighlightsChange, currentPage, handleMoveSelectedToPage]);
 
   if (!fileUrl) {
     return (
@@ -1540,6 +1594,8 @@ export default function PDFViewer({
         forceOcrActive={session.forceOcr ?? false}
         onRotateAll={onRotateAll ?? (() => {})}
         rotatingAll={rotatingAll}
+        onRotateAllPdfs={onRotateAllPdfs}
+        rotatingAllPdfs={rotatingAllPdfs}
       />
 
       {/* Auto-extract setup banner — visible while setup active AND bar not toggled off */}
@@ -1847,6 +1903,100 @@ export default function PDFViewer({
           <HighlightLegend highlights={allHighlights} />
         )}
       </div>
+
+      {/* Selection action bar — visible whenever any highlights are selected.
+          Solves the "I can't drag highlights to another page" workflow:
+          select on page A, scroll to page B, click "Move to current page". */}
+      {selectedIds.size > 0 && (() => {
+        const allHls = Object.values(session.highlights).flat();
+        const selHls = allHls.filter(h => selectedIds.has(h.id));
+        const pagesOfSel = new Set(selHls.map(h => h.page));
+        const onCurrentPage = pagesOfSel.size === 1 && pagesOfSel.has(currentPage);
+        const moveLabel = pagesOfSel.size > 1
+          ? `Move all to page ${currentPage}`
+          : onCurrentPage
+            ? `Already on page ${currentPage}`
+            : `Move to page ${currentPage}`;
+        return (
+          <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 bg-background border border-border shadow-xl rounded-full px-3 py-1.5 flex items-center gap-2 text-xs">
+            <span className="font-medium text-foreground px-1">
+              {selectedIds.size} highlight{selectedIds.size !== 1 ? 's' : ''} selected
+              {pagesOfSel.size > 1 && <span className="text-muted-foreground ml-1">(across {pagesOfSel.size} pages)</span>}
+            </span>
+            <div className="w-px h-4 bg-border" />
+            <button
+              type="button"
+              className="px-2 py-1 rounded-md font-medium text-foreground hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed"
+              onClick={() => handleMoveSelectedToPage(currentPage)}
+              disabled={onCurrentPage}
+              title="Move selected highlights to the page you're viewing now (Ctrl+M)"
+            >
+              {moveLabel}
+            </button>
+            <button
+              type="button"
+              className="px-2 py-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted"
+              onClick={() => {
+                clipboardRef.current = selHls.map(h => ({ ...h }));
+              }}
+              title="Copy selected highlights — paste with Ctrl+V on any page"
+            >
+              Copy
+            </button>
+            <button
+              type="button"
+              className="px-2 py-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed"
+              onClick={() => {
+                if (!clipboardRef.current || clipboardRef.current.length === 0) return;
+                const stamp = Date.now();
+                const offset = 0.02;
+                const newHls: Highlight[] = clipboardRef.current.map((h, i) => ({
+                  ...h,
+                  id: `hl-${stamp}-${i}-${Math.random().toString(36).slice(2, 6)}`,
+                  page: currentPage,
+                  x: Math.min(1 - h.width,  Math.max(0, h.x + offset)),
+                  y: Math.min(1 - h.height, Math.max(0, h.y + offset)),
+                  extractedValue: undefined,
+                  confidence: undefined,
+                  wasOcr: undefined,
+                }));
+                const existing = session.highlights[currentPage] ?? [];
+                const next = { ...session.highlights, [currentPage]: [...existing, ...newHls] };
+                onHighlightsChange(session.id, next);
+                setSelectedIds(new Set(newHls.map(h => h.id)));
+              }}
+              disabled={!clipboardRef.current || clipboardRef.current.length === 0}
+              title="Paste copied highlights onto the current page (Ctrl+V)"
+            >
+              Paste here
+            </button>
+            <button
+              type="button"
+              className="px-2 py-1 rounded-md text-destructive hover:bg-destructive/10"
+              onClick={() => {
+                const nextHls: Record<number, Highlight[]> = {};
+                for (const [pageStr, hls] of Object.entries(session.highlights)) {
+                  const kept = hls.filter(h => !selectedIds.has(h.id));
+                  if (kept.length > 0) nextHls[Number(pageStr)] = kept;
+                }
+                onHighlightsChange(session.id, nextHls);
+                setSelectedIds(new Set());
+              }}
+              title="Delete selected highlights"
+            >
+              Delete
+            </button>
+            <button
+              type="button"
+              className="px-2 py-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted"
+              onClick={() => setSelectedIds(new Set())}
+              title="Clear selection (Esc)"
+            >
+              ✕
+            </button>
+          </div>
+        );
+      })()}
 
       {/* Table-select loading indicator */}
       {tableSelectLoading && (

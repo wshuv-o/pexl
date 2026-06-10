@@ -4,7 +4,7 @@ import { toast } from 'sonner';
 import {
   Upload, ChevronLeft, ChevronRight,
   AlertTriangle, FileSearch, X, ShieldCheck, LogOut,
-  RotateCw, Eraser, DownloadCloud, Loader2, XCircle, Layers,
+  RotateCw, Eraser, DownloadCloud, Loader2, XCircle, Layers, Check,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import UploadZone from '@/components/UploadZone';
@@ -44,6 +44,9 @@ export default function Index() {
   const [zippingOcr, setZippingOcr]             = useState(false);
   const [forcingOcrId, setForcingOcrId]         = useState<string | null>(null);
   const [rotatingId, setRotatingId]             = useState<string | null>(null);
+  const [rotatingAllPdfs, setRotatingAllPdfs]   = useState(false);
+  // True while the "confirm doc type before processing" modal is open.
+  const [confirmProcessOpen, setConfirmProcessOpen] = useState(false);
   const [showBatchPanel, setShowBatchPanel]     = useState(false);
   const [activeBatchId, setActiveBatchId]       = useState<number | null>(null);
   const [navCollapsed, setNavCollapsed]         = useState(false);
@@ -156,7 +159,15 @@ export default function Index() {
     setPendingFiles(prev => [...prev, ...files]);
   }, []);
 
-  const handleProcess = useCallback(async () => {
+  // Opens the doc-type confirm modal. Actual processing kicks off only
+  // after the user clicks "Start processing" inside the modal — that's
+  // where they get one last chance to switch the type for the whole batch.
+  const handleProcess = useCallback(() => {
+    if (!pendingFiles.length) return;
+    setConfirmProcessOpen(true);
+  }, [pendingFiles]);
+
+  const runProcessing = useCallback(async () => {
     if (!pendingFiles.length) return;
     setProcessing(true);
     setModalTotalFiles(pendingFiles.length);
@@ -1413,6 +1424,61 @@ export default function Index() {
                   onDownloadExcelSelected={multiSelectedTabIds.size > 0
                     ? handleDownloadExcelSelected
                     : undefined}
+                  rotatingAllPdfs={rotatingAllPdfs}
+                  onRotateAllPdfs={async () => {
+                    if (rotatingAllPdfs) return;
+                    const openTabSet = new Set(openTabs);
+                    const targets = sessions.filter(s => openTabSet.has(s.id));
+                    if (targets.length === 0) {
+                      toast('No PDFs open to rotate', { icon: 'ℹ️' });
+                      return;
+                    }
+
+                    setRotatingAllPdfs(true);
+                    const toastId = toast.loading(`Rotating 1 / ${targets.length}…`);
+                    let succeeded = 0;
+                    let failed = 0;
+
+                    // Sequential — one PDF at a time so the backend isn't
+                    // hit with N concurrent page-render jobs. Gentler on
+                    // the Hostinger box; the perceived wait is the same
+                    // because parallelism would have queued anyway.
+                    for (let i = 0; i < targets.length; i++) {
+                      const sess = targets[i];
+                      toast.loading(`Rotating ${i + 1} / ${targets.length} — ${sess.filename}`, { id: toastId });
+                      const result = await rotateSessionPdf(sess.id, 90);
+                      if (!result) {
+                        failed++;
+                        continue;
+                      }
+
+                      const newFile = await fetchConvertedPdf(sess.id, sess.filename);
+                      setSessions(prev => prev.map(s => s.id === sess.id
+                        ? {
+                            ...s,
+                            file: newFile ?? s.file,
+                            total_pages: result.page_count ?? s.total_pages,
+                            highlights: {},
+                            extractedData: [],
+                            status: 'ready' as const,
+                            forceOcr: false,
+                            ocrProgress: null,
+                          }
+                        : s
+                      ));
+                      succeeded++;
+                    }
+
+                    setRotatingAllPdfs(false);
+                    toast.dismiss(toastId);
+                    if (failed === 0) {
+                      toast.success(`Rotated ${succeeded} PDF${succeeded !== 1 ? 's' : ''}`);
+                    } else if (succeeded === 0) {
+                      toast.error(`All ${failed} rotation${failed !== 1 ? 's' : ''} failed`);
+                    } else {
+                      toast(`Rotated ${succeeded} / ${targets.length} — ${failed} failed`, { icon: '⚠️' });
+                    }
+                  }}
                   rotatingAll={rotatingId === activeSession.id}
                   onRotateAll={async () => {
                     if (rotatingId === activeSession.id) return;
@@ -1554,6 +1620,72 @@ export default function Index() {
       </div>
 
       <ProcessingModal open={modalOpen} step={modalStep} detail={modalDetail} fileIndex={modalFileIdx} totalFiles={modalTotalFiles} />
+
+      {/* Doc-type confirmation modal — last chance to fix the type for
+          a batch before processing starts. The picker mutates
+          pendingDocType directly so closing without confirming still
+          retains whatever the user just chose. */}
+      {confirmProcessOpen && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40"
+          onClick={() => setConfirmProcessOpen(false)}
+        >
+          <div
+            className="bg-background border border-border rounded-xl shadow-2xl w-[420px] max-w-[92vw]"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="px-5 py-4 border-b border-border">
+              <h3 className="text-base font-semibold">Confirm document type</h3>
+              <p className="text-xs text-muted-foreground mt-1">
+                You're about to process{' '}
+                <span className="font-medium text-foreground">
+                  {pendingFiles.length} file{pendingFiles.length !== 1 ? 's' : ''}
+                </span>
+                . Pick the right type below — it controls which fields are
+                recognised and how the Excel export is built.
+              </p>
+            </div>
+
+            <div className="px-3 py-2 max-h-[60vh] overflow-auto">
+              {DOCUMENT_TYPES.map(t => (
+                <button
+                  key={t.value}
+                  type="button"
+                  className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-left transition-colors
+                    ${t.value === pendingDocType
+                      ? 'bg-primary/10 ring-1 ring-primary/30 text-foreground'
+                      : 'text-muted-foreground hover:bg-muted hover:text-foreground'}`}
+                  onClick={() => setPendingDocType(t.value)}
+                >
+                  <span className="w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: t.color }} />
+                  <span className="flex-1 font-medium">{t.label}</span>
+                  {t.value === pendingDocType && <Check className="w-4 h-4 text-primary shrink-0" />}
+                </button>
+              ))}
+            </div>
+
+            <div className="px-5 py-3 border-t border-border flex justify-end gap-2">
+              <button
+                type="button"
+                className="px-4 py-1.5 text-sm rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                onClick={() => setConfirmProcessOpen(false)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="px-4 py-1.5 text-sm font-medium rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
+                onClick={() => {
+                  setConfirmProcessOpen(false);
+                  runProcessing();
+                }}
+              >
+                Start processing
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {showBatchPanel && (
         <BatchPanel
           username={user?.username ?? 'unknown'}
