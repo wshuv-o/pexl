@@ -952,6 +952,58 @@ export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilen
     for (let i = 2; i <= 11; i++) rollupSheet.getColumn(i).width = 22;
   }
 
+  // ── Plain Data sheet — column-per-field, one row per PDF.
+  // Unstyled, no formulas, no colors. The flat raw view the user wants
+  // alongside the templated bank statement tabs.
+  {
+    const fieldsSeen = new Set<string>();
+    const fields: string[] = [];
+    for (const { rows } of fileMap.values()) {
+      for (const r of rows) {
+        if (!r.value || !String(r.value).trim()) continue;
+        if (!fieldsSeen.has(r.field)) { fieldsSeen.add(r.field); fields.push(r.field); }
+      }
+    }
+
+    let plainName = 'Plain Data';
+    let n = 2;
+    while (wb.getWorksheet(plainName)) plainName = `Plain Data ${n++}`;
+
+    const plain = wb.addWorksheet(plainName);
+    plain.addRow(['#', 'File Name', ...fields]);
+
+    let idx = 1;
+    for (const { filename, rows } of fileMap.values()) {
+      const values: Record<string, string> = {};
+      for (const r of rows) {
+        if (!r.value) continue;
+        if (!values[r.field]) values[r.field] = r.value;
+      }
+      plain.addRow([
+        idx++,
+        filename.replace(/\.(pdf|docx?)$/i, ''),
+        ...fields.map(f => values[f] ?? ''),
+      ]);
+    }
+
+    plain.columns = [
+      { width: 5 },
+      { width: 30 },
+      ...fields.map(() => ({ width: 22 })),
+    ];
+
+    // Borders on every cell, bold header row. No fills/colors — matches
+    // the "plain raw data" spec.
+    const _thin = { style: 'thin' as const, color: { argb: 'FF000000' } };
+    plain.eachRow((row, rowNum) => {
+      row.eachCell(cell => {
+        cell.border = { top: _thin, bottom: _thin, left: _thin, right: _thin };
+        cell.font = { name: 'Arial', size: 10, bold: rowNum === 1 };
+        cell.alignment = { vertical: 'middle', wrapText: true };
+      });
+    });
+  }
+
   const buffer = await wb.xlsx.writeBuffer();
   const now = new Date();
   const dateStr = now.toISOString().slice(0, 16).replace(/[T:]/g, '-');

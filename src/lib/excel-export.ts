@@ -210,22 +210,14 @@ function buildSheetForFile(
 ): XLSX.WorkSheet {
   const headerColor = HEADER_COLORS[docType];
 
-  // Get field columns for this doc type (exclude 'custom')
+  // Get field columns for this doc type (exclude 'custom').
+  // Strict by design: the templated sheet stays locked to this doc type's
+  // known fields. Any out-of-type extracted values still appear in the
+  // Plain Data sheet — no data is lost, the template just doesn't include
+  // foreign fields the user might have extracted before changing the type.
   const fieldDefs = getFieldLabelsForType(docType).filter(f => f.value !== 'custom');
 
-  // Collect any custom field names used in the data
-  const knownFields = new Set(fieldDefs.map(f => f.value as string));
-  const customFields: string[] = [];
-  for (const row of rows) {
-    if (!knownFields.has(row.field) && !customFields.includes(row.field)) {
-      customFields.push(row.field);
-    }
-  }
-
-  const allColumns = [
-    ...fieldDefs.map(f => ({ key: f.value, label: f.label })),
-    ...customFields.map(f => ({ key: f, label: f })),
-  ];
+  const allColumns = fieldDefs.map(f => ({ key: f.value, label: f.label }));
   const byPage = new Map<number, Record<string, string[]>>();
   const pageOrder: number[] = [];
   const highlightedFields = new Set<string>();
@@ -386,17 +378,10 @@ function buildLeaseSheet(fileMap: Map<string, ExtractedRow[]>): XLSX.WorkSheet {
   const orderIndex = new Map(coreAll.map((c, i) => [c.key, i]));
   coreFiltered.sort((a, b) => (orderIndex.get(a.key)! - orderIndex.get(b.key)!));
 
-  // Extras = user-highlighted fields not in coreAll. They're always shown
-  // (they only exist if highlighted), and they go after file/page metadata.
-  const coreFieldNames = new Set(coreAll.map(c => c.field).filter((f): f is string => !!f));
-  const extras = new Set<string>();
-  for (const bucket of pageBuckets.values()) {
-    for (const row of bucket.rows) {
-      if (coreFieldNames.has(row.field)) continue;
-      if (row.value && row.value.trim()) extras.add(row.field);
-    }
-  }
-  const extraFields = Array.from(extras);
+  // Templated sheet stays strictly within lease's own fields. Foreign
+  // fields (e.g. utility totals the user extracted before changing the
+  // doc type) appear in the Plain Data sheet only — nothing is lost.
+  const extraFields: string[] = [];
 
   // Column layout: Folder | File | Page | extras... | core (filtered)
   const META_FOLDER = 0;
@@ -485,24 +470,11 @@ function buildLeaseSheet(fileMap: Map<string, ExtractedRow[]>): XLSX.WorkSheet {
 function buildUnifiedSheet(fileMap: Map<string, ExtractedRow[]>, docType: DocumentType): XLSX.WorkSheet {
   const headerColor = HEADER_COLORS[docType];
 
-  // Declared appraisal fields (in order), excluding 'custom'
+  // Declared fields for this doc type (exclude 'custom'). The templated
+  // sheet stays strictly within this doc type — foreign fields land in
+  // the Plain Data sheet so nothing is lost.
   const fieldDefs = getFieldLabelsForType(docType).filter(f => f.value !== 'custom');
-
-  // Collect any custom fields used across files, preserving first-appearance order
-  const knownFields = new Set(fieldDefs.map(f => f.value as string));
-  const customFields: string[] = [];
-  for (const rows of fileMap.values()) {
-    for (const row of rows) {
-      if (!knownFields.has(row.field) && !customFields.includes(row.field)) {
-        customFields.push(row.field);
-      }
-    }
-  }
-
-  const fieldColumns = [
-    ...fieldDefs.map(f => ({ key: f.value, label: f.label })),
-    ...customFields.map(f => ({ key: f, label: f })),
-  ];
+  const fieldColumns = fieldDefs.map(f => ({ key: f.value, label: f.label }));
 
   type PdfRow = {
     pdfNum: number;
@@ -602,11 +574,98 @@ function colLetter(n: number): string {
 }
 
 
+// ---------------------------------------------------------------------------
+// Raw (unstyled) sheet — every extracted field as a column, one row per PDF.
+// Columns: #, File Name, then one column per field encountered. Plain text,
+// no colors, no formulas, no normalisation — the literal value the user
+// extracted, useful for downstream scripting/pivoting.
+//
+// Exported so utility-excel-export.ts and bank-excel-export.ts can build the
+// same shape with their own libraries (ExcelJS for bank, XLSX for utility).
+export function buildRawData(fileMap: Map<string, ExtractedRow[]>): {
+  headers: string[];
+  rows: (string | number)[][];
+} {
+  // Collect every field that appears with a non-empty value across all rows;
+  // preserve first-seen order so columns track the user's highlight order.
+  const fields: string[] = [];
+  const seen = new Set<string>();
+  for (const rows of fileMap.values()) {
+    for (const r of rows) {
+      if (!r.value || !String(r.value).trim()) continue;
+      if (!seen.has(r.field)) { seen.add(r.field); fields.push(r.field); }
+    }
+  }
+
+  const headers = ['#', 'File Name', ...fields];
+  const rows: (string | number)[][] = [];
+
+  let idx = 1;
+  for (const [filename, rs] of fileMap.entries()) {
+    // First-wins per field — multi-page docs collapse into one row.
+    const values: Record<string, string> = {};
+    for (const r of rs) {
+      if (!r.value) continue;
+      if (!values[r.field]) values[r.field] = r.value;
+    }
+    rows.push([
+      idx++,
+      filename.replace(/\.(pdf|docx?)$/i, ''),
+      ...fields.map(f => values[f] ?? ''),
+    ]);
+  }
+  return { headers, rows };
+}
+
+function buildRawSheet(fileMap: Map<string, ExtractedRow[]>): XLSX.WorkSheet {
+  const { headers, rows } = buildRawData(fileMap);
+  const aoa = [headers, ...rows];
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+
+  // Borders on every cell, bold header row. No colors — matches the
+  // "plain raw data" requirement.
+  const _b = { style: 'thin', color: { rgb: C.borderColor } };
+  const borderAll = { top: _b, bottom: _b, left: _b, right: _b };
+  const styles: { row: number; col: number; style: any }[] = [];
+  for (let r = 0; r < aoa.length; r++) {
+    for (let c = 0; c < aoa[r].length; c++) {
+      styles.push({
+        row: r, col: c,
+        style: {
+          font: { name: 'Arial', sz: 10, bold: r === 0 },
+          alignment: {
+            horizontal: c === 0 ? 'center' : c === 1 ? 'left' : 'left',
+            vertical: 'center',
+            wrapText: true,
+          },
+          border: borderAll,
+        },
+      });
+    }
+  }
+  applyStyles(ws, aoa, styles);
+
+  ws['!cols'] = [
+    { wch: 5 },                            // #
+    { wch: 30 },                           // File Name
+    ...headers.slice(2).map(() => ({ wch: 22 })),
+  ];
+  return ws;
+}
+
 export async function exportToExcel(
   data: ExtractedRow[],
   _filename: string,
   provider: string,
-  _options: { utilityMerge?: UtilityMergeOptions; dateField?: UtilityDateField } = {},
+  _options: {
+    utilityMerge?: UtilityMergeOptions;
+    dateField?: UtilityDateField;
+    /** Explicit doc type to use for the templated sheet. Bypasses the
+     *  field-count auto-detection. Set when the user has manually picked
+     *  a type after upload — auto-detect would otherwise still see the
+     *  old type's extracted field names and pick the wrong template. */
+    forceDocType?: DocumentType;
+  } = {},
 ) {
   const now     = new Date();
   const dateStr = now.toISOString().slice(0, 16).replace(/[T:]/g, '-');
@@ -620,9 +679,9 @@ export async function exportToExcel(
     fileMap.get(key)!.push(row);
   }
 
-  // Detect overall doc type from first file
+  // Pick the doc type: explicit user choice wins, otherwise auto-detect.
   const allRows = Array.from(fileMap.values()).flat();
-  const overallType = detectDocType(allRows);
+  const overallType = _options.forceDocType ?? detectDocType(allRows);
 
   if (overallType === 'bank_statement') {
     // Bank statement uses the dedicated ExcelJS-based exporter with formulas,
@@ -635,9 +694,11 @@ export async function exportToExcel(
   } else if (overallType === 'appraisal') {
     const ws = buildUnifiedSheet(fileMap, 'appraisal');
     XLSX.utils.book_append_sheet(wb, ws, 'Appraisals');
+    XLSX.utils.book_append_sheet(wb, buildRawSheet(fileMap), 'Plain Data');
   } else if (overallType === 'tax') {
     const ws = buildUnifiedSheet(fileMap, 'tax');
     XLSX.utils.book_append_sheet(wb, ws, 'Tax');
+    XLSX.utils.book_append_sheet(wb, buildRawSheet(fileMap), 'Plain Data');
 
   } else if (overallType === 'utility_bill') {
     downloadUtilityExcel(fileMap, _options.dateField ?? 'auto')
@@ -647,6 +708,7 @@ export async function exportToExcel(
   } else if (overallType === 'lease_contract') {
     const ws = buildLeaseSheet(fileMap);
     XLSX.utils.book_append_sheet(wb, ws, 'Lease Contracts');
+    XLSX.utils.book_append_sheet(wb, buildRawSheet(fileMap), 'Plain Data');
   } else {
     // Per-file sheets (utility)
     const usedNames = new Set<string>();
@@ -656,6 +718,7 @@ export async function exportToExcel(
       const ws        = buildSheetForFile(rows, docType);
       XLSX.utils.book_append_sheet(wb, ws, sheetName);
     }
+    XLSX.utils.book_append_sheet(wb, buildRawSheet(fileMap), 'Plain Data');
   }
 
   if (fileMap.size === 0) {

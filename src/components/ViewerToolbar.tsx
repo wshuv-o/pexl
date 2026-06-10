@@ -3,7 +3,7 @@ import {
   ChevronLeft, ChevronRight, ZoomIn, ZoomOut,
   MousePointer2, Eraser, Loader2, TextCursor,
   FileDown, FileInput, FileStack, Trash2, ListChecks, ChevronDown, Search,
-  SlidersHorizontal, Download, MousePointerClick, Wand2, Filter, Check, FileSpreadsheet, Table2, ScanLine, RotateCw,
+  SlidersHorizontal, Download, MousePointerClick, Wand2, Filter, Check, FileSpreadsheet, Table2, ScanLine, RotateCw, RotateCcw,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -70,10 +70,16 @@ interface ViewerToolbarProps {
   // coordinates stay correct.
   onRotateAll: () => void;
   rotatingAll: boolean;
+  // Same but 90° CCW.
+  onRotateAllCcw?: () => void;
+  rotatingAllCcw?: boolean;
   // Rotate every open PDF 90° CW (loops through all sessions). Optional —
   // only shown if the host page passes a handler.
   onRotateAllPdfs?: () => void;
   rotatingAllPdfs?: boolean;
+  // Same but 90° CCW.
+  onRotateAllPdfsCcw?: () => void;
+  rotatingAllPdfsCcw?: boolean;
 }
 
 const ZOOM_OPTIONS = [
@@ -107,7 +113,9 @@ export default function ViewerToolbar({
   onAutoSearch, autoSearching,
   onForceOcr, forcingOcr, forceOcrActive,
   onRotateAll, rotatingAll,
+  onRotateAllCcw, rotatingAllCcw = false,
   onRotateAllPdfs, rotatingAllPdfs = false,
+  onRotateAllPdfsCcw, rotatingAllPdfsCcw = false,
 }: ViewerToolbarProps) {
   // Relative page numbering when startPage > 1 (cover pages skipped)
   const hasOffset    = startPage > 1;
@@ -346,6 +354,29 @@ export default function ViewerToolbar({
           </TooltipContent>
         </Tooltip>
 
+        {/* Rotate this PDF 90° CCW — bakes rotation in so OCR works */}
+        {onRotateAllCcw && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                className="p-1.5 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed text-muted-foreground hover:text-foreground hover:bg-muted"
+                onClick={onRotateAllCcw}
+                disabled={rotatingAllCcw}
+                aria-label="Rotate this PDF 90° counter-clockwise"
+              >
+                {rotatingAllCcw
+                  ? <Loader2 className="w-4 h-4 animate-spin" />
+                  : <RotateCcw className="w-4 h-4" />}
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom" className="max-w-[220px] text-xs">
+              Rotate THIS PDF 90° CCW — bakes the rotation in so OCR and
+              table extraction work on misoriented scans
+            </TooltipContent>
+          </Tooltip>
+        )}
+
         {/* Rotate this PDF 90° CW — bakes rotation in so OCR works */}
         <Tooltip>
           <TooltipTrigger asChild>
@@ -366,6 +397,35 @@ export default function ViewerToolbar({
             table extraction work on misoriented scans
           </TooltipContent>
         </Tooltip>
+
+        {/* Rotate EVERY open PDF 90° CCW (sequential) */}
+        {onRotateAllPdfsCcw && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                className="relative p-1.5 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed text-muted-foreground hover:text-foreground hover:bg-muted"
+                onClick={onRotateAllPdfsCcw}
+                disabled={rotatingAllPdfsCcw}
+                aria-label="Rotate every uploaded PDF 90° counter-clockwise"
+              >
+                {rotatingAllPdfsCcw
+                  ? <Loader2 className="w-4 h-4 animate-spin" />
+                  : <RotateCcw className="w-4 h-4" />}
+                <span
+                  className="absolute -bottom-0.5 -right-0.5 text-[8px] leading-none font-bold px-0.5 rounded bg-primary text-primary-foreground"
+                  aria-hidden="true"
+                >
+                  ALL
+                </span>
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom" className="max-w-[240px] text-xs">
+              Rotate EVERY uploaded PDF 90° CCW — applies the same rotation
+              to all open files one after another.
+            </TooltipContent>
+          </Tooltip>
+        )}
 
         {/* Rotate EVERY open PDF 90° CW (sequential, gentle on the server) */}
         {onRotateAllPdfs && (

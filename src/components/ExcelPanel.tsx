@@ -3,7 +3,7 @@ import React, { useState, useMemo, useEffect } from 'react';
 import { X, Download, RefreshCw, Pencil, CheckCircle2, ArrowUpDown, ArrowUp, ArrowDown, Trash2, Check, Layers } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
-import type { ExtractedRow } from '@/types/utilscraper';
+import type { ExtractedRow, DocumentType } from '@/types/utilscraper';
 import { getFieldConfig } from '@/types/utilscraper';
 import { exportToExcel } from '@/lib/excel-export';
 import {
@@ -29,6 +29,10 @@ interface Props {
   onRowClick?: (sessionId: string, page: number) => void;
   onDeleteRow?: (sessionId: string, page: number) => void;
   externalBatchId?: number | null;
+  // Doc type explicitly chosen by the user — overrides field-count
+  // auto-detection in the export. Lets the user manually pick the
+  // template even when their highlighted fields are mixed/wrong type.
+  forceDocType?: DocumentType;
 }
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000';
@@ -149,7 +153,7 @@ const parseDateValue = (val: string): number => {
 const isDateField = (field: string): boolean => /date$/i.test(field);
 
 export default function ExcelPanel({
-  data, filename, provider, onClose, onReExtract, onReExtractPage, onDataChange, multiFile, onDownload, onRowClick, onDeleteRow, externalBatchId,
+  data, filename, provider, onClose, onReExtract, onReExtractPage, onDataChange, multiFile, onDownload, onRowClick, onDeleteRow, externalBatchId, forceDocType,
 }: Props) {
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const [mergeGroups, setMergeGroups] = useState<MergeGroup[] | null>(null);
@@ -566,7 +570,7 @@ export default function ExcelPanel({
                   return;
                 }
               }
-              exportToExcel(exportData, filename, provider, { dateField: utilityDateField });
+              exportToExcel(exportData, filename, provider, { dateField: utilityDateField, forceDocType });
               onDownload?.();
             }}
           >
@@ -603,7 +607,7 @@ export default function ExcelPanel({
           onCancel={() => setMergeGroups(null)}
           onConfirm={(choices: MergeChoice[]) => {
             const merged = choices.length > 0 ? applyMerges(exportData, choices) : exportData;
-            exportToExcel(merged, filename, provider, { dateField: utilityDateField });
+            exportToExcel(merged, filename, provider, { dateField: utilityDateField, forceDocType });
             onDownload?.();
             setMergeGroups(null);
           }}

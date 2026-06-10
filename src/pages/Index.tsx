@@ -45,8 +45,23 @@ export default function Index() {
   const [forcingOcrId, setForcingOcrId]         = useState<string | null>(null);
   const [rotatingId, setRotatingId]             = useState<string | null>(null);
   const [rotatingAllPdfs, setRotatingAllPdfs]   = useState(false);
+  // Separate boolean for the CCW batch button so its spinner stays
+  // independent of the CW one (a user can in theory have one in flight
+  // and click the other — the disabled state needs to match its action).
+  const [rotatingIdCcw, setRotatingIdCcw]       = useState<string | null>(null);
+  const [rotatingAllPdfsCcw, setRotatingAllPdfsCcw] = useState(false);
   // True while the "confirm doc type before processing" modal is open.
   const [confirmProcessOpen, setConfirmProcessOpen] = useState(false);
+  // Global doc-type picker (in the tab bar). Affects EVERY uploaded
+  // session in one go — per the requirement, doc type is treated as a
+  // single batch-wide setting, not per-file.
+  const [globalDocTypeOpen, setGlobalDocTypeOpen] = useState(false);
+  useEffect(() => {
+    if (!globalDocTypeOpen) return;
+    const onDocClick = () => setGlobalDocTypeOpen(false);
+    window.addEventListener('click', onDocClick);
+    return () => window.removeEventListener('click', onDocClick);
+  }, [globalDocTypeOpen]);
   const [showBatchPanel, setShowBatchPanel]     = useState(false);
   const [activeBatchId, setActiveBatchId]       = useState<number | null>(null);
   const [navCollapsed, setNavCollapsed]         = useState(false);
@@ -1251,7 +1266,8 @@ export default function Index() {
 
           {/* ── Tab bar ──────────────────────────────────────────────── */}
           {tabSessions.length > 0 && (
-            <div className="bg-muted flex items-end overflow-x-auto shrink-0 px-1 pt-1 gap-px">
+            <div className="bg-muted flex items-end shrink-0 px-1 pt-1">
+            <div className="flex items-end overflow-x-auto flex-1 min-w-0 gap-px">
               {tabSessions.map(s => {
                 const isActive = s.id === activeTabId;
                 const dt = DOCUMENT_TYPES.find(d => d.value === s.docType);
@@ -1359,6 +1375,73 @@ export default function Index() {
                 </button>
               )}
             </div>
+
+              {/* Global doc-type picker — single setting for the whole batch.
+                  Changing it updates every open session's docType at once,
+                  so the Excel export's templated sheet matches what the
+                  user picked. Already-extracted values stay in Plain Data
+                  regardless. */}
+              {(() => {
+                const currentType = activeSession?.docType ?? pendingDocType;
+                const currentDef = DOCUMENT_TYPES.find(d => d.value === currentType);
+                return (
+                  <div className="relative ml-auto mb-0.5 shrink-0">
+                    <button
+                      type="button"
+                      onClick={e => {
+                        e.stopPropagation();
+                        setGlobalDocTypeOpen(o => !o);
+                      }}
+                      className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs
+                                 bg-muted/60 hover:bg-muted text-foreground transition-colors"
+                      title="Change document type for every uploaded PDF"
+                    >
+                      <span
+                        className="w-2 h-2 rounded-full shrink-0"
+                        style={{ backgroundColor: currentDef?.color ?? '#64748b' }}
+                      />
+                      <span className="font-medium">{currentDef?.label ?? 'Doc type'}</span>
+                      <ChevronRight className="w-3 h-3 rotate-90 text-muted-foreground" />
+                    </button>
+                    {globalDocTypeOpen && (
+                      <div
+                        className="absolute top-full right-0 mt-1 z-50 bg-card border border-border rounded-lg shadow-xl py-1 min-w-[200px]"
+                        onClick={e => e.stopPropagation()}
+                      >
+                        <div className="px-3 py-1.5 text-[10px] uppercase tracking-wide text-muted-foreground font-semibold border-b border-border mb-0.5">
+                          Document Type — applies to all PDFs
+                        </div>
+                        {DOCUMENT_TYPES.map(t => (
+                          <button
+                            key={t.value}
+                            type="button"
+                            className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs text-left transition-colors
+                              ${t.value === currentType
+                                ? 'bg-primary/10 text-foreground font-medium'
+                                : 'text-muted-foreground hover:bg-muted hover:text-foreground'}`}
+                            onClick={() => {
+                              if (t.value !== currentType) {
+                                setSessions(prev => prev.map(s => ({ ...s, docType: t.value })));
+                                setPendingDocType(t.value); // future uploads default to this too
+                                toast.success(`Doc type changed to "${t.label}" for all PDFs`, {
+                                  description: 'Already-extracted values stay in the Plain Data sheet. Re-extract to refresh the templated sheet.',
+                                  duration: 5000,
+                                });
+                              }
+                              setGlobalDocTypeOpen(false);
+                            }}
+                          >
+                            <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: t.color }} />
+                            <span className="flex-1">{t.label}</span>
+                            {t.value === currentType && <Check className="w-3 h-3 text-primary shrink-0" />}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+            </div>
           )}
 
           {/* ── Viewer + Excel panel ─────────────────────────────────── */}
@@ -1424,6 +1507,83 @@ export default function Index() {
                   onDownloadExcelSelected={multiSelectedTabIds.size > 0
                     ? handleDownloadExcelSelected
                     : undefined}
+                  rotatingAllPdfsCcw={rotatingAllPdfsCcw}
+                  onRotateAllPdfsCcw={async () => {
+                    if (rotatingAllPdfsCcw) return;
+                    const openTabSet = new Set(openTabs);
+                    const targets = sessions.filter(s => openTabSet.has(s.id));
+                    if (targets.length === 0) {
+                      toast('No PDFs open to rotate', { icon: 'ℹ️' });
+                      return;
+                    }
+
+                    setRotatingAllPdfsCcw(true);
+                    const toastId = toast.loading(`Rotating 1 / ${targets.length} (CCW)…`);
+                    let succeeded = 0;
+                    let failed = 0;
+
+                    for (let i = 0; i < targets.length; i++) {
+                      const sess = targets[i];
+                      toast.loading(`Rotating ${i + 1} / ${targets.length} CCW — ${sess.filename}`, { id: toastId });
+                      const result = await rotateSessionPdf(sess.id, -90);
+                      if (!result) {
+                        failed++;
+                        continue;
+                      }
+
+                      const newFile = await fetchConvertedPdf(sess.id, sess.filename);
+                      setSessions(prev => prev.map(s => s.id === sess.id
+                        ? {
+                            ...s,
+                            file: newFile ?? s.file,
+                            total_pages: result.page_count ?? s.total_pages,
+                            highlights: {},
+                            extractedData: [],
+                            status: 'ready' as const,
+                            forceOcr: false,
+                            ocrProgress: null,
+                          }
+                        : s
+                      ));
+                      succeeded++;
+                    }
+
+                    setRotatingAllPdfsCcw(false);
+                    toast.dismiss(toastId);
+                    if (failed === 0) {
+                      toast.success(`Rotated ${succeeded} PDF${succeeded !== 1 ? 's' : ''} CCW`);
+                    } else if (succeeded === 0) {
+                      toast.error(`All ${failed} rotation${failed !== 1 ? 's' : ''} failed`);
+                    } else {
+                      toast(`Rotated ${succeeded} / ${targets.length} CCW — ${failed} failed`, { icon: '⚠️' });
+                    }
+                  }}
+                  rotatingAllCcw={rotatingIdCcw === activeSession.id}
+                  onRotateAllCcw={async () => {
+                    if (rotatingIdCcw === activeSession.id) return;
+                    setRotatingIdCcw(activeSession.id);
+                    const result = await rotateSessionPdf(activeSession.id, -90);
+                    if (!result) {
+                      setRotatingIdCcw(null);
+                      toast.error('Rotate failed — session may have expired, try re-uploading');
+                      return;
+                    }
+                    const newFile = await fetchConvertedPdf(activeSession.id, activeSession.filename);
+                    setRotatingIdCcw(null);
+                    setSessions(prev => prev.map(s => s.id === activeSession.id
+                      ? {
+                          ...s,
+                          file: newFile ?? s.file,
+                          total_pages: result.page_count ?? s.total_pages,
+                          highlights: {},
+                          extractedData: [],
+                          status: 'ready' as const,
+                          forceOcr: false,
+                          ocrProgress: null,
+                        }
+                      : s
+                    ));
+                  }}
                   rotatingAllPdfs={rotatingAllPdfs}
                   onRotateAllPdfs={async () => {
                     if (rotatingAllPdfs) return;
@@ -1564,6 +1724,7 @@ export default function Index() {
                       data={combinedExtractedData}
                       filename={sessions.filter(s => s.extractedData.length > 0).map(s => s.filename).join(', ')}
                       provider={DOCUMENT_TYPES.find(d => d.value === activeSession.docType)?.label ?? 'Document'}
+                      forceDocType={activeSession.docType}
                       onClose={() => setShowExcel(false)}
                       onReExtract={handleExtract}
                       onReExtractPage={handleReExtractPage}

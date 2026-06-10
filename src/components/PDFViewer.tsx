@@ -57,9 +57,15 @@ interface PDFViewerProps {
   // Rotate all pages 90° CW (handled by Index — re-fetches PDF after)
   onRotateAll?: () => void;
   rotatingAll?: boolean;
+  // Same but 90° CCW.
+  onRotateAllCcw?: () => void;
+  rotatingAllCcw?: boolean;
   // Rotate every open PDF 90° CW (loops over all sessions in Index).
   onRotateAllPdfs?: () => void;
   rotatingAllPdfs?: boolean;
+  // Same but 90° CCW.
+  onRotateAllPdfsCcw?: () => void;
+  rotatingAllPdfsCcw?: boolean;
 
   onAutoApplyAllPdfs?: (
     pairs: ReadonlyArray<{
@@ -107,8 +113,12 @@ export default function PDFViewer({
   forcingOcr = false,
   onRotateAll,
   rotatingAll = false,
+  onRotateAllCcw,
+  rotatingAllCcw = false,
   onRotateAllPdfs,
   rotatingAllPdfs = false,
+  onRotateAllPdfsCcw,
+  rotatingAllPdfsCcw = false,
 }: PDFViewerProps) {
   // Usage trackers for OCR PDF download + table extraction. Errors are
   // swallowed so a failed telemetry POST never blocks a user action.
@@ -1594,8 +1604,12 @@ export default function PDFViewer({
         forceOcrActive={session.forceOcr ?? false}
         onRotateAll={onRotateAll ?? (() => {})}
         rotatingAll={rotatingAll}
+        onRotateAllCcw={onRotateAllCcw}
+        rotatingAllCcw={rotatingAllCcw}
         onRotateAllPdfs={onRotateAllPdfs}
         rotatingAllPdfs={rotatingAllPdfs}
+        onRotateAllPdfsCcw={onRotateAllPdfsCcw}
+        rotatingAllPdfsCcw={rotatingAllPdfsCcw}
       />
 
       {/* Auto-extract setup banner — visible while setup active AND bar not toggled off */}

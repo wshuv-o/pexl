@@ -1149,6 +1149,63 @@ export async function downloadUtilityExcel(
     }
   }
 
+  // ── Append a "Plain Data" sheet — unstyled, one row per file,
+  // first-wins per field. Named "Plain Data" (not "Raw Data") because
+  // utility-recon already uses "Raw Data" for its month-grid layout.
+  // This is the flat, column-per-field view the user asked for —
+  // useful for downstream scripts / pivot tables.
+  {
+    // Collect fields in first-seen order across all rows.
+    const fieldsSeen = new Set<string>();
+    const fields: string[] = [];
+    for (const rs of fileMap.values()) {
+      for (const r of rs) {
+        if (!r.value || !String(r.value).trim()) continue;
+        if (!fieldsSeen.has(r.field)) { fieldsSeen.add(r.field); fields.push(r.field); }
+      }
+    }
+
+    // Generate a unique sheet name. We can't reach the ``usedNames`` Set
+    // inside the if/else above (different scope) so just walk worksheets.
+    let plainName = 'Plain Data';
+    let n = 2;
+    while (wb.getWorksheet(plainName)) plainName = `Plain Data ${n++}`;
+
+    const rawWs = wb.addWorksheet(plainName);
+    rawWs.addRow(['#', 'File Name', ...fields]);
+
+    let idx = 1;
+    for (const [filename, rs] of fileMap.entries()) {
+      const values: Record<string, string> = {};
+      for (const r of rs) {
+        if (!r.value) continue;
+        if (!values[r.field]) values[r.field] = r.value;
+      }
+      rawWs.addRow([
+        idx++,
+        filename.replace(/\.(pdf|docx?)$/i, ''),
+        ...fields.map(f => values[f] ?? ''),
+      ]);
+    }
+
+    rawWs.columns = [
+      { width: 5 },
+      { width: 30 },
+      ...fields.map(() => ({ width: 22 })),
+    ];
+
+    // Borders on every cell, bold header row. No fills/colors — matches
+    // the "plain raw data" spec.
+    const _thin = { style: 'thin' as const, color: { argb: 'FF000000' } };
+    rawWs.eachRow((row, rowNum) => {
+      row.eachCell(cell => {
+        cell.border = { top: _thin, bottom: _thin, left: _thin, right: _thin };
+        cell.font = { name: 'Arial', size: 10, bold: rowNum === 1 };
+        cell.alignment = { vertical: 'middle', wrapText: true };
+      });
+    });
+  }
+
   // ── Step 7: download ──────────────────────────────────────────────────────────
   const now     = new Date();
   const dateStr = now.toISOString().slice(0, 16).replace(/[T:]/g, '-');
