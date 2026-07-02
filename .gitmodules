@@ -1,0 +1,4 @@
+[submodule "backend"]
+	path = backend
+	url = https://github.com/EsmeAbha/pdf_scraper_api.git
+	ignore = dirty
