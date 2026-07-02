@@ -2,3 +2,7 @@
 	path = backend
 	url = https://github.com/EsmeAbha/pdf_scraper_api.git
 	ignore = dirty
+[submodule "boss-pdf"]
+	path = boss-pdf
+	url = https://github.com/Imtiaj-Sajin/boss-pdf.git
+	ignore = dirty
