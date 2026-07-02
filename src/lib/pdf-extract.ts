@@ -17,7 +17,17 @@ pdfjs.GlobalWorkerOptions.workerSrc = new URL(
 // file.arrayBuffer() + pdfjs.getDocument() ~1 600 times (≈17 GB of reads)
 // and crash the browser. With the cache the PDF is parsed once (~11 MB) and
 // all subsequent page operations reuse the same PDFDocumentProxy.
+//
+// The cache is now LRU-bounded. During a batch extract on 300+ PDFs the
+// old TTL-only eviction (10 min) let every document stay pinned in memory
+// simultaneously — 300 × ~10–30 MB apiece easily OOM'd the browser tab.
+// MAX_DOC_ENTRIES caps concurrent live proxies. On insert we evict the
+// LRU entries (revoking their blob URLs so pdfjs can drop the underlying
+// data) until we're under the cap. `get` also touches an entry so it
+// moves to the MRU end.
 // ---------------------------------------------------------------------------
+const MAX_DOC_ENTRIES = 12;
+const MAX_PAGE_CONTENT_ENTRIES = 60;
 const _docCache = new Map<string, { proxy: any; ts: number; blobUrl: string }>();
 
 // Per-page text-content cache — one getTextContent() call shared between
@@ -27,29 +37,51 @@ const _pageContentCache = new Map<string, { items: any[]; vp: any; ts: number }>
 
 function _fileKey(file: File) { return `${file.name}::${file.size}::${file.lastModified}`; }
 
+// LRU touch — remove and re-insert so the entry becomes the newest.
+function _touchDoc(key: string, entry: { proxy: any; ts: number; blobUrl: string }) {
+  _docCache.delete(key);
+  entry.ts = Date.now();
+  _docCache.set(key, entry);
+}
+function _touchPage(key: string, entry: { items: any[]; vp: any; ts: number }) {
+  _pageContentCache.delete(key);
+  entry.ts = Date.now();
+  _pageContentCache.set(key, entry);
+}
+// Evict the least-recently-used entries when we're over the cap.
+function _evictOverCap<T>(
+  map: Map<string, T>,
+  cap: number,
+  onEvict?: (v: T) => void,
+) {
+  while (map.size > cap) {
+    const firstKey = map.keys().next().value;
+    if (firstKey === undefined) break;
+    const v = map.get(firstKey);
+    map.delete(firstKey);
+    if (v && onEvict) onEvict(v);
+  }
+}
+
 async function getPageContentCached(
   file: File, pdf: any, pageNumber: number,
 ): Promise<{ page: any; items: any[]; vp: any }> {
   const key = `${_fileKey(file)}::${pageNumber}`;
   const page = await pdf.getPage(pageNumber);
   const hit = _pageContentCache.get(key);
-  if (hit) { hit.ts = Date.now(); return { page, items: hit.items, vp: hit.vp }; }
+  if (hit) { _touchPage(key, hit); return { page, items: hit.items, vp: hit.vp }; }
   const vp      = page.getViewport({ scale: 1 });
   const content = await page.getTextContent({ includeMarkedContent: false });
   const items   = content.items as any[];
   _pageContentCache.set(key, { items, vp, ts: Date.now() });
-  // Evict entries older than 5 minutes
-  const cutoff = Date.now() - 5 * 60 * 1000;
-  for (const [k, v] of _pageContentCache) {
-    if (k !== key && v.ts < cutoff) _pageContentCache.delete(k);
-  }
+  _evictOverCap(_pageContentCache, MAX_PAGE_CONTENT_ENTRIES);
   return { page, items, vp };
 }
 
 async function getDocumentCached(file: File): Promise<any> {
-  const key = `${file.name}::${file.size}::${file.lastModified}`;
+  const key = _fileKey(file);
   const hit = _docCache.get(key);
-  if (hit) { hit.ts = Date.now(); return hit.proxy; }
+  if (hit) { _touchDoc(key, hit); return hit.proxy; }
 
   // Use a blob URL so the worker fetches pages on demand via range requests
   // instead of receiving the entire ArrayBuffer via postMessage (which stalls
@@ -60,29 +92,35 @@ async function getDocumentCached(file: File): Promise<any> {
     standardFontDataUrl: '/standard_fonts/',
   }).promise;
   _docCache.set(key, { proxy, ts: Date.now(), blobUrl });
-  // Evict entries older than 10 minutes so stale large PDFs don't hold memory.
-  const cutoff = Date.now() - 10 * 60 * 1000;
-  for (const [k, v] of _docCache) {
-    if (k !== key && v.ts < cutoff) {
-      URL.revokeObjectURL(v.blobUrl);
-      _docCache.delete(k);
-    }
-  }
+  _evictOverCap(_docCache, MAX_DOC_ENTRIES, (v) => {
+    // Free the underlying PDF document + revoke its blob URL so pdfjs can
+    // GC the parsed data. Without this, evicted proxies stay reachable via
+    // the browser's URL registry and hold their arrays alive.
+    try { v.proxy.destroy?.(); } catch { /* ignore */ }
+    URL.revokeObjectURL(v.blobUrl);
+  });
   return proxy;
 }
 
-/** Call this when a session is closed to free the cached document. */
+/** Call this when a session is closed, or after a large batch extract, to
+ *  free the cached documents. Explicitly destroys the pdfjs proxies so the
+ *  worker can drop the parsed page arrays — revoking blob URLs alone isn't
+ *  enough because pdfjs holds internal references. */
 export function clearDocumentCache(file?: File): void {
+  const destroy = (v: { proxy: any; blobUrl: string }) => {
+    try { v.proxy.destroy?.(); } catch { /* ignore */ }
+    URL.revokeObjectURL(v.blobUrl);
+  };
   if (file) {
     const key = _fileKey(file);
     const entry = _docCache.get(key);
-    if (entry) URL.revokeObjectURL(entry.blobUrl);
+    if (entry) destroy(entry);
     _docCache.delete(key);
     for (const k of _pageContentCache.keys()) {
       if (k.startsWith(key + '::')) _pageContentCache.delete(k);
     }
   } else {
-    for (const v of _docCache.values()) URL.revokeObjectURL(v.blobUrl);
+    for (const v of _docCache.values()) destroy(v);
     _docCache.clear();
     _pageContentCache.clear();
   }

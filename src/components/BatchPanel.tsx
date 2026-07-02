@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { X, Plus, Pencil, Trash2, ChevronDown, ChevronRight, Check, Loader2, CheckCircle2 } from 'lucide-react';
+import { X, Pencil, Trash2, ChevronDown, ChevronRight, Check, Loader2, CheckCircle2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000';
@@ -35,10 +35,6 @@ export default function BatchPanel({ username, activeBatchId, onClose, onSelect 
   const [batches, setBatches]         = useState<Batch[]>([]);
   const [loading, setLoading]         = useState(true);
 
-  const [creating, setCreating]       = useState(false);
-  const [createName, setCreateName]   = useState('');
-  const [createSaving, setCreateSaving] = useState(false);
-
   const [editingId, setEditingId]     = useState<number | null>(null);
   const [editName, setEditName]       = useState('');
   const [editSaving, setEditSaving]   = useState(false);
@@ -61,25 +57,6 @@ export default function BatchPanel({ username, activeBatchId, onClose, onSelect 
   }, []);
 
   useEffect(() => { void loadBatches(); }, [loadBatches]);
-
-  const handleCreate = async () => {
-    if (!createName.trim()) return;
-    setCreateSaving(true);
-    try {
-      const res = await fetch(`${BACKEND_URL}/api/batches`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: createName.trim(), created_by: username }),
-      });
-      const data = await res.json();
-      if (data.status === 'ok') {
-        setBatches(prev => [{ ...data.batch, record_count: 0 }, ...prev]);
-        setCreateName('');
-        setCreating(false);
-      }
-    } catch { /* ignore */ }
-    setCreateSaving(false);
-  };
 
   const handleUpdate = async (id: number) => {
     if (!editName.trim()) return;
@@ -135,64 +112,33 @@ export default function BatchPanel({ username, activeBatchId, onClose, onSelect 
     <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
       <div className="bg-card border border-border rounded-xl shadow-2xl w-full max-w-2xl max-h-[85vh] flex flex-col">
 
-        {/* Header */}
+        {/* Header — create-batch button removed; new batches are created from
+            the batch-selector dropdown in the Excel panel now. This manager
+            is edit / delete / inspect only. */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-border shrink-0">
           <div>
             <h2 className="text-sm font-bold text-foreground">Batch Manager</h2>
             <p className="text-[11px] text-muted-foreground mt-0.5">
-              {batches.length} batch{batches.length !== 1 ? 'es' : ''}
+              {batches.length} batch{batches.length !== 1 ? 'es' : ''} · rename, delete, inspect records
             </p>
           </div>
-          <div className="flex items-center gap-2">
-            <Button
-              size="sm"
-              className="h-7 text-xs"
-              onClick={() => { setCreating(true); setCreateName(''); }}
-            >
-              <Plus className="w-3.5 h-3.5 mr-1" /> New Batch
-            </Button>
-            <button
-              onClick={onClose}
-              className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-all"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
+          <button
+            onClick={onClose}
+            className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-all"
+          >
+            <X className="w-4 h-4" />
+          </button>
         </div>
 
         {/* Body */}
         <div className="flex-1 overflow-auto custom-scrollbar px-5 py-4 space-y-2">
 
-          {/* Create form */}
-          {creating && (
-            <div className="rounded-lg border border-primary/50 bg-primary/5 p-3 space-y-2">
-              <p className="text-xs font-semibold text-foreground">New batch</p>
-              <input
-                autoFocus
-                value={createName}
-                onChange={e => setCreateName(e.target.value)}
-                onKeyDown={e => { if (e.key === 'Enter') void handleCreate(); if (e.key === 'Escape') setCreating(false); }}
-                placeholder="Batch name"
-                className="w-full h-8 px-3 text-xs rounded-md border border-border bg-background text-foreground outline-none focus:ring-1 focus:ring-primary"
-              />
-              <div className="flex gap-2">
-                <Button size="sm" className="h-7 text-xs" onClick={handleCreate} disabled={createSaving || !createName.trim()}>
-                  {createSaving ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : <Check className="w-3 h-3 mr-1" />}
-                  Create
-                </Button>
-                <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => setCreating(false)}>
-                  Cancel
-                </Button>
-              </div>
-            </div>
-          )}
-
           {loading ? (
             <div className="flex items-center justify-center py-12 text-muted-foreground">
               <Loader2 className="w-5 h-5 animate-spin mr-2" /> Loading batches…
             </div>
-          ) : batches.length === 0 && !creating ? (
-            <p className="text-center text-xs text-muted-foreground py-10">No batches yet. Click "New Batch" to create one.</p>
+          ) : batches.length === 0 ? (
+            <p className="text-center text-xs text-muted-foreground py-10">No batches yet. Use the batch selector in the Excel panel to create one.</p>
           ) : (
             batches.map(b => (
               <div key={b.id} className="rounded-lg border border-border bg-card overflow-hidden">

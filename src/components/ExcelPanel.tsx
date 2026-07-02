@@ -1,7 +1,8 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import React, { useState, useMemo, useEffect } from 'react';
-import { X, Download, RefreshCw, Pencil, CheckCircle2, ArrowUpDown, ArrowUp, ArrowDown, Trash2, Check, Layers } from 'lucide-react';
+import { X, Download, RefreshCw, Pencil, CheckCircle2, ArrowUpDown, ArrowUp, ArrowDown, Trash2, Check, Layers, ChevronDown, Plus, Loader2, Sparkles } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import type { ExtractedRow, DocumentType } from '@/types/utilscraper';
 import { getFieldConfig } from '@/types/utilscraper';
@@ -388,6 +389,93 @@ export default function ExcelPanel({
     void cellKey;
   };
 
+  // Save every row (unique sessionId + page pair) that isn't already approved
+  // to the active batch. Skips rows with no values (nothing to save) and
+  // rows that are already approved (would be a redundant POST). Bounded
+  // 6-way parallelism so 300 rows don't fire 300 simultaneous requests.
+  const [approvingAll, setApprovingAll] = useState(false);
+  const handleApproveAll = async () => {
+    if (!activeBatchId) { toast.error('Select a batch before approving'); return; }
+    if (approvingAll) return;
+
+    // De-duplicate to one entry per (sessionId, page) — each becomes one
+    // batch record, matching how toggleApprove treats a single row.
+    const pending = new Map<string, { sessionId: string; filename: string; page: number }>();
+    for (const g of sortedGroups) {
+      for (const row of g.rows) {
+        const key = `${row.sessionId}-${row.page}`;
+        if (approvedKeys.has(key)) continue;
+        const pageData = data.filter(d => d.sessionId === row.sessionId && d.page === row.page && d.value);
+        if (pageData.length === 0) continue;
+        if (!pending.has(key)) {
+          pending.set(key, { sessionId: row.sessionId, filename: row.filename, page: row.page });
+        }
+      }
+    }
+
+    if (pending.size === 0) {
+      toast('Nothing new to approve', { icon: 'ℹ️' });
+      return;
+    }
+
+    setApprovingAll(true);
+    const total = pending.size;
+    const toastId = toast.loading(`Saving 0 / ${total} to batch…`);
+    let done = 0;
+    let failed = 0;
+    const succeededKeys: string[] = [];
+
+    const queue = Array.from(pending.entries());
+    const CONCURRENCY = 6;
+    const workers = Array.from({ length: Math.min(CONCURRENCY, queue.length) }, async () => {
+      while (queue.length > 0) {
+        const next = queue.shift();
+        if (!next) return;
+        const [key, { sessionId, filename, page }] = next;
+        try {
+          const fields: Record<string, string> = {};
+          const pageData = data.filter(d => d.sessionId === sessionId && d.page === page);
+          for (const d of pageData) {
+            if (!d.value) continue;
+            if (fields[d.field]) fields[d.field] += ', ' + d.value;
+            else fields[d.field] = d.value;
+          }
+          const res = await fetch(`${BACKEND_URL}/api/batches/${activeBatchId}/records`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ session_id: sessionId, filename, page, fields }),
+          });
+          if (res.ok) succeededKeys.push(key);
+          else failed++;
+        } catch {
+          failed++;
+        }
+        done++;
+        toast.loading(`Saving ${done} / ${total} to batch…`, { id: toastId });
+      }
+    });
+    await Promise.all(workers);
+
+    // Merge every successful key into approvedKeys in one setState call.
+    if (succeededKeys.length > 0) {
+      setApprovedKeys(prev => {
+        const next = new Set(prev);
+        for (const k of succeededKeys) next.add(k);
+        return next;
+      });
+    }
+
+    toast.dismiss(toastId);
+    if (failed === 0) {
+      toast.success(`Saved ${succeededKeys.length} record${succeededKeys.length !== 1 ? 's' : ''} to batch`);
+    } else if (succeededKeys.length === 0) {
+      toast.error(`All ${failed} record${failed !== 1 ? 's' : ''} failed`);
+    } else {
+      toast.warning(`Saved ${succeededKeys.length} / ${total} — ${failed} failed`);
+    }
+    setApprovingAll(false);
+  };
+
   const toggleApprove = async (row: DisplayRow) => {
     if (!activeBatchId) { toast.error('Select a batch before approving'); return; }
     const key = `${row.sessionId}-${row.page}`;
@@ -502,26 +590,34 @@ export default function ExcelPanel({
           </button>
         </div>
 
-        {/* Batch selector */}
+        {/* Batch selector — custom dropdown so we can inline a "Create new
+            batch" affordance and give the newest batch a distinguishing
+            colour. Batch creation now lives ONLY here; the Batches manager
+            dialog is for editing / deleting / inspecting records. */}
         <div className="flex items-center gap-2 mb-2">
-          <select
-            value={activeBatchId ?? ''}
-            onChange={e => setActiveBatchId(e.target.value ? Number(e.target.value) : null)}
-            className="flex-1 h-8 px-2 text-xs rounded-md border border-border bg-background text-foreground outline-none focus:ring-1 focus:ring-primary"
-          >
-            <option value="">— Select batch —</option>
-            {batches.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
-          </select>
+          <BatchSelectorDropdown
+            batches={batches}
+            activeBatchId={activeBatchId}
+            onSelect={setActiveBatchId}
+            onCreated={(newBatch) => {
+              // Prepend so it becomes the "newest" and auto-select.
+              setBatches(prev => [newBatch, ...prev]);
+              setActiveBatchId(newBatch.id);
+              toast.success(`Batch "${newBatch.name}" created`);
+            }}
+            username={user?.username ?? 'unknown'}
+          />
           <Button
             variant="outline"
             size="sm"
             className="h-8 text-xs shrink-0"
             onClick={() => setShowBatchPanel(true)}
-            title="Manage batches"
+            title="Manage existing batches — rename, delete, inspect records"
           >
             <Layers className="w-3.5 h-3.5 mr-1" /> Batches
           </Button>
         </div>
+
 
         {/* Date source — only meaningful for utility exports. Lets the user
             pick which scraped field is used to bucket bills into month
@@ -628,8 +724,50 @@ export default function ExcelPanel({
           <table className="w-max min-w-full text-xs border-collapse">
             <thead className="sticky top-0 z-10">
               <tr className="bg-primary text-primary-foreground text-[11px] font-semibold">
-                {/* Actions column: re-extract + approve */}
-                <th className="px-1 py-2.5 w-14 border-r border-white/10" />
+                {/* Actions column header: approve-all button sits directly
+                    above the per-row approve buttons, so a single click
+                    saves every un-approved row to the active batch. */}
+                <th className="px-1 py-2.5 w-14 border-r border-white/10">
+                  {(() => {
+                    if (!activeBatchId) return null;
+                    const seen = new Set<string>();
+                    let pendingCount = 0;
+                    for (const g of sortedGroups) {
+                      for (const row of g.rows) {
+                        const key = `${row.sessionId}-${row.page}`;
+                        if (seen.has(key) || approvedKeys.has(key)) continue;
+                        const hasValue = data.some(d => d.sessionId === row.sessionId && d.page === row.page && d.value);
+                        if (!hasValue) continue;
+                        seen.add(key);
+                        pendingCount++;
+                      }
+                    }
+                    if (pendingCount === 0 && !approvingAll) return null;
+                    return (
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <button
+                            type="button"
+                            className="w-6 h-6 rounded flex items-center justify-center bg-white/15 hover:bg-white/25
+                                       disabled:opacity-50 disabled:cursor-not-allowed transition-colors mx-auto"
+                            onClick={() => void handleApproveAll()}
+                            disabled={approvingAll}
+                            aria-label={`Approve all ${pendingCount} rows to batch`}
+                          >
+                            {approvingAll
+                              ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              : <CheckCircle2 className="w-3.5 h-3.5" />}
+                          </button>
+                        </TooltipTrigger>
+                        <TooltipContent side="right" className="text-xs">
+                          {approvingAll
+                            ? 'Saving to batch…'
+                            : `Approve all ${pendingCount} row${pendingCount !== 1 ? 's' : ''} to batch`}
+                        </TooltipContent>
+                      </Tooltip>
+                    );
+                  })()}
+                </th>
                 {multiFile && (
                   <th
                     className="text-left px-3 py-2.5 cursor-pointer hover:bg-white/10 select-none transition-all duration-200 whitespace-nowrap"
@@ -883,5 +1021,173 @@ export default function ExcelPanel({
         </div>
       )}
     </div>
+  );
+}
+
+// ─── Batch selector dropdown ─────────────────────────────────────────────
+// One click surface for two things:
+//   1. Pick an existing batch (the newest gets a Sparkles icon + primary
+//      tint so it's spottable at a glance).
+//   2. Create a fresh batch inline — no modal. Enter → POST → auto-select.
+// The Batches button next to this dropdown handles rename / delete / view
+// records; creation was consolidated here so users don't have to open a
+// separate manager just to spin up a new batch.
+function BatchSelectorDropdown({
+  batches, activeBatchId, onSelect, onCreated, username,
+}: {
+  batches: { id: number; name: string }[];
+  activeBatchId: number | null;
+  onSelect: (id: number | null) => void;
+  onCreated: (batch: { id: number; name: string }) => void;
+  username: string;
+}) {
+  const [open, setOpen]           = useState(false);
+  const [creating, setCreating]   = useState(false);
+  const [name, setName]           = useState('');
+  const [saving, setSaving]       = useState(false);
+  const active = batches.find(b => b.id === activeBatchId);
+  const newestId = batches[0]?.id;
+
+  const handleCreate = async () => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    setSaving(true);
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/batches`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: trimmed, created_by: username }),
+      });
+      const data = await res.json();
+      if (data.status === 'ok') {
+        onCreated({ id: data.batch.id, name: data.batch.name });
+        setName('');
+        setCreating(false);
+        setOpen(false);
+      } else {
+        toast.error(data.error ?? 'Failed to create batch');
+      }
+    } catch {
+      toast.error('Network error creating batch');
+    }
+    setSaving(false);
+  };
+
+  return (
+    <Popover open={open} onOpenChange={(v) => { setOpen(v); if (!v) setCreating(false); }}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          className="flex-1 h-8 px-2 text-xs rounded-md border border-border bg-background text-foreground
+                     hover:border-primary/50 transition-colors flex items-center justify-between gap-2 min-w-0"
+        >
+          <span className="flex items-center gap-1.5 min-w-0">
+            {active && active.id === newestId && (
+              <Sparkles className="w-3 h-3 text-primary shrink-0" />
+            )}
+            <span className="truncate">
+              {active ? active.name : '— Select batch —'}
+            </span>
+          </span>
+          <ChevronDown className={`w-3.5 h-3.5 text-muted-foreground shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />
+        </button>
+      </PopoverTrigger>
+
+      <PopoverContent align="start" className="w-72 p-1.5" onOpenAutoFocus={(e) => e.preventDefault()}>
+        {/* — Clear selection — */}
+        <button
+          className={`w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs text-left transition-colors
+            ${activeBatchId === null ? 'bg-muted font-medium text-foreground' : 'text-muted-foreground hover:bg-muted'}`}
+          onClick={() => { onSelect(null); setOpen(false); }}
+        >
+          <span className="w-3 h-3 shrink-0" />
+          — Select batch —
+        </button>
+
+        {/* Batch list */}
+        {batches.length > 0 && (
+          <div className="max-h-64 overflow-y-auto mt-0.5 pr-0.5">
+            {batches.map(b => {
+              const isNewest = b.id === newestId;
+              const isActive = b.id === activeBatchId;
+              return (
+                <button
+                  key={b.id}
+                  className={`w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs text-left transition-colors
+                    ${isActive
+                      ? 'bg-primary/15 text-primary font-medium'
+                      : isNewest
+                        ? 'text-foreground hover:bg-muted'
+                        : 'text-foreground hover:bg-muted'}`}
+                  onClick={() => { onSelect(b.id); setOpen(false); }}
+                >
+                  {isNewest ? (
+                    <Sparkles className="w-3 h-3 shrink-0 text-primary" />
+                  ) : (
+                    <span className="w-3 h-3 shrink-0 rounded-full bg-muted-foreground/40" />
+                  )}
+                  <span className="truncate flex-1">{b.name}</span>
+                  {isNewest && !isActive && (
+                    <span className="text-[9px] px-1 py-0.5 rounded bg-primary/15 text-primary font-semibold uppercase shrink-0">
+                      New
+                    </span>
+                  )}
+                  {isActive && (
+                    <Check className="w-3 h-3 shrink-0 text-primary" />
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Divider */}
+        <div className="border-t border-border my-1.5" />
+
+        {/* Create new */}
+        {creating ? (
+          <div className="p-1 space-y-1.5">
+            <input
+              autoFocus
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') void handleCreate();
+                if (e.key === 'Escape') { setCreating(false); setName(''); }
+              }}
+              placeholder="New batch name"
+              className="w-full h-7 px-2 text-xs rounded border border-primary bg-background text-foreground outline-none focus:ring-1 focus:ring-primary"
+            />
+            <div className="flex gap-1">
+              <Button
+                size="sm"
+                className="h-6 text-[11px] flex-1"
+                onClick={handleCreate}
+                disabled={saving || !name.trim()}
+              >
+                {saving ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : <Check className="w-3 h-3 mr-1" />}
+                Create
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-6 text-[11px]"
+                onClick={() => { setCreating(false); setName(''); }}
+              >
+                Cancel
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <button
+            className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs text-left text-primary hover:bg-primary/10 transition-colors font-medium"
+            onClick={() => setCreating(true)}
+          >
+            <Plus className="w-3.5 h-3.5 shrink-0" />
+            Create new batch
+          </button>
+        )}
+      </PopoverContent>
+    </Popover>
   );
 }

@@ -529,10 +529,21 @@ export default function Index() {
   // tab is our signal that the user is done with that PDF.
   const handleExtract = useCallback(async () => {
     const openTabSet = new Set(openTabs);
+    // Only skip sessions that literally have no File blob (nothing to feed
+    // pdfjs) or no highlights. We used to also require `status === ready |
+    // extracted` — that silently dropped every session still being analysed
+    // by the backend at click time, so a 294-file batch would return 29
+    // results simply because 265 uploads hadn't finished their backend-side
+    // analysis yet. Client-first extractRegions works on the raw File blob
+    // via pdfjs and doesn't need the backend's is_ocr flag or page list, so
+    // 'processing' sessions can extract just fine. Any highlight on an OCR
+    // page whose backend session isn't ready falls through to null — same
+    // outcome as if the network was slow, never worse.
     const targets = sessions.filter(s =>
-      s.file && Object.values(s.highlights).flat().length > 0 &&
-      (s.status === 'ready' || s.status === 'extracted') &&
-      openTabSet.has(s.id)
+      s.file
+      && Object.values(s.highlights).flat().length > 0
+      && s.status !== 'uploading'
+      && openTabSet.has(s.id)
     );
     if (!targets.length) { toast('Draw highlight boxes first', { icon: 'ℹ️' }); return; }
 
@@ -541,14 +552,34 @@ export default function Index() {
     let totalNull = 0;
 
     // Track any renewed session IDs so we can swap them in one batched
-    // setSessions call after Promise.allSettled resolves. When the backend
+    // setSessions call after the worker pool finishes. When the backend
     // has evicted a session (LRU cap or TTL), extractRegions transparently
     // re-uploads and returns the new id via onSessionRenewed. Without this
     // swap, the next extract call would hit the stale id and re-upload again.
     const renewals: Array<{ oldId: string; newId: string }> = [];
 
-    // Process all sessions in parallel — each makes one backend call.
-    const settled = await Promise.allSettled(targets.map(async sess => {
+    // Bounded worker pool. The old `Promise.allSettled(targets.map(...))`
+    // fired all N requests simultaneously, which just stacked up in the
+    // browser's ~6-per-host HTTP queue AND the backend's OCR semaphore
+    // (PEXL_OCR_MAX_CONCURRENCY=4). 6 workers matches those limits
+    // exactly — same total throughput, cleaner progress feedback, no
+    // browser thrash. Progress toast updates as each session completes.
+    const CONCURRENCY = 6;
+    const toastId = toast.loading(
+      targets.length > 1
+        ? `Extracting 0 / ${targets.length}…`
+        : 'Extracting…',
+    );
+    let done = 0;
+
+    type WorkerResult = {
+      sess: PDFSession;
+      newHighlights: Record<number, Highlight[]>;
+      sessResults: ExtractedRow[];
+      liveId: string;
+    };
+
+    const runOne = async (sess: PDFSession): Promise<WorkerResult> => {
       const clearedHighlights: Record<number, Highlight[]> = {};
       for (const [pageNum, pageHls] of Object.entries(sess.highlights)) {
         clearedHighlights[Number(pageNum)] = pageHls.map(h => ({
@@ -581,7 +612,39 @@ export default function Index() {
           filename: sess.filename, folderName: sess.folderName, sessionId: liveId,
         }));
       return { sess, newHighlights, sessResults, liveId };
-    }));
+    };
+
+    const queue = [...targets];
+    const settled: PromiseSettledResult<WorkerResult>[] = [];
+    const workers = Array.from({ length: Math.min(CONCURRENCY, queue.length) }, async () => {
+      while (queue.length > 0) {
+        const sess = queue.shift();
+        if (!sess) return;
+        try {
+          const value = await runOne(sess);
+          settled.push({ status: 'fulfilled', value });
+        } catch (reason) {
+          settled.push({ status: 'rejected', reason });
+        }
+        done++;
+        if (targets.length > 1) {
+          toast.loading(`Extracting ${done} / ${targets.length}…`, { id: toastId });
+        }
+      }
+    });
+    await Promise.all(workers);
+    toast.dismiss(toastId);
+
+    // Batch extract loads pdfjs documents for every session it touched via
+    // the client-first fast path. Even with the LRU cap in pdf-extract.ts,
+    // ~12 large PDFs stay parked in memory. For a 300-file batch that's
+    // fine mid-run but wasteful afterwards; free them so the browser can
+    // reclaim the memory before the user opens the next tab / extracts
+    // another batch. Also drops the per-page text-content cache.
+    try {
+      const { clearDocumentCache } = await import('@/lib/pdf-extract');
+      clearDocumentCache();
+    } catch { /* non-fatal */ }
 
     const updates: { oldId: string; newId: string; highlights: Record<number, Highlight[]>; extractedData: ExtractedRow[] }[] = [];
     for (const result of settled) {
@@ -750,10 +813,16 @@ export default function Index() {
     if (!sourceSession?.file) return;
     const srcStart = sourceSession.startPage || 1;
 
+    // Same permissive filter as handleExtractTableFromPdfs — the old strict
+    // `status in ('ready','extracted') && !!file` dropped sessions still in
+    // 'processing' state at click time (a 294-file batch shows as "copied
+    // to 60 PDFs" simply because 234 were still analysing). Client-side
+    // copy doesn't need the local file, and it doesn't matter whether the
+    // backend has finished analysing — we're just writing highlights to
+    // React state on each target session.
     const targets = sessions.filter(s =>
       s.id !== activeTabId
-      && (s.status === 'ready' || s.status === 'extracted')
-      && !!s.file
+      && s.status !== 'uploading'
       && (restrictIds ? restrictIds.has(s.id) : true),
     );
 
@@ -762,7 +831,16 @@ export default function Index() {
     // text on the target PDF.
     const perTargetUpdates = targets.map(target => {
       const tgtStart = target.startPage || 1;
-      const totalPgs = target.total_pages || target.pages.length;
+      // total_pages is 0 while the backend is still analysing a session.
+      // Fall back to Infinity so the page-bounds check below doesn't
+      // silently drop every highlight for 'processing' sessions. A 294-file
+      // batch previously got highlights on only the ~20 sessions that had
+      // made it to 'ready' at click time — the rest hit `tgtPage > 0` and
+      // were skipped. Extraction later re-validates: a highlight that
+      // lands on a non-existent page just returns null, which is exactly
+      // the same outcome as if we'd skipped it, without dropping the whole
+      // session.
+      const totalPgs = target.total_pages || target.pages.length || Infinity;
       const next: Record<number, Highlight[]> = {};
 
       for (const [pageStr, pageHls] of Object.entries(sourceHighlights)) {

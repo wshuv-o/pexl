@@ -790,58 +790,108 @@ export async function extractRegions(
   // label-adjacent smart detection.
   const strict = opts.strict === true;
 
-  // Try backend — sends highlights from ALL pages at once
-  try {
-    if (backendOnline && !sessionId.startsWith('local-')) {
-      const body = JSON.stringify({
-        session_id: sessionId,
-        strict,
-        highlights: highlights.map(h => ({
+  // Helper: POST highlights to the backend. Handles the 404-renewal reupload
+  // once. Returns the parsed results array on success, `null` on failure.
+  // Kept local so the client-first fast path and the legacy backend-first
+  // path share the same 404-recovery logic.
+  const postExtract = async (
+    liveId: string,
+    hls: Highlight[],
+  ): Promise<{ liveId: string; results: ExtractedRow[] } | null> => {
+    const doFetch = (id: string) => fetch(
+      `${BACKEND_URL}/api/utility/extract-regions`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: id,
+          strict,
+          highlights: hls.map(h => ({
+            page: h.page, field: h.field,
+            x: h.x, y: h.y, width: h.width, height: h.height,
+          })),
+        }),
+      },
+    );
+
+    let res = await doFetch(liveId);
+    if (res.status === 404 && file) {
+      const newId = await reprocessFile(file);
+      if (newId) {
+        opts.onSessionRenewed?.(liveId, newId);
+        liveId = newId;
+        res = await doFetch(liveId);
+      }
+    }
+    if (!res.ok) return null;
+    const data = await res.json();
+    return { liveId, results: sanitizeResults(data.results) };
+  };
+
+  // ── FAST PATH ─────────────────────────────────────────────────────────
+  // Strict extraction + we have the file → try client-side (pdfjs text
+  // layer) first. This is instant for native pages and avoids a network
+  // round-trip per session. Any highlight that comes back with `value:
+  // null` (either an OCR page or a native page where no text sat inside
+  // the rectangle) is still sent to the backend — so backend accuracy is
+  // fully preserved for anything the client couldn't answer.
+  if (strict && file && backendOnline && !sessionId.startsWith('local-')) {
+    try {
+      const clientResults = await extractFromRegions(
+        file,
+        highlights.map(h => ({
           page: h.page, field: h.field,
           x: h.x, y: h.y, width: h.width, height: h.height,
         })),
-      });
+      );
 
-      let res = await fetch(`${BACKEND_URL}/api/utility/extract-regions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body,
-      });
-
-      // 404 = session expired — re-process the file and retry once
-      if (res.status === 404 && file) {
-        console.warn('Session expired — re-uploading file and retrying...');
-        const newSessionId = await reprocessFile(file);
-        if (newSessionId) {
-          // Notify caller so it can update its session reference before
-          // making any further backend calls with the same session_id.
-          opts.onSessionRenewed?.(sessionId, newSessionId);
-          const retryBody = JSON.stringify({
-            session_id: newSessionId,
-            strict,
-            highlights: highlights.map(h => ({
-              page: h.page, field: h.field,
-              x: h.x, y: h.y, width: h.width, height: h.height,
-            })),
-          });
-          res = await fetch(`${BACKEND_URL}/api/utility/extract-regions`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: retryBody,
-          });
-        }
+      // Indices where the client had no value — those need the backend.
+      const missingIdx: number[] = [];
+      for (let i = 0; i < clientResults.length; i++) {
+        if (clientResults[i].value === null) missingIdx.push(i);
       }
 
-      if (res.ok) {
-        const data = await res.json();
-        return sanitizeResults(data.results);
+      // Everything was found client-side → done, no backend call.
+      if (missingIdx.length === 0) return clientResults;
+
+      // Ask the backend for just the missing ones and merge into the
+      // client-side result array in-place, preserving original order.
+      const backendCall = await postExtract(
+        sessionId,
+        missingIdx.map(i => highlights[i]),
+      );
+      if (backendCall) {
+        const merged = [...clientResults];
+        missingIdx.forEach((origIdx, backendIdx) => {
+          const br = backendCall.results[backendIdx];
+          if (br) merged[origIdx] = br;
+        });
+        return merged;
       }
+
+      // Backend call failed — return what we have. Nulls stay null,
+      // which is the same accuracy as the old client-side-fallback path.
+      return clientResults;
+    } catch (err) {
+      console.warn('Client-first extraction failed, falling back to backend-first:', err);
+      // Fall through to the legacy path below.
+    }
+  }
+
+  // ── LEGACY BACKEND-FIRST PATH ────────────────────────────────────────
+  // Used for non-strict extraction (backend does label-adjacent smart
+  // detection the client can't replicate) or when we don't have a File
+  // blob to feed pdfjs.
+  try {
+    if (backendOnline && !sessionId.startsWith('local-')) {
+      const backendCall = await postExtract(sessionId, highlights);
+      if (backendCall) return backendCall.results;
     }
   } catch {
     /* fall through to client-side */
   }
 
-  // Client-side fallback — uses pdfjs text layer
+  // Client-side fallback for when the backend is unreachable.
   if (file) {
     try {
       const clientResults = await extractFromRegions(
@@ -855,34 +905,6 @@ export async function extractRegions(
           height: h.height,
         })),
       );
-
-      const ocrNeeded = clientResults.filter(r => r.wasOcr && r.value === null);
-      const goodResults = clientResults.filter(r => !r.wasOcr || r.value !== null);
-
-      if (ocrNeeded.length > 0 && backendOnline && !sessionId.startsWith('local-')) {
-        try {
-          const ocrHighlights = highlights.filter(h =>
-            ocrNeeded.some(r => r.page === h.page && r.field === h.field)
-          );
-          const res = await fetch(`${BACKEND_URL}/api/utility/extract-regions`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              session_id: sessionId,
-              strict,
-              highlights: ocrHighlights.map(h => ({
-                page: h.page, field: h.field,
-                x: h.x, y: h.y, width: h.width, height: h.height,
-              })),
-            }),
-          });
-          if (res.ok) {
-            const data = await res.json();
-            return sanitizeResults([...goodResults, ...data.results]);
-          }
-        } catch { /* backend retry failed, return what we have */ }
-      }
-
       return sanitizeResults(clientResults);
     } catch (err) {
       console.error('Client-side region extraction failed:', err);
