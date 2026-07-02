@@ -258,7 +258,13 @@ export default function Index() {
     // Working queue for the workers.
     const queue = [...preItems];
 
-    type Result = { originalIdx: number; sessionId: string | null; ocrCount: number };
+    type Result = {
+      originalIdx: number;
+      sessionId: string | null;
+      ocrCount: number;
+      filename?: string;
+      errorMsg?: string;
+    };
     const results: Result[] = [];
     let hadNetworkError = false;
 
@@ -322,11 +328,16 @@ export default function Index() {
       }
 
       const msg = lastErr instanceof Error ? lastErr.message : 'Unknown error';
+      // Log every failure to the console with filename so the user can dig
+      // in later without having to catch individual toast pops. The
+      // per-file red toast used to fire once per failure — on a 294-file
+      // batch with 100+ failures they'd pile up and drown out the actually
+      // useful "X succeeded, Y failed" summary that comes at the end.
+      console.error(`[upload failed] ${item.file.name}: ${msg}`);
       setSessions(prev => prev.filter(s => s.id !== tempId));
       setOpenTabs(prev => prev.filter(t => t !== tempId));
-      toast.error(`"${item.file.name}" failed after 3 attempts: ${msg}`);
       if (msg.includes('fetch') || msg.includes('network')) hadNetworkError = true;
-      return { originalIdx: item.originalIdx, sessionId: null, ocrCount: 0 };
+      return { originalIdx: item.originalIdx, sessionId: null, ocrCount: 0, filename: item.file.name, errorMsg: msg };
     };
 
     const nWorkers = Math.min(CONCURRENCY, queue.length);
@@ -342,7 +353,8 @@ export default function Index() {
 
     // Tabs already appeared upfront (in their original click order), so
     // no re-sort is needed here. We just aggregate a summary toast.
-    const nSuccess = results.filter(r => r.sessionId !== null).length;
+    const failed = results.filter(r => r.sessionId === null);
+    const nSuccess = results.length - failed.length;
     const totalOcrPages = results.reduce((sum, r) => sum + r.ocrCount, 0);
     if (nSuccess > 0) {
       const ocrSuffix = totalOcrPages > 0 ? ` — ${totalOcrPages} pages OCR'd` : '';
@@ -351,6 +363,17 @@ export default function Index() {
         toast('Draw boxes over the values you want, then click Extract',
               { duration: 5000, icon: 'ℹ️' });
       }
+    }
+    // Explicit failure summary so a 108-of-294 silent drop is visible at
+    // a glance. The per-file console.error above already lists the
+    // filename + error message for each one — the toast points there.
+    if (failed.length > 0) {
+      const preview = failed.slice(0, 3).map(f => f.filename ?? '(unknown)').join(', ');
+      const more = failed.length > 3 ? ` +${failed.length - 3} more` : '';
+      toast.error(
+        `${failed.length} upload${failed.length !== 1 ? 's' : ''} failed — check the DevTools console for details.\nFirst: ${preview}${more}`,
+        { duration: 10000 },
+      );
     }
     if (hadNetworkError) setBackendDown(true);
 
