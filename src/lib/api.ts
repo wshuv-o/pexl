@@ -489,12 +489,25 @@ export async function extractTableRegion(
   page: number,
   x: number, y: number, width: number, height: number,
   transposed = false,
+  opts: { file?: File; onSessionRenewed?: (oldId: string, newId: string) => void } = {},
 ): Promise<TableRegionResult> {
-  const res = await fetch(`${BACKEND_URL}/api/utility/session/${sessionId}/extract-table-region`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ page, x, y, width, height, transposed }),
-  });
+  const body = JSON.stringify({ page, x, y, width, height, transposed });
+  const doFetch = (id: string) => fetch(
+    `${BACKEND_URL}/api/utility/session/${id}/extract-table-region`,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body },
+  );
+
+  let res = await doFetch(sessionId);
+  // Backend LRU-evicted the session — silently reupload and retry once so
+  // the user doesn't see "session expired" mid-workflow.
+  if (res.status === 404 && opts.file) {
+    const newId = await reprocessFile(opts.file);
+    if (newId) {
+      opts.onSessionRenewed?.(sessionId, newId);
+      res = await doFetch(newId);
+    }
+  }
+
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error((data as any).error ?? `Extraction failed (${res.status})`);
   return data as TableRegionResult;
@@ -506,63 +519,29 @@ export async function downloadTableRegionExcel(
   x: number, y: number, width: number, height: number,
   filename: string,
   rows?: string[][],
+  opts: { file?: File; onSessionRenewed?: (oldId: string, newId: string) => void } = {},
 ): Promise<void> {
-  const res = await fetch(`${BACKEND_URL}/api/utility/session/${sessionId}/extract-table-region/excel`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ page, x, y, width, height, ...(rows ? { rows } : {}) }),
-  });
+  const body = JSON.stringify({ page, x, y, width, height, ...(rows ? { rows } : {}) });
+  const doFetch = (id: string) => fetch(
+    `${BACKEND_URL}/api/utility/session/${id}/extract-table-region/excel`,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body },
+  );
+
+  let res = await doFetch(sessionId);
+  if (res.status === 404 && opts.file) {
+    const newId = await reprocessFile(opts.file);
+    if (newId) {
+      opts.onSessionRenewed?.(sessionId, newId);
+      res = await doFetch(newId);
+    }
+  }
+
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     throw new Error((data as any).error ?? `Export failed (${res.status})`);
   }
   const blob = await res.blob();
   triggerDownload(blob, filename);
-}
-
-export type SearchMode = 'exact' | 'partial' | 'fuzzy';
-
-export interface SearchMatch {
-  page: number;
-  text: string;
-  score: number;
-  boxes: [number, number, number, number][];   // PDF-point bboxes [x1, y1, x2, y2]
-}
-
-export interface SearchResponse {
-  query: string;
-  mode: SearchMode;
-  count: number;
-  page_sizes: Record<string, { width: number; height: number }>;  // page (as string) → dims
-  results: SearchMatch[];
-}
-
-export async function searchBackend(
-  sessionId: string,
-  query: string,
-  mode: SearchMode = 'partial',
-  opts: { fuzzyThreshold?: number; limit?: number; signal?: AbortSignal } = {},
-): Promise<SearchResponse | null> {
-  if (!query.trim()) return null;
-  try {
-    const res = await fetch(`${BACKEND_URL}/api/utility/search`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        session_id:       sessionId,
-        query,
-        mode,
-        fuzzy_threshold:  opts.fuzzyThreshold ?? 80,
-        limit:            opts.limit ?? 100,
-      }),
-      signal: opts.signal,
-    });
-    if (!res.ok) return null;
-    const data = await res.json() as SearchResponse;
-    return data;
-  } catch {
-    return null;
-  }
 }
 
 export async function downloadAllOcrPdfsAsZip(
@@ -765,17 +744,34 @@ export async function processFile(
  * Re-upload a file to the backend and return the new session_id.
  * Returns null on failure. Used by consumers that detect a stale session.
  */
+// In-flight reupload dedupe. Keyed by File identity so two concurrent 404
+// recoveries against the same file (e.g. a second table extract fired
+// before React state has swapped in the renewed session id) share one
+// upload instead of racing two. Cleared as soon as the shared promise
+// settles — a genuine second eviction later will start a fresh upload.
+const _reprocessInFlight = new WeakMap<File, Promise<string | null>>();
+
 export async function reprocessFile(file: File): Promise<string | null> {
-  try {
-    const formData = new FormData();
-    formData.append('file', file);
-    const resp = await fetch(`${BACKEND_URL}/api/utility/process`, { method: 'POST', body: formData });
-    if (resp.ok) {
-      const data = await resp.json();
-      return data.session_id as string;
-    }
-  } catch { /* ignore */ }
-  return null;
+  const existing = _reprocessInFlight.get(file);
+  if (existing) return existing;
+
+  const p = (async (): Promise<string | null> => {
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      const resp = await fetch(`${BACKEND_URL}/api/utility/process`, { method: 'POST', body: formData });
+      if (resp.ok) {
+        const data = await resp.json();
+        return data.session_id as string;
+      }
+    } catch { /* ignore */ }
+    return null;
+  })().finally(() => {
+    _reprocessInFlight.delete(file);
+  });
+
+  _reprocessInFlight.set(file, p);
+  return p;
 }
 
 export async function extractRegions(

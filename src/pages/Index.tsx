@@ -9,14 +9,13 @@ import {
 import { useNavigate } from 'react-router-dom';
 import UploadZone from '@/components/UploadZone';
 import PDFCardList from '@/components/PDFCardList';
-import ProcessingModal from '@/components/ProcessingModal';
 import PDFViewer from '@/components/PDFViewer';
 import ExcelPanel from '@/components/ExcelPanel';
 import BatchPanel from '@/components/BatchPanel';
 import ThemeToggle from '@/components/ThemeToggle';
 import type { PDFSession, Highlight, ExtractedRow, DocumentType } from '@/types/utilscraper';
 import { DOCUMENT_TYPES } from '@/types/utilscraper';
-import { processFile, extractRegions, downloadAllOcrPdfsAsZip, downloadExcel, getOcrProgress, triggerForceOcr, rotateSessionPdf, fetchConvertedPdf } from '@/lib/api';
+import { processFile, extractRegions, downloadAllOcrPdfsAsZip, getOcrProgress, triggerForceOcr, rotateSessionPdf, fetchConvertedPdf, extractTableRegion } from '@/lib/api';
 import { rasterizeIfVectorOnly } from '@/lib/vector-pdf-rasterizer';
 import { sessionsCache } from '@/lib/sessions-cache';
 import { useAuth } from '@/contexts/AuthContext';
@@ -32,11 +31,9 @@ export default function Index() {
   const [activeTabId, setActiveTabId]           = useState<string | null>(() => sessionsCache.activeTabId);
   const [pendingFiles, setPendingFiles]         = useState<File[]>([]);
   const [processing, setProcessing]             = useState(false);
-  const [modalOpen, setModalOpen]               = useState(false);
-  const [modalStep, setModalStep]               = useState(0);
-  const [modalDetail, setModalDetail]           = useState('');
-  const [modalFileIdx, setModalFileIdx]         = useState(0);
-  const [modalTotalFiles, setModalTotalFiles]   = useState(0);
+  // Legacy processing-modal state removed — uploads no longer show a
+  // blocking overlay. Each file's tab now spawns immediately with its own
+  // 'processing' spinner. Matches boss-pdf's queue-list UX.
   const [extracting, setExtracting]             = useState(false);
   const [showExcel, setShowExcel]               = useState(false);
   const [excelWidth, setExcelWidth]             = useState(480); // px, draggable
@@ -50,6 +47,9 @@ export default function Index() {
   // and click the other — the disabled state needs to match its action).
   const [rotatingIdCcw, setRotatingIdCcw]       = useState<string | null>(null);
   const [rotatingAllPdfsCcw, setRotatingAllPdfsCcw] = useState(false);
+  // Same but for the ctrl/cmd-selected PDFs only.
+  const [rotatingSelectedPdfs, setRotatingSelectedPdfs]       = useState(false);
+  const [rotatingSelectedPdfsCcw, setRotatingSelectedPdfsCcw] = useState(false);
   // True while the "confirm doc type before processing" modal is open.
   const [confirmProcessOpen, setConfirmProcessOpen] = useState(false);
   // Global doc-type picker (in the tab bar). Affects EVERY uploaded
@@ -184,108 +184,177 @@ export default function Index() {
 
   const runProcessing = useCallback(async () => {
     if (!pendingFiles.length) return;
-    setProcessing(true);
-    setModalTotalFiles(pendingFiles.length);
-    setModalFileIdx(0);
-    const newSessionIds: string[] = [];
-    for (let i = 0; i < pendingFiles.length; i++) {
-      let file = pendingFiles[i];
 
-      // Vector-only PDFs (no text layer, no embedded images, only path
-      // drawings) come back empty from the backend's image-OCR pipeline.
-      // Rasterize them client-side to a regular image-PDF before upload
-      // so the existing /process endpoint can OCR them as image scans.
+    // Worker-pool concurrency for uploads. 3 in-flight is safe: browsers cap
+    // concurrent connections per host around 6, and the backend's
+    // OCR_MAX_CONCURRENCY is 2 so 3 keeps the OCR queue warm without
+    // flooding it. Drop to 2 if you see the Hostinger box struggling.
+    const CONCURRENCY = 3;
+
+    setProcessing(true);
+    // NOTE: we no longer open the ProcessingModal here. Files show up as
+    // tabs immediately (with their own per-tab spinner via status:
+    // 'processing') so the user can see everything they dropped without
+    // a blocking overlay. Matches boss-pdf's "queued list" UX.
+
+    // ── Pre-create ALL sessions with 'processing' status BEFORE any
+    // worker starts. This gives the boss-pdf effect: drop files, see
+    // every tab appear instantly, each with a spinner. Workers just
+    // update the existing session state as uploads complete.
+    const stamp = Date.now();
+    const preItems: Array<{ file: File; originalIdx: number; tempId: string; folderName: string | undefined }> =
+      pendingFiles.map((f, idx) => {
+        const relPath =
+          (f as File & { __relativePath?: string }).__relativePath
+          || (f as File & { webkitRelativePath?: string }).webkitRelativePath;
+        const folderName = relPath && relPath.includes('/')
+          ? relPath.split('/').slice(0, -1).join('\\')
+          : undefined;
+        return {
+          file: f,
+          originalIdx: idx,
+          tempId: `temp-${stamp}-${idx}-${Math.random().toString(36).slice(2, 6)}`,
+          folderName,
+        };
+      });
+
+    setSessions(prev => [
+      ...prev,
+      ...preItems.map(it => ({
+        id: it.tempId,
+        // stableKey mirrors the tempId at creation and is never touched
+        // again — even when `id` gets swapped to the backend's real
+        // session_id, or later replaced after a 404 recovery reupload.
+        // The viewer uses this as its React `key` so an in-progress table
+        // drawing survives a mid-extract session renewal.
+        stableKey: it.tempId,
+        filename: it.file.name,
+        file: it.file,
+        folderName: it.folderName,
+        docType: pendingDocType,
+        total_pages: 0,
+        pages: [],
+        status: 'processing' as const,
+        highlights: {},
+        extractedData: [],
+        startPage: 1,
+        uploadedAt: Date.now(),
+      })),
+    ]);
+    setOpenTabs(prev => {
+      const merged = [...prev];
+      for (const it of preItems) {
+        if (!merged.includes(it.tempId)) merged.push(it.tempId);
+      }
+      return merged;
+    });
+    // Activate the first newly-added tab so the user sees their upload
+    // context immediately.
+    setActiveTabId(preItems[0].tempId);
+    setNavCollapsed(true);
+    // Clear the pre-upload queue now that everything is in tabs.
+    setPendingFiles([]);
+
+    // Working queue for the workers.
+    const queue = [...preItems];
+
+    type Result = { originalIdx: number; sessionId: string | null; ocrCount: number };
+    const results: Result[] = [];
+    let hadNetworkError = false;
+
+    const processOne = async (
+      item: { file: File; originalIdx: number; tempId: string; folderName: string | undefined },
+    ): Promise<Result> => {
+      let file = item.file;
+      const tempId = item.tempId;
+
+      // Vector-only PDF rasterisation (same rule as before). Runs on the
+      // client; can be slow for large vector PDFs but has no effect on
+      // normal scanned/native PDFs.
       if (/\.pdf$/i.test(file.name)) {
         try {
           const result = await rasterizeIfVectorOnly(file, { dpi: 200 });
           if (result.rasterized) {
             file = result.file;
-            toast(`Rasterized vector PDF "${pendingFiles[i].name}" for OCR`, {
+            toast(`Rasterized vector PDF "${item.file.name}" for OCR`, {
               icon: '📄', duration: 3500,
             });
           }
         } catch (err) {
           console.warn('[rasterizeIfVectorOnly] failed:', err);
-          // fall through with the original file — backend may still cope
         }
       }
 
-      const tempId = `temp-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-      // Browsers don't expose absolute filesystem paths (e.g. "C:\Users\...")
-      // for security. The fullest path available is relative to whatever the
-      // user selected:
-      //   - folder picker → file.webkitRelativePath = "TopFolder/sub/file.pdf"
-      //   - folder drag-drop → file.__relativePath = "TopFolder/sub/file.pdf"
-      //     (set by UploadZone during the directory walk)
-      // We join all segments except the filename with backslashes so it reads
-      // like a Windows path, e.g. "Statement 2\4.9.2026".
-      const relPath =
-        (file as File & { __relativePath?: string }).__relativePath
-        || (file as File & { webkitRelativePath?: string }).webkitRelativePath;
-      const folderName = relPath && relPath.includes('/')
-        ? relPath.split('/').slice(0, -1).join('\\')
-        : undefined;
-      setSessions(prev => [...prev, {
-        id: tempId, filename: file.name, file, folderName,
-        docType: pendingDocType,
-        total_pages: 0, pages: [], status: 'processing',
-        highlights: {}, extractedData: [],
-        startPage: 1,
-        // Stamp the upload start for usage-timing math; trackers later
-        // compute (finished_at - uploaded_at) to report time saved.
-        uploadedAt: Date.now(),
-      }]);
-      setModalOpen(true); setModalStep(0); setModalDetail('');
-      setModalFileIdx(i + 1);
-      try {
-        const result = await processFile(file, '', (step, detail) => {
-          setModalStep(step); setModalDetail(detail || '');
-        });
-        const ocrCount = result.pages.filter(p => p.is_ocr).length;
-        // Update temp session with real ID
-        setSessions(prev => prev.map(s => s.id === tempId
-          ? {
-              ...s,
-              id: result.session_id,
-              total_pages: result.total_pages,
-              pages: result.pages,
-              // Replace the in-browser Word blob with the backend-converted
-              // PDF so react-pdf can render it in the viewer.
-              file: result.convertedPdf ?? s.file,
-              filename: result.convertedPdf?.name ?? s.filename,
-              status: 'ready' as const,
-            }
-          : s,
-        ));
-        // Also fix any tab that was opened with the tempId
-        setOpenTabs(prev => prev.map(t => t === tempId ? result.session_id : t));
-        if (activeTabId === tempId) setActiveTabId(result.session_id);
-        newSessionIds.push(result.session_id);
-        setModalOpen(false);
-        toast.success(`PDF ready — ${ocrCount > 0 ? `${ocrCount} pages OCR'd` : 'all native text'}`);
-        if (ocrCount > 0) startOcrPolling(result.session_id);
-        if (ocrCount > 0) toast('Draw boxes over the values you want, then click Extract', { duration: 5000, icon: 'ℹ️' });
-      } catch (err: any) {
-        setModalOpen(false);
-        setSessions(prev => prev.filter(s => s.id !== tempId));
-        setOpenTabs(prev => prev.filter(t => t !== tempId));
-        toast.error(`Processing failed: ${err.message || 'Unknown error'}`);
-        if (err.message?.includes('fetch') || err.message?.includes('network')) setBackendDown(true);
+      // Retry loop — 3 attempts total with exponential backoff. Uploading
+      // a few hundred PDFs in one go regularly trips a transient 429/500
+      // or aborted connection somewhere in the middle; giving those files
+      // one or two more shots recovers most of them instead of silently
+      // dropping the tab and forcing the user to re-upload manually.
+      let lastErr: unknown = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (attempt > 0) {
+          await new Promise(r => setTimeout(r, 600 * attempt));
+        }
+        try {
+          const result = await processFile(file, '', () => {});
+          const ocrCount = result.pages.filter(p => p.is_ocr).length;
+
+          setSessions(prev => prev.map(s => s.id === tempId
+            ? {
+                ...s,
+                id: result.session_id,
+                total_pages: result.total_pages,
+                pages: result.pages,
+                file: result.convertedPdf ?? s.file,
+                filename: result.convertedPdf?.name ?? s.filename,
+                status: 'ready' as const,
+              }
+            : s,
+          ));
+          setOpenTabs(prev => prev.map(t => t === tempId ? result.session_id : t));
+          if (activeTabId === tempId) setActiveTabId(result.session_id);
+          if (ocrCount > 0) startOcrPolling(result.session_id);
+
+          return { originalIdx: item.originalIdx, sessionId: result.session_id, ocrCount };
+        } catch (err: unknown) {
+          lastErr = err;
+        }
+      }
+
+      const msg = lastErr instanceof Error ? lastErr.message : 'Unknown error';
+      setSessions(prev => prev.filter(s => s.id !== tempId));
+      setOpenTabs(prev => prev.filter(t => t !== tempId));
+      toast.error(`"${item.file.name}" failed after 3 attempts: ${msg}`);
+      if (msg.includes('fetch') || msg.includes('network')) hadNetworkError = true;
+      return { originalIdx: item.originalIdx, sessionId: null, ocrCount: 0 };
+    };
+
+    const nWorkers = Math.min(CONCURRENCY, queue.length);
+    const workers = Array.from({ length: nWorkers }, async () => {
+      while (queue.length > 0) {
+        const item = queue.shift();
+        if (!item) return;
+        const r = await processOne(item);
+        results.push(r);
+      }
+    });
+    await Promise.all(workers);
+
+    // Tabs already appeared upfront (in their original click order), so
+    // no re-sort is needed here. We just aggregate a summary toast.
+    const nSuccess = results.filter(r => r.sessionId !== null).length;
+    const totalOcrPages = results.reduce((sum, r) => sum + r.ocrCount, 0);
+    if (nSuccess > 0) {
+      const ocrSuffix = totalOcrPages > 0 ? ` — ${totalOcrPages} pages OCR'd` : '';
+      toast.success(`${nSuccess} PDF${nSuccess !== 1 ? 's' : ''} ready${ocrSuffix}`);
+      if (totalOcrPages > 0) {
+        toast('Draw boxes over the values you want, then click Extract',
+              { duration: 5000, icon: 'ℹ️' });
       }
     }
-    // Open all processed files as tabs, activate the first one
-    if (newSessionIds.length > 0) {
-      setOpenTabs(prev => {
-        const merged = [...prev];
-        for (const id of newSessionIds) {
-          if (!merged.includes(id)) merged.push(id);
-        }
-        return merged;
-      });
-      setActiveTabId(newSessionIds[0]);
-      setNavCollapsed(true);
-    }
-    setPendingFiles([]); setProcessing(false);
+    if (hadNetworkError) setBackendDown(true);
+
+    setProcessing(false);
   }, [pendingFiles, pendingDocType, activeTabId]);
 
   // Tracks which sessions have active OCR polls running. Setting to true stops the loop.
@@ -471,6 +540,13 @@ export default function Index() {
     let totalExtracted = 0;
     let totalNull = 0;
 
+    // Track any renewed session IDs so we can swap them in one batched
+    // setSessions call after Promise.allSettled resolves. When the backend
+    // has evicted a session (LRU cap or TTL), extractRegions transparently
+    // re-uploads and returns the new id via onSessionRenewed. Without this
+    // swap, the next extract call would hit the stale id and re-upload again.
+    const renewals: Array<{ oldId: string; newId: string }> = [];
+
     // Process all sessions in parallel — each makes one backend call.
     const settled = await Promise.allSettled(targets.map(async sess => {
       const clearedHighlights: Record<number, Highlight[]> = {};
@@ -480,7 +556,14 @@ export default function Index() {
         }));
       }
       const allHl = Object.values(clearedHighlights).flat();
-      const results = await extractRegions(sess.id, allHl, sess.file!, { strict: true });
+      let liveId = sess.id;
+      const results = await extractRegions(liveId, allHl, sess.file!, {
+        strict: true,
+        onSessionRenewed: (oldId, newId) => {
+          liveId = newId;
+          renewals.push({ oldId, newId });
+        },
+      });
 
       const newHighlights = { ...clearedHighlights };
       let idx = 0;
@@ -495,16 +578,16 @@ export default function Index() {
         .map(h => ({
           page: h.page, field: h.field, value: h.extractedValue ?? null,
           confidence: h.confidence ?? 'low', wasOcr: h.wasOcr ?? false,
-          filename: sess.filename, folderName: sess.folderName, sessionId: sess.id,
+          filename: sess.filename, folderName: sess.folderName, sessionId: liveId,
         }));
-      return { sess, newHighlights, sessResults };
+      return { sess, newHighlights, sessResults, liveId };
     }));
 
-    const updates: { id: string; highlights: Record<number, Highlight[]>; extractedData: ExtractedRow[] }[] = [];
+    const updates: { oldId: string; newId: string; highlights: Record<number, Highlight[]>; extractedData: ExtractedRow[] }[] = [];
     for (const result of settled) {
       if (result.status === 'fulfilled') {
-        const { sess, newHighlights, sessResults } = result.value;
-        updates.push({ id: sess.id, highlights: newHighlights, extractedData: sessResults });
+        const { sess, newHighlights, sessResults, liveId } = result.value;
+        updates.push({ oldId: sess.id, newId: liveId, highlights: newHighlights, extractedData: sessResults });
         totalExtracted += sessResults.length;
         totalNull += sessResults.filter(r => !r.value).length;
       } else {
@@ -513,9 +596,20 @@ export default function Index() {
     }
     if (updates.length > 0) {
       setSessions(prev => prev.map(s => {
-        const u = updates.find(x => x.id === s.id);
-        return u ? { ...s, highlights: u.highlights, extractedData: u.extractedData, status: 'extracted' as const } : s;
+        const u = updates.find(x => x.oldId === s.id);
+        if (!u) return s;
+        return {
+          ...s,
+          id: u.newId,
+          highlights: u.highlights,
+          extractedData: u.extractedData,
+          status: 'extracted' as const,
+        };
       }));
+      if (renewals.length > 0) {
+        setOpenTabs(prev => prev.map(t => renewals.find(r => r.oldId === t)?.newId ?? t));
+        setActiveTabId(prev => (prev && renewals.find(r => r.oldId === prev)?.newId) ?? prev);
+      }
     }
 
     setShowExcel(true);
@@ -727,7 +821,6 @@ export default function Index() {
     tableOnly: boolean,
   ) => {
     const { findAllTextPositionsInPdfPage, detectTableRegionsInPdfPage } = await import('@/lib/pdf-extract');
-    const { searchBackend } = await import('@/lib/api');
     const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
 
     const targets = sessions.filter(s =>
@@ -778,64 +871,6 @@ export default function Index() {
         return cands[0];
       };
 
-      // Cache backend search by key text for THIS target — one network
-      // round-trip per key, then per-page lookup is local.
-      const backendByKey = new Map<string, Map<number, { x: number; y: number; width: number; height: number }[]>>();
-      // Track the live session id for this target — may be renewed once if the
-      // original session expired (e.g. server restarted since upload).
-      let liveTargetId = target.id;
-      let targetSessionRenewed = false;
-      const fetchBackendKey = async (q: string) => {
-        if (backendByKey.has(q)) return backendByKey.get(q)!;
-        const map = new Map<number, { x: number; y: number; width: number; height: number }[]>();
-        for (const mode of ['exact', 'partial', 'fuzzy'] as const) {
-          let r = await searchBackend(liveTargetId, q, mode);
-          // null means HTTP error (likely 404 = session expired). Try re-uploading once.
-          if (r === null && !targetSessionRenewed && file) {
-            targetSessionRenewed = true;
-            console.warn(`[AutoApply] "${target.filename}" session expired — re-uploading…`);
-            try {
-              const { reprocessFile } = await import('@/lib/api');
-              const newId = await reprocessFile(file);
-              if (newId) {
-                liveTargetId = newId;
-                console.log(`[AutoApply] "${target.filename}" re-uploaded → session ${newId.slice(-6)}`);
-                // The re-upload creates a fresh session whose search index is not yet
-                // built. Building it (OCR on all pages) can take minutes for large
-                // scanned PDFs. Apply a timeout so we fall through to the source-page
-                // coordinate fallback quickly — the index will be cached for next time.
-                const ctrl = new AbortController();
-                const timer = setTimeout(() => ctrl.abort(), 5_000);
-                try {
-                  r = await searchBackend(liveTargetId, q, mode, { signal: ctrl.signal });
-                } catch { r = null; } finally { clearTimeout(timer); }
-              }
-            } catch { /* fall through to pdfjs */ }
-          }
-          if (!r || r.results.length === 0) continue;
-          for (const m of r.results) {
-            const dims = r.page_sizes[String(m.page)];
-            if (!dims) continue;
-            const arr = map.get(m.page) ?? [];
-            for (const [x1, y1, x2, y2] of m.boxes) {
-              arr.push({
-                x: x1 / dims.width,
-                y: y1 / dims.height,
-                width:  (x2 - x1) / dims.width,
-                height: (y2 - y1) / dims.height,
-              });
-            }
-            map.set(m.page, arr);
-          }
-          if (map.size > 0) break;
-        }
-        backendByKey.set(q, map);
-        return map;
-      };
-
-      // Prefetch all keys in parallel before the page loop.
-      await Promise.all(pairs.filter(p => !p.useAbsoluteCoords).map(p => fetchBackendKey(p.keyText)));
-
       for (let pg = 1; pg <= totalPgs; pg++) {
         if (pg % 5 === 0) await new Promise(r => setTimeout(r, 0));
         for (const p of pairs) {
@@ -859,16 +894,13 @@ export default function Index() {
                 return cx >= Math.max(0, p.sourceKeyX - 0.35) && cx <= Math.min(1, p.sourceKeyX + 0.35)
                     && cy >= Math.max(0, p.sourceKeyY - 0.25) && cy <= Math.min(1, p.sourceKeyY + 0.25);
               };
+              // Locate the key on this page via pdfjs (text layer). Constrain
+              // to the source region so we don't grab a same-named label
+              // elsewhere on the page.
               let match: { x: number; y: number; width: number; height: number } | null = null;
-              const fetchedMap = await fetchBackendKey(p.keyText);
-              const backendAll = fetchedMap.get(pg) ?? [];
-              const backendRegion = backendAll.filter(inSearchRegion);
-              match = await preferInTable(backendRegion.length > 0 ? backendRegion : backendAll, pg);
-              if (!match) {
-                const allCands = await findAllTextPositionsInPdfPage(file, pg, p.keyText);
-                const regionCands = allCands.filter(inSearchRegion);
-                match = await preferInTable(regionCands.length > 0 ? regionCands : allCands, pg);
-              }
+              const allCands = await findAllTextPositionsInPdfPage(file, pg, p.keyText);
+              const regionCands = allCands.filter(inSearchRegion);
+              match = await preferInTable(regionCands.length > 0 ? regionCands : allCands, pg);
               // No key found anywhere — place value at the source coordinates on every
               // page so layout drift is handled statically rather than skipping.
               if (!match) {
@@ -951,26 +983,197 @@ export default function Index() {
     }));
   }, [multiSelectedTabIds]);
 
-  // Download Excel tables for every ctrl/cmd-selected PDF sequentially.
-  const handleDownloadExcelSelected = useCallback(async (): Promise<void> => {
-    const targets = sessions.filter(s => multiSelectedTabIds.has(s.id));
+  // Copy an ad-hoc "table-select" region drawn on the active PDF to every
+  // other open PDF (or just the ctrl/cmd-selected ones) and pull a table
+  // from the same page + normalized coords on each. Results — plus the
+  // (possibly sanitized) source rows — are combined into one Excel workbook
+  // with a sheet per PDF, then downloaded.
+  //
+  // No text anchoring: coords are applied verbatim. This matches
+  // handleApplyToAllPdfs and works well for batches of same-layout
+  // documents (e.g. monthly utility bills from the same provider). PDFs
+  // where the layout has shifted end up with an empty sheet the user can
+  // ignore or re-select from that tab.
+  const handleExtractTableFromPdfs = useCallback(async (
+    region: { page: number; x: number; y: number; width: number; height: number },
+    sourceRows: string[][],
+    restrictIds?: Set<string>,
+  ): Promise<void> => {
+    const sourceSession = sessions.find(s => s.id === activeTabId);
+    if (!sourceSession) { toast.error('No active PDF'); return; }
+
+    // Include every session that isn't still uploading. We intentionally do
+    // NOT require status === 'ready'|'extracted' or a local File blob:
+    //   - 'processing' sessions still exist on the backend and the table
+    //     endpoint works on them.
+    //   - Cache-hydrated sessions have no File blob but their session id may
+    //     still be alive on the backend; if the backend evicted them we'll
+    //     fail cleanly per-file and surface the count in the final toast.
+    // The old strict filter was silently dropping most of a large batch
+    // (e.g. 294 uploaded → 28 targeted) whenever many sessions were still
+    // finishing processing at click time.
+    const targets = sessions.filter(s =>
+      s.id !== activeTabId
+      && s.status !== 'uploading'
+      && (restrictIds ? restrictIds.has(s.id) : true),
+    );
     if (targets.length === 0) {
-      toast('No PDFs selected — Ctrl/Cmd+click tabs to select', { icon: 'ℹ️' });
+      toast(restrictIds ? 'No selected PDFs to copy to' : 'No other open PDFs to copy to', { icon: 'ℹ️' });
       return;
     }
-    let done = 0;
-    const failed: string[] = [];
-    for (const s of targets) {
+
+    const toastId = toast.loading(`Extracting table from ${targets.length} PDF${targets.length !== 1 ? 's' : ''}…`);
+
+    type PerFile = { filename: string; rows: string[][]; failed: boolean };
+    // Track renewed session IDs so a stale one gets swapped after batch.
+    const renewals: Array<{ oldId: string; newId: string }> = [];
+
+    const runOne = async (sess: PDFSession): Promise<PerFile> => {
       try {
-        await downloadExcel(s.id, s.filename);
-        done++;
-      } catch (err) {
-        failed.push(s.filename);
+        const result = await extractTableRegion(
+          sess.id, region.page, region.x, region.y, region.width, region.height,
+          false,
+          {
+            file: sess.file,
+            onSessionRenewed: (oldId, newId) => { renewals.push({ oldId, newId }); },
+          },
+        );
+        return { filename: sess.filename, rows: result.rows ?? [], failed: false };
+      } catch {
+        return { filename: sess.filename, rows: [], failed: true };
       }
+    };
+
+    // Modest concurrency so a batch of 300 doesn't hammer the backend with
+    // 300 simultaneous table extractions. 3 matches the upload concurrency.
+    const CONCURRENCY = 3;
+    const queue = [...targets];
+    const perFile: PerFile[] = [];
+    const workers = Array.from({ length: Math.min(CONCURRENCY, queue.length) }, async () => {
+      while (queue.length > 0) {
+        const s = queue.shift();
+        if (!s) return;
+        perFile.push(await runOne(s));
+      }
+    });
+    await Promise.all(workers);
+
+    if (renewals.length > 0) {
+      setSessions(prev => prev.map(s => {
+        const swap = renewals.find(r => r.oldId === s.id);
+        return swap ? { ...s, id: swap.newId } : s;
+      }));
+      setOpenTabs(prev => prev.map(t => renewals.find(r => r.oldId === t)?.newId ?? t));
+      setActiveTabId(prev => (prev && renewals.find(r => r.oldId === prev)?.newId) ?? prev);
     }
-    if (done > 0) toast.success(`Downloaded Excel for ${done} PDF${done !== 1 ? 's' : ''}`);
-    if (failed.length > 0) toast.error(`Failed: ${failed.join(', ')}`);
-  }, [sessions, multiSelectedTabIds]);
+
+    // Build one workbook: source sheet first, then a sheet per target.
+    const ExcelJS = (await import('exceljs')).default;
+    const wb = new ExcelJS.Workbook();
+
+    // Excel sheet names cap at 31 chars and forbid : \ / ? * [ ]
+    const usedNames = new Set<string>();
+    const safeName = (raw: string): string => {
+      const stem = raw.replace(/\.[^.]+$/, '').replace(/[:\\/?*[\]]/g, '_').slice(0, 27) || 'Sheet';
+      let name = stem;
+      let i = 2;
+      while (usedNames.has(name.toLowerCase())) { name = `${stem.slice(0, 27 - String(i).length - 1)}_${i}`; i++; }
+      usedNames.add(name.toLowerCase());
+      return name;
+    };
+
+    const writeSheet = (name: string, rows: string[][]) => {
+      const ws = wb.addWorksheet(safeName(name));
+      if (rows.length === 0) { ws.addRow(['(no data)']); return; }
+      for (const r of rows) ws.addRow(r);
+      // Auto-size columns loosely — cap at 60 chars so long text doesn't
+      // blow the sheet width.
+      const ncols = Math.max(...rows.map(r => r.length));
+      for (let ci = 1; ci <= ncols; ci++) {
+        let max = 8;
+        for (const r of rows) {
+          const v = r[ci - 1];
+          if (v) max = Math.max(max, String(v).length);
+        }
+        ws.getColumn(ci).width = Math.min(max + 2, 60);
+      }
+    };
+
+    writeSheet(sourceSession.filename, sourceRows);
+    for (const pf of perFile) writeSheet(pf.filename, pf.rows);
+
+    const buf = await wb.xlsx.writeBuffer();
+    const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `table_p${region.page}_across_${targets.length + 1}_pdfs.xlsx`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+    const failedCount = perFile.filter(p => p.failed).length;
+    toast.dismiss(toastId);
+    if (failedCount === 0) {
+      toast.success(`Extracted table from ${targets.length + 1} PDFs`);
+    } else {
+      toast.warning(
+        `${targets.length + 1 - failedCount}/${targets.length + 1} succeeded — ${failedCount} failed (layout drift?)`,
+      );
+    }
+  }, [sessions, activeTabId]);
+
+  // Rotate a set of sessions sequentially. Shared by the "Rotate all open"
+  // and "Rotate selected" toolbar buttons in both CW and CCW directions.
+  // Sequential (not parallel) — the backend page-render is expensive and
+  // parallel requests would queue anyway on the Hostinger box.
+  const rotateManyPdfs = useCallback(async (
+    targets: PDFSession[],
+    direction: 90 | -90,
+    verb: string,     // shown in the toast, e.g. 'CW' / 'CCW'
+    scope: string,    // shown in the toast, e.g. 'all open' / 'selected'
+  ): Promise<void> => {
+    if (targets.length === 0) {
+      toast(`No ${scope} PDFs to rotate`, { icon: 'ℹ️' });
+      return;
+    }
+    const toastId = toast.loading(`Rotating 1 / ${targets.length} (${verb})…`);
+    let succeeded = 0;
+    let failed = 0;
+
+    for (let i = 0; i < targets.length; i++) {
+      const sess = targets[i];
+      toast.loading(`Rotating ${i + 1} / ${targets.length} ${verb} — ${sess.filename}`, { id: toastId });
+      const result = await rotateSessionPdf(sess.id, direction);
+      if (!result) { failed++; continue; }
+
+      const newFile = await fetchConvertedPdf(sess.id, sess.filename);
+      setSessions(prev => prev.map(s => s.id === sess.id
+        ? {
+            ...s,
+            file: newFile ?? s.file,
+            total_pages: result.page_count ?? s.total_pages,
+            highlights: {},
+            extractedData: [],
+            status: 'ready' as const,
+            forceOcr: false,
+            ocrProgress: null,
+          }
+        : s
+      ));
+      succeeded++;
+    }
+
+    toast.dismiss(toastId);
+    if (failed === 0) {
+      toast.success(`Rotated ${succeeded} PDF${succeeded !== 1 ? 's' : ''} ${verb}`);
+    } else if (succeeded === 0) {
+      toast.error(`All ${failed} rotation${failed !== 1 ? 's' : ''} failed`);
+    } else {
+      toast(`Rotated ${succeeded} / ${targets.length} ${verb} — ${failed} failed`, { icon: '⚠️' });
+    }
+  }, []);
 
   // Adds a user-typed custom field label to the session-wide list, so every
   // PDF's label picker shows it.
@@ -989,9 +1192,33 @@ export default function Index() {
   }, [activeTabId]);
 
   // Can we show a viewer?
-  const hasActiveViewer = activeSession &&
+  // Show the viewer as soon as we have the local File blob — even while the
+  // backend is still analysing (status 'processing'). PDFViewer renders from
+  // URL.createObjectURL(session.file), so it doesn't need the backend to be
+  // done. This kills the "Select a PDF from the sidebar" empty state that
+  // used to hang around until the first upload finished.
+  const hasActiveViewer = !!activeSession &&
     activeSession.status !== 'uploading' &&
-    activeSession.status !== 'processing';
+    (activeSession.status !== 'processing' || !!activeSession.file);
+
+  // Guarantee: whenever there are open tabs, exactly one is active. Handles
+  // three separate broken-state cases that all showed up in practice:
+  //   1. `activeTabId` is null (fresh cache, or user hit Clear).
+  //   2. `activeTabId` points at a tab that's no longer in `openTabs`
+  //      (closed tab, or a stale renewal that didn't propagate).
+  //   3. `activeTabId` exists but its session was removed from `sessions`
+  //      (upload failed after the tab was created).
+  // In all three cases we fall back to the first open tab so the viewer
+  // is never showing the "Select a PDF from the sidebar" empty state while
+  // tabs are visible above it.
+  useEffect(() => {
+    if (openTabs.length === 0) return;
+    const stillOpen = activeTabId && openTabs.includes(activeTabId);
+    const sessionExists = activeTabId && sessions.some(s => s.id === activeTabId);
+    if (!stillOpen || !sessionExists) {
+      setActiveTabId(openTabs[0]);
+    }
+  }, [activeTabId, openTabs, sessions]);
 
   return (
     <div className="h-screen flex bg-background">
@@ -1056,7 +1283,6 @@ export default function Index() {
                     pendingFiles={pendingFiles}
                     onFileRemove={(idx) => setPendingFiles(prev => prev.filter((_, i) => i !== idx))}
                     docType={pendingDocType}
-                    onDocTypeChange={setPendingDocType}
                     onProcess={handleProcess}
                     processing={processing}
                   />
@@ -1296,13 +1522,19 @@ export default function Index() {
                       setDragTabId(null);
                     }}
                     onDragEnd={() => setDragTabId(null)}
+                    // Active tab uses `bg-background` (the content pane color)
+                    // so it visually "cuts through" the muted tab-bar strip
+                    // above the viewer — the same VS Code / browser-tab
+                    // pattern. The primary-colored top border reinforces
+                    // which tab is active in both dark and light modes,
+                    // where `bg-card` vs `bg-muted` alone was too subtle.
                     className={`group flex items-center gap-1.5 pl-3 pr-1 py-1.5 rounded-t-lg text-xs cursor-grab
-                      max-w-[200px] min-w-[100px] select-none transition-colors
+                      max-w-[200px] min-w-[100px] select-none transition-colors border-t-2
                       ${dragTabId === s.id ? 'opacity-40' : ''}
                       ${multiSelectedTabIds.has(s.id) ? 'ring-2 ring-primary ring-offset-1 ring-offset-muted' : ''}
                       ${isActive
-                        ? 'bg-card text-foreground font-medium'
-                        : 'bg-muted/60 text-muted-foreground hover:bg-muted/80'
+                        ? 'bg-background border-t-primary text-foreground font-semibold shadow-sm'
+                        : 'bg-muted/40 border-t-transparent text-muted-foreground/70 hover:bg-muted/70 hover:text-foreground'
                       }`}
                     onClick={e => {
                       // Shift+click → add every tab between the current
@@ -1348,7 +1580,15 @@ export default function Index() {
                       className="w-1.5 h-1.5 rounded-full shrink-0"
                       style={{ backgroundColor: dt?.color ?? '#64748b' }}
                     />
-                    <span className="truncate flex-1">{s.filename}</span>
+                    {/* RTL direction makes the ellipsis appear at the START of
+                        the string instead of the end — so a bunch of files
+                        sharing a "39.0-3-..." prefix show their distinguishing
+                        suffix. The leading LRM (‎) forces the actual
+                        letters to render left-to-right so numbers and dashes
+                        aren't visually reversed. Full name is on the tooltip. */}
+                    <span dir="rtl" className="truncate flex-1 text-left">
+                      {'‎' + s.filename}
+                    </span>
                     <button
                       className={`p-0.5 rounded transition-colors shrink-0
                         ${isActive
@@ -1467,7 +1707,7 @@ export default function Index() {
                   </div>
                 )}
                 <PDFViewer
-                  key={activeSession.id}
+                  key={activeSession.stableKey ?? activeSession.id}
                   session={activeSession}
                   onHighlightsChange={handleHighlightsChange}
                   onExtract={handleExtract}
@@ -1500,64 +1740,50 @@ export default function Index() {
                     ));
                   }}
                   onAutoApplyAllPdfs={handleAutoApplyAllPdfs}
+                  onExtractTableFromAllPdfs={(region, sourceRows) =>
+                    handleExtractTableFromPdfs(region, sourceRows)}
+                  onExtractTableFromSelectedPdfs={multiSelectedTabIds.size > 0
+                    ? (region, sourceRows) => handleExtractTableFromPdfs(region, sourceRows, multiSelectedTabIds)
+                    : undefined}
                   onRemoveFieldFromAllPdfs={handleRemoveFieldFromAllPdfs}
                   onRemoveFieldFromSelectedPdfs={multiSelectedTabIds.size > 0
                     ? handleRemoveFieldFromSelectedPdfs
                     : undefined}
-                  onDownloadExcelSelected={multiSelectedTabIds.size > 0
-                    ? handleDownloadExcelSelected
-                    : undefined}
                   rotatingAllPdfsCcw={rotatingAllPdfsCcw}
                   onRotateAllPdfsCcw={async () => {
                     if (rotatingAllPdfsCcw) return;
-                    const openTabSet = new Set(openTabs);
-                    const targets = sessions.filter(s => openTabSet.has(s.id));
-                    if (targets.length === 0) {
-                      toast('No PDFs open to rotate', { icon: 'ℹ️' });
-                      return;
-                    }
-
                     setRotatingAllPdfsCcw(true);
-                    const toastId = toast.loading(`Rotating 1 / ${targets.length} (CCW)…`);
-                    let succeeded = 0;
-                    let failed = 0;
-
-                    for (let i = 0; i < targets.length; i++) {
-                      const sess = targets[i];
-                      toast.loading(`Rotating ${i + 1} / ${targets.length} CCW — ${sess.filename}`, { id: toastId });
-                      const result = await rotateSessionPdf(sess.id, -90);
-                      if (!result) {
-                        failed++;
-                        continue;
-                      }
-
-                      const newFile = await fetchConvertedPdf(sess.id, sess.filename);
-                      setSessions(prev => prev.map(s => s.id === sess.id
-                        ? {
-                            ...s,
-                            file: newFile ?? s.file,
-                            total_pages: result.page_count ?? s.total_pages,
-                            highlights: {},
-                            extractedData: [],
-                            status: 'ready' as const,
-                            forceOcr: false,
-                            ocrProgress: null,
-                          }
-                        : s
-                      ));
-                      succeeded++;
-                    }
-
+                    const openTabSet = new Set(openTabs);
+                    await rotateManyPdfs(
+                      sessions.filter(s => openTabSet.has(s.id)),
+                      -90, 'CCW', 'open',
+                    );
                     setRotatingAllPdfsCcw(false);
-                    toast.dismiss(toastId);
-                    if (failed === 0) {
-                      toast.success(`Rotated ${succeeded} PDF${succeeded !== 1 ? 's' : ''} CCW`);
-                    } else if (succeeded === 0) {
-                      toast.error(`All ${failed} rotation${failed !== 1 ? 's' : ''} failed`);
-                    } else {
-                      toast(`Rotated ${succeeded} / ${targets.length} CCW — ${failed} failed`, { icon: '⚠️' });
-                    }
                   }}
+                  rotatingSelectedPdfs={rotatingSelectedPdfs}
+                  onRotateSelectedPdfs={multiSelectedTabIds.size > 0
+                    ? async () => {
+                        if (rotatingSelectedPdfs) return;
+                        setRotatingSelectedPdfs(true);
+                        await rotateManyPdfs(
+                          sessions.filter(s => multiSelectedTabIds.has(s.id)),
+                          90, 'CW', 'selected',
+                        );
+                        setRotatingSelectedPdfs(false);
+                      }
+                    : undefined}
+                  rotatingSelectedPdfsCcw={rotatingSelectedPdfsCcw}
+                  onRotateSelectedPdfsCcw={multiSelectedTabIds.size > 0
+                    ? async () => {
+                        if (rotatingSelectedPdfsCcw) return;
+                        setRotatingSelectedPdfsCcw(true);
+                        await rotateManyPdfs(
+                          sessions.filter(s => multiSelectedTabIds.has(s.id)),
+                          -90, 'CCW', 'selected',
+                        );
+                        setRotatingSelectedPdfsCcw(false);
+                      }
+                    : undefined}
                   rotatingAllCcw={rotatingIdCcw === activeSession.id}
                   onRotateAllCcw={async () => {
                     if (rotatingIdCcw === activeSession.id) return;
@@ -1587,57 +1813,13 @@ export default function Index() {
                   rotatingAllPdfs={rotatingAllPdfs}
                   onRotateAllPdfs={async () => {
                     if (rotatingAllPdfs) return;
-                    const openTabSet = new Set(openTabs);
-                    const targets = sessions.filter(s => openTabSet.has(s.id));
-                    if (targets.length === 0) {
-                      toast('No PDFs open to rotate', { icon: 'ℹ️' });
-                      return;
-                    }
-
                     setRotatingAllPdfs(true);
-                    const toastId = toast.loading(`Rotating 1 / ${targets.length}…`);
-                    let succeeded = 0;
-                    let failed = 0;
-
-                    // Sequential — one PDF at a time so the backend isn't
-                    // hit with N concurrent page-render jobs. Gentler on
-                    // the Hostinger box; the perceived wait is the same
-                    // because parallelism would have queued anyway.
-                    for (let i = 0; i < targets.length; i++) {
-                      const sess = targets[i];
-                      toast.loading(`Rotating ${i + 1} / ${targets.length} — ${sess.filename}`, { id: toastId });
-                      const result = await rotateSessionPdf(sess.id, 90);
-                      if (!result) {
-                        failed++;
-                        continue;
-                      }
-
-                      const newFile = await fetchConvertedPdf(sess.id, sess.filename);
-                      setSessions(prev => prev.map(s => s.id === sess.id
-                        ? {
-                            ...s,
-                            file: newFile ?? s.file,
-                            total_pages: result.page_count ?? s.total_pages,
-                            highlights: {},
-                            extractedData: [],
-                            status: 'ready' as const,
-                            forceOcr: false,
-                            ocrProgress: null,
-                          }
-                        : s
-                      ));
-                      succeeded++;
-                    }
-
+                    const openTabSet = new Set(openTabs);
+                    await rotateManyPdfs(
+                      sessions.filter(s => openTabSet.has(s.id)),
+                      90, 'CW', 'open',
+                    );
                     setRotatingAllPdfs(false);
-                    toast.dismiss(toastId);
-                    if (failed === 0) {
-                      toast.success(`Rotated ${succeeded} PDF${succeeded !== 1 ? 's' : ''}`);
-                    } else if (succeeded === 0) {
-                      toast.error(`All ${failed} rotation${failed !== 1 ? 's' : ''} failed`);
-                    } else {
-                      toast(`Rotated ${succeeded} / ${targets.length} — ${failed} failed`, { icon: '⚠️' });
-                    }
                   }}
                   rotatingAll={rotatingId === activeSession.id}
                   onRotateAll={async () => {
@@ -1780,7 +1962,7 @@ export default function Index() {
         </div>
       </div>
 
-      <ProcessingModal open={modalOpen} step={modalStep} detail={modalDetail} fileIndex={modalFileIdx} totalFiles={modalTotalFiles} />
+      {/* ProcessingModal removed — uploads render as per-tab spinners now. */}
 
       {/* Doc-type confirmation modal — last chance to fix the type for
           a batch before processing starts. The picker mutates

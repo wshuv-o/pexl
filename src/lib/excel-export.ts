@@ -617,6 +617,82 @@ export function buildRawData(fileMap: Map<string, ExtractedRow[]>): {
   return { headers, rows };
 }
 
+// "Others" doc type — page-wise, row-wise, no template. Every row is one
+// PAGE from one file; columns are the union of all field names the user
+// applied across the batch (which are all session-scoped custom names).
+// Just borders and bold headers — no colors, no roll-up, no aggregation.
+function buildOthersPageSheet(fileMap: Map<string, ExtractedRow[]>): XLSX.WorkSheet {
+  // Collect every field name that shows up with a value, first-seen order
+  // preserved so column order tracks the sequence the user labelled things.
+  const fields: string[] = [];
+  const seen = new Set<string>();
+  for (const rows of fileMap.values()) {
+    for (const r of rows) {
+      if (!r.value || !String(r.value).trim()) continue;
+      if (!seen.has(r.field)) { seen.add(r.field); fields.push(r.field); }
+    }
+  }
+  const headers = ['#', 'File Name', 'Page', ...fields];
+
+  const rows: (string | number)[][] = [];
+  let idx = 1;
+  for (const [filename, rs] of fileMap.entries()) {
+    // Group this file's rows by page number.
+    const byPage = new Map<number, Record<string, string>>();
+    for (const r of rs) {
+      if (!r.value) continue;
+      const cur = byPage.get(r.page) ?? {};
+      // If the same field appears twice on the same page, keep the first
+      // value the user drew — matches buildRawData's first-wins policy.
+      if (!cur[r.field]) cur[r.field] = r.value;
+      byPage.set(r.page, cur);
+    }
+    // Emit one row per page that had at least one extracted value.
+    const sortedPages = Array.from(byPage.keys()).sort((a, b) => a - b);
+    for (const pg of sortedPages) {
+      const values = byPage.get(pg)!;
+      rows.push([
+        idx++,
+        filename.replace(/\.(pdf|docx?)$/i, ''),
+        pg,
+        ...fields.map(f => values[f] ?? ''),
+      ]);
+    }
+  }
+
+  const aoa = [headers, ...rows];
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+
+  const _b = { style: 'thin', color: { rgb: C.borderColor } };
+  const borderAll = { top: _b, bottom: _b, left: _b, right: _b };
+  const styles: { row: number; col: number; style: any }[] = [];
+  for (let r = 0; r < aoa.length; r++) {
+    for (let c = 0; c < aoa[r].length; c++) {
+      styles.push({
+        row: r, col: c,
+        style: {
+          font: { name: 'Arial', sz: 10, bold: r === 0 },
+          alignment: {
+            horizontal: c === 0 || c === 2 ? 'center' : 'left',
+            vertical: 'center',
+            wrapText: true,
+          },
+          border: borderAll,
+        },
+      });
+    }
+  }
+  applyStyles(ws, aoa, styles);
+
+  ws['!cols'] = [
+    { wch: 5 },   // #
+    { wch: 30 }, // File Name
+    { wch: 6 },  // Page
+    ...fields.map(() => ({ wch: 22 })),
+  ];
+  return ws;
+}
+
 function buildRawSheet(fileMap: Map<string, ExtractedRow[]>): XLSX.WorkSheet {
   const { headers, rows } = buildRawData(fileMap);
   const aoa = [headers, ...rows];
@@ -709,6 +785,11 @@ export async function exportToExcel(
     const ws = buildLeaseSheet(fileMap);
     XLSX.utils.book_append_sheet(wb, ws, 'Lease Contracts');
     XLSX.utils.book_append_sheet(wb, buildRawSheet(fileMap), 'Plain Data');
+  } else if (overallType === 'others') {
+    // Free-form doc type — one sheet, one row per page. No template,
+    // no aggregation, no colors. Field names are session-scoped custom
+    // labels that the user typed in during this browser session.
+    XLSX.utils.book_append_sheet(wb, buildOthersPageSheet(fileMap), 'Data');
   } else {
     // Per-file sheets (utility)
     const usedNames = new Set<string>();

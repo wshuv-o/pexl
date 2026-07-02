@@ -1144,8 +1144,10 @@ export async function downloadUtilityExcel(
     const rollupSheet = wb.getWorksheet(rollupName);
     if (rollupSheet) {
       const others = wb.worksheets.filter(s => s.name !== rollupName);
-      rollupSheet.orderNo = 1;
-      others.forEach((s, i) => { s.orderNo = i + 2; });
+      (rollupSheet as ExcelJS.Worksheet & { orderNo: number }).orderNo = 1;
+      others.forEach((s, i) => {
+        (s as ExcelJS.Worksheet & { orderNo: number }).orderNo = i + 2;
+      });
     }
   }
 

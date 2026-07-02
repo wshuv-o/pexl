@@ -2,8 +2,8 @@ import { useState, useRef, useEffect, useMemo } from 'react';
 import {
   ChevronLeft, ChevronRight, ZoomIn, ZoomOut,
   MousePointer2, Eraser, Loader2, TextCursor,
-  FileDown, FileInput, FileStack, Trash2, ListChecks, ChevronDown, Search,
-  SlidersHorizontal, Download, MousePointerClick, Wand2, Filter, Check, FileSpreadsheet, Table2, ScanLine, RotateCw, RotateCcw,
+  FileDown, FileInput, FileStack, Trash2, ListChecks, ChevronDown,
+  SlidersHorizontal, Download, MousePointerClick, Filter, Check, Table2, ScanLine, RotateCw, RotateCcw,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -44,8 +44,6 @@ interface ViewerToolbarProps {
   selectedIds?: Set<string>;
   onEraseAllPages: () => void;
   onApplyToPageRange: (pages: number[]) => void;
-  searchOpen: boolean;
-  onSearchToggle: () => void;
   // Rotation
   fineRotation: number;
   onFineRotationChange: (deg: number) => void;
@@ -54,14 +52,6 @@ interface ViewerToolbarProps {
   // OCR download
   onDownloadOcr: () => void;
   downloadingOcr: boolean;
-  // Excel table export
-  onDownloadExcel: () => Promise<void>;
-  onDownloadExcelSelected?: () => Promise<void>;
-  onDownloadExcelRange: (range: string) => Promise<void>;
-  // Auto-search: find field labels in the PDF and auto-create highlights
-  // over their adjacent values. Available for all doc types.
-  onAutoSearch: () => void;
-  autoSearching: boolean;
   // Force Re-OCR
   onForceOcr: () => void;
   forcingOcr: boolean;
@@ -80,6 +70,12 @@ interface ViewerToolbarProps {
   // Same but 90° CCW.
   onRotateAllPdfsCcw?: () => void;
   rotatingAllPdfsCcw?: boolean;
+  // Rotate only the ctrl/cmd-selected PDFs (badge shows count). Undefined
+  // handler hides the button; only shown when selectedPdfCount > 0.
+  onRotateSelectedPdfs?: () => void;
+  rotatingSelectedPdfs?: boolean;
+  onRotateSelectedPdfsCcw?: () => void;
+  rotatingSelectedPdfsCcw?: boolean;
 }
 
 const ZOOM_OPTIONS = [
@@ -105,17 +101,16 @@ export default function ViewerToolbar({
   allHighlights,
   selectedIds,
   onEraseAllPages, onApplyToPageRange,
-  searchOpen, onSearchToggle,
   fineRotation, onFineRotationChange,
   onStartPageChange,
   onDownloadOcr, downloadingOcr,
-  onDownloadExcel, onDownloadExcelSelected, onDownloadExcelRange,
-  onAutoSearch, autoSearching,
   onForceOcr, forcingOcr, forceOcrActive,
   onRotateAll, rotatingAll,
   onRotateAllCcw, rotatingAllCcw = false,
   onRotateAllPdfs, rotatingAllPdfs = false,
   onRotateAllPdfsCcw, rotatingAllPdfsCcw = false,
+  onRotateSelectedPdfs, rotatingSelectedPdfs = false,
+  onRotateSelectedPdfsCcw, rotatingSelectedPdfsCcw = false,
 }: ViewerToolbarProps) {
   // Relative page numbering when startPage > 1 (cover pages skipped)
   const hasOffset    = startPage > 1;
@@ -141,39 +136,13 @@ export default function ViewerToolbar({
     }
     setEditingStartPage(false);
   };
-  const [fineOpen, setFineOpen] = useState(false);
-  const fineBtnRef = useRef<HTMLButtonElement>(null);
-  const finePopRef = useRef<HTMLDivElement>(null);
-  const [finePos, setFinePos] = useState<{ top: number; left: number } | null>(null);
-
-  // Position the fine-rotation popover
-  useEffect(() => {
-    if (fineOpen && fineBtnRef.current) {
-      const r = fineBtnRef.current.getBoundingClientRect();
-      setFinePos({ top: r.bottom + 4, left: r.left - 40 });
-    }
-  }, [fineOpen]);
-
-  // Close on outside click
-  useEffect(() => {
-    if (!fineOpen) return;
-    const handler = (e: MouseEvent) => {
-      if (finePopRef.current && !finePopRef.current.contains(e.target as Node) &&
-          fineBtnRef.current && !fineBtnRef.current.contains(e.target as Node)) {
-        setFineOpen(false);
-      }
-    };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, [fineOpen]);
-
   const toolBtn = (t: ViewerTool, icon: React.ReactNode, label: string) => (
     <Tooltip>
       <TooltipTrigger asChild>
         <button
-          className={`p-1.5 rounded transition-all duration-200 ${
+          className={`relative p-1.5 rounded transition-all duration-200 ${
             tool === t
-              ? 'bg-primary/15 text-primary'
+              ? 'bg-primary/15 text-primary after:absolute after:left-1.5 after:right-1.5 after:-bottom-[3px] after:h-[2px] after:bg-primary after:rounded-full'
               : 'text-muted-foreground hover:text-foreground hover:bg-muted'
           }`}
           onClick={() => onToolChange(t)}
@@ -332,167 +301,24 @@ export default function ViewerToolbar({
       {/* Separator */}
       <div className="w-px h-5 bg-border shrink-0" />
 
-      {/* Rotation — fine straighten + bake-90° */}
-      <div className="flex items-center gap-0.5 shrink-0">
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              ref={fineBtnRef}
-              className={`p-1.5 rounded transition-all duration-200 ${
-                fineRotation !== 0 || fineOpen
-                  ? 'bg-primary/15 text-primary'
-                  : 'text-muted-foreground hover:text-foreground hover:bg-muted'
-              }`}
-              onClick={() => setFineOpen(o => !o)}
-              aria-label="Fine rotation — straighten skewed scans"
-            >
-              <SlidersHorizontal className="w-4 h-4" />
-            </button>
-          </TooltipTrigger>
-          <TooltipContent side="bottom" className="text-xs">
-            Straighten ({fineRotation !== 0 ? `${fineRotation > 0 ? '+' : ''}${fineRotation}°` : 'fine rotate'})
-          </TooltipContent>
-        </Tooltip>
-
-        {/* Rotate this PDF 90° CCW — bakes rotation in so OCR works */}
-        {onRotateAllCcw && (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                type="button"
-                className="p-1.5 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed text-muted-foreground hover:text-foreground hover:bg-muted"
-                onClick={onRotateAllCcw}
-                disabled={rotatingAllCcw}
-                aria-label="Rotate this PDF 90° counter-clockwise"
-              >
-                {rotatingAllCcw
-                  ? <Loader2 className="w-4 h-4 animate-spin" />
-                  : <RotateCcw className="w-4 h-4" />}
-              </button>
-            </TooltipTrigger>
-            <TooltipContent side="bottom" className="max-w-[220px] text-xs">
-              Rotate THIS PDF 90° CCW — bakes the rotation in so OCR and
-              table extraction work on misoriented scans
-            </TooltipContent>
-          </Tooltip>
-        )}
-
-        {/* Rotate this PDF 90° CW — bakes rotation in so OCR works */}
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              type="button"
-              className="p-1.5 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed text-muted-foreground hover:text-foreground hover:bg-muted"
-              onClick={onRotateAll}
-              disabled={rotatingAll}
-              aria-label="Rotate this PDF 90° clockwise"
-            >
-              {rotatingAll
-                ? <Loader2 className="w-4 h-4 animate-spin" />
-                : <RotateCw className="w-4 h-4" />}
-            </button>
-          </TooltipTrigger>
-          <TooltipContent side="bottom" className="max-w-[220px] text-xs">
-            Rotate THIS PDF 90° CW — bakes the rotation in so OCR and
-            table extraction work on misoriented scans
-          </TooltipContent>
-        </Tooltip>
-
-        {/* Rotate EVERY open PDF 90° CCW (sequential) */}
-        {onRotateAllPdfsCcw && (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                type="button"
-                className="relative p-1.5 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed text-muted-foreground hover:text-foreground hover:bg-muted"
-                onClick={onRotateAllPdfsCcw}
-                disabled={rotatingAllPdfsCcw}
-                aria-label="Rotate every uploaded PDF 90° counter-clockwise"
-              >
-                {rotatingAllPdfsCcw
-                  ? <Loader2 className="w-4 h-4 animate-spin" />
-                  : <RotateCcw className="w-4 h-4" />}
-                <span
-                  className="absolute -bottom-0.5 -right-0.5 text-[8px] leading-none font-bold px-0.5 rounded bg-primary text-primary-foreground"
-                  aria-hidden="true"
-                >
-                  ALL
-                </span>
-              </button>
-            </TooltipTrigger>
-            <TooltipContent side="bottom" className="max-w-[240px] text-xs">
-              Rotate EVERY uploaded PDF 90° CCW — applies the same rotation
-              to all open files one after another.
-            </TooltipContent>
-          </Tooltip>
-        )}
-
-        {/* Rotate EVERY open PDF 90° CW (sequential, gentle on the server) */}
-        {onRotateAllPdfs && (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                type="button"
-                className="relative p-1.5 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed text-muted-foreground hover:text-foreground hover:bg-muted"
-                onClick={onRotateAllPdfs}
-                disabled={rotatingAllPdfs}
-                aria-label="Rotate every uploaded PDF 90° clockwise"
-              >
-                {rotatingAllPdfs
-                  ? <Loader2 className="w-4 h-4 animate-spin" />
-                  : <RotateCw className="w-4 h-4" />}
-                <span
-                  className="absolute -bottom-0.5 -right-0.5 text-[8px] leading-none font-bold px-0.5 rounded bg-primary text-primary-foreground"
-                  aria-hidden="true"
-                >
-                  ALL
-                </span>
-              </button>
-            </TooltipTrigger>
-            <TooltipContent side="bottom" className="max-w-[240px] text-xs">
-              Rotate EVERY uploaded PDF 90° CW — applies the same rotation
-              to all open files one after another. Useful when a whole batch
-              of scans came in misoriented.
-            </TooltipContent>
-          </Tooltip>
-        )}
-
-        {fineOpen && finePos && (
-          <div
-            ref={finePopRef}
-            className="fixed bg-card border border-border rounded-lg shadow-xl p-3 z-[100] w-56"
-            style={{ top: finePos.top, left: finePos.left }}
-          >
-            <p className="text-xs font-semibold text-foreground mb-2">
-              Straighten skewed scan
-            </p>
-            <input
-              type="range"
-              min={-15}
-              max={15}
-              step={0.5}
-              value={fineRotation}
-              onChange={e => onFineRotationChange(parseFloat(e.target.value))}
-              className="w-full h-1.5 bg-muted rounded-lg appearance-none cursor-pointer accent-primary"
-            />
-            <div className="flex items-center justify-between mt-1.5">
-              <span className="text-[11px] text-muted-foreground">-15°</span>
-              <span className="text-xs font-mono font-medium text-foreground">
-                {fineRotation > 0 ? '+' : ''}{fineRotation}°
-              </span>
-              <span className="text-[11px] text-muted-foreground">+15°</span>
-            </div>
-            <Button
-              size="sm"
-              variant="outline"
-              className="w-full h-7 text-xs mt-2"
-              onClick={() => { onFineRotationChange(0); setFineOpen(false); }}
-            >
-              Reset to 0°
-            </Button>
-          </div>
-        )}
-      </div>
+      {/* Rotation — consolidated menu (was 6 icons + a slider popover) */}
+      <RotateMenu
+        onRotateThisCw={onRotateAll}
+        rotatingThisCw={rotatingAll}
+        onRotateThisCcw={onRotateAllCcw}
+        rotatingThisCcw={rotatingAllCcw}
+        onRotateAllCw={onRotateAllPdfs}
+        rotatingAllCw={rotatingAllPdfs}
+        onRotateAllCcw={onRotateAllPdfsCcw}
+        rotatingAllCcw={rotatingAllPdfsCcw}
+        onRotateSelectedCw={onRotateSelectedPdfs}
+        rotatingSelectedCw={rotatingSelectedPdfs}
+        onRotateSelectedCcw={onRotateSelectedPdfsCcw}
+        rotatingSelectedCcw={rotatingSelectedPdfsCcw}
+        selectedPdfCount={selectedPdfCount}
+        fineRotation={fineRotation}
+        onFineRotationChange={onFineRotationChange}
+      />
 
       {/* Separator */}
       <div className="w-px h-5 bg-border shrink-0" />
@@ -581,27 +407,6 @@ export default function ViewerToolbar({
         />
       </div>
 
-      {/* Separator */}
-      <div className="w-px h-5 bg-border shrink-0" />
-
-      {/* Search */}
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <button
-            className={`p-1.5 rounded transition-all duration-200 shrink-0 ${
-              searchOpen
-                ? 'bg-primary/15 text-primary'
-                : 'text-muted-foreground hover:text-foreground hover:bg-muted'
-            }`}
-            onClick={onSearchToggle}
-            aria-label="Search text (Ctrl+F)"
-          >
-            <Search className="w-4 h-4" />
-          </button>
-        </TooltipTrigger>
-        <TooltipContent side="bottom" className="text-xs">Search text (Ctrl+F)</TooltipContent>
-      </Tooltip>
-
       {/* Spacer */}
       <div className="flex-1" />
 
@@ -623,29 +428,6 @@ export default function ViewerToolbar({
         </span>
       )}
 
-      {/* Auto-search: find each field's label in the PDF and create
-          highlights over the adjacent value text. Users can then review /
-          tweak before extracting. */}
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <button
-            className="p-1.5 rounded text-primary/70 hover:text-primary hover:bg-primary/10
-                       disabled:opacity-30 disabled:cursor-not-allowed transition-colors shrink-0"
-            onClick={onAutoSearch}
-            disabled={autoSearching}
-            aria-label="Auto-search field values"
-          >
-            {autoSearching
-              ? <Loader2 className="w-4 h-4 animate-spin" />
-              : <Wand2 className="w-4 h-4" />}
-          </button>
-        </TooltipTrigger>
-        <TooltipContent side="bottom" className="max-w-[240px] text-xs">
-          Auto-search — find each field's label in the PDF and highlight the
-          adjacent value. You can tweak or delete anything wrong before extracting.
-        </TooltipContent>
-      </Tooltip>
-
       {/* Download OCR'd PDF */}
       <Tooltip>
         <TooltipTrigger asChild>
@@ -665,15 +447,6 @@ export default function ViewerToolbar({
           Download OCR'd PDF
         </TooltipContent>
       </Tooltip>
-
-      {/* Download tables as Excel */}
-      <ExcelDownloadPopover
-        totalPages={totalPages}
-        selectedPdfCount={selectedPdfCount}
-        onDownloadCurrent={onDownloadExcel}
-        onDownloadSelected={onDownloadExcelSelected}
-        onDownloadRange={onDownloadExcelRange}
-      />
 
       {/* Force Re-OCR */}
       <Tooltip>
@@ -738,126 +511,6 @@ function parsePageList(input: string, totalPages: number): number[] {
     }
   }
   return Array.from(pages).sort((a, b) => a - b);
-}
-
-// ─── Excel download popover ──────────────────────────────────────────────
-function ExcelDownloadPopover({
-  totalPages,
-  selectedPdfCount = 0,
-  onDownloadCurrent,
-  onDownloadSelected,
-  onDownloadRange,
-}: {
-  totalPages: number;
-  selectedPdfCount?: number;
-  onDownloadCurrent: () => Promise<void>;
-  onDownloadSelected?: () => Promise<void>;
-  onDownloadRange: (range: string) => Promise<void>;
-}) {
-  const [open, setOpen] = useState(false);
-  const [busy, setBusy] = useState<'current' | 'selected' | 'range' | null>(null);
-  const [rangeInput, setRangeInput] = useState('');
-  const [rangeError, setRangeError] = useState('');
-
-  const run = async (op: 'current' | 'selected' | 'range', fn: () => Promise<void>) => {
-    setBusy(op);
-    try { await fn(); } catch { /* toasts handled by caller */ }
-    setBusy(null);
-  };
-
-  const handleRange = () => {
-    const parsed = parsePageList(rangeInput, totalPages);
-    if (parsed.length === 0) { setRangeError('No valid pages — try "1-5, 8"'); return; }
-    setRangeError('');
-    run('range', () => onDownloadRange(rangeInput));
-  };
-
-  const rowCls = (disabled: boolean) =>
-    `flex items-center gap-2 w-full px-2 py-1.5 rounded text-xs text-left transition-colors
-     ${disabled ? 'opacity-40 cursor-not-allowed' : 'hover:bg-muted cursor-pointer'}`;
-
-  return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>
-        <button
-          className="p-1.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted
-                     disabled:opacity-30 disabled:cursor-not-allowed transition-colors shrink-0"
-          aria-label="Export tables as Excel"
-        >
-          {busy !== null
-            ? <Loader2 className="w-4 h-4 animate-spin" />
-            : <FileSpreadsheet className="w-4 h-4" />}
-        </button>
-      </PopoverTrigger>
-
-      <PopoverContent side="bottom" align="end" className="w-60 p-2">
-        <p className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wide px-2 pb-1">
-          Export as Excel
-        </p>
-
-        {/* This PDF */}
-        <button
-          className={rowCls(busy !== null)}
-          disabled={busy !== null}
-          onClick={() => { run('current', onDownloadCurrent); setOpen(false); }}
-        >
-          {busy === 'current'
-            ? <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
-            : <FileSpreadsheet className="w-3.5 h-3.5 shrink-0" />}
-          This PDF
-        </button>
-
-        {/* Selected PDFs */}
-        <button
-          className={rowCls(busy !== null || !onDownloadSelected || selectedPdfCount === 0)}
-          disabled={busy !== null || !onDownloadSelected || selectedPdfCount === 0}
-          onClick={() => { if (onDownloadSelected) { run('selected', onDownloadSelected); setOpen(false); } }}
-        >
-          {busy === 'selected'
-            ? <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
-            : <FileSpreadsheet className="w-3.5 h-3.5 shrink-0" />}
-          <span>
-            Selected PDFs
-            {selectedPdfCount > 0 && (
-              <span className="ml-1 px-1 py-0.5 rounded bg-primary/15 text-primary text-[10px] font-semibold">
-                {selectedPdfCount}
-              </span>
-            )}
-          </span>
-        </button>
-
-        {/* Page range */}
-        <div className="border-t border-border mt-1.5 pt-1.5 px-1">
-          <p className="text-[11px] text-muted-foreground mb-1">Page range (this PDF)</p>
-          <div className="flex gap-1">
-            <Input
-              value={rangeInput}
-              onChange={e => { setRangeInput(e.target.value); setRangeError(''); }}
-              onKeyDown={e => e.key === 'Enter' && handleRange()}
-              placeholder={`e.g. 1-${Math.min(totalPages, 5)}, 8`}
-              className="h-7 text-xs flex-1 min-w-0"
-              disabled={busy !== null}
-            />
-            <button
-              onClick={handleRange}
-              disabled={busy !== null || !rangeInput.trim()}
-              className="px-2 h-7 rounded bg-primary text-primary-foreground text-xs font-medium
-                         hover:opacity-90 disabled:opacity-40 transition-opacity shrink-0"
-            >
-              {busy === 'range' ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Export'}
-            </button>
-          </div>
-          {rangeError && <p className="text-[11px] text-destructive mt-0.5">{rangeError}</p>}
-          {rangeInput.trim() && !rangeError && (() => {
-            const pages = parsePageList(rangeInput, totalPages);
-            return pages.length > 0
-              ? <p className="text-[11px] text-muted-foreground mt-0.5">{pages.length} page{pages.length !== 1 ? 's' : ''}: {pages.slice(0, 6).join(', ')}{pages.length > 6 ? '…' : ''}</p>
-              : <p className="text-[11px] text-destructive mt-0.5">No valid pages</p>;
-          })()}
-        </div>
-      </PopoverContent>
-    </Popover>
-  );
 }
 
 // ─── Selected fields → Apply popover ────────────────────────────────────
@@ -1036,6 +689,161 @@ function SelectedApplyPopover({
 
 // silence "unused" hint for the icon import-set if Filter/Check aren't pulled in
 void Filter;
+
+// ─── Rotate menu ─────────────────────────────────────────────────────────
+// One button + popover that consolidates six rotation actions (this / all /
+// selected × CW / CCW) plus the fine-rotation straighten slider. The old
+// row of six icons with tiny "ALL" / count badges was cryptic; grouping by
+// scope with plain-English labels is much easier to scan.
+function RotateMenu({
+  onRotateThisCw, rotatingThisCw,
+  onRotateThisCcw, rotatingThisCcw,
+  onRotateAllCw, rotatingAllCw,
+  onRotateAllCcw, rotatingAllCcw,
+  onRotateSelectedCw, rotatingSelectedCw,
+  onRotateSelectedCcw, rotatingSelectedCcw,
+  selectedPdfCount,
+  fineRotation, onFineRotationChange,
+}: {
+  onRotateThisCw: () => void;
+  rotatingThisCw: boolean;
+  onRotateThisCcw?: () => void;
+  rotatingThisCcw?: boolean;
+  onRotateAllCw?: () => void;
+  rotatingAllCw?: boolean;
+  onRotateAllCcw?: () => void;
+  rotatingAllCcw?: boolean;
+  onRotateSelectedCw?: () => void;
+  rotatingSelectedCw?: boolean;
+  onRotateSelectedCcw?: () => void;
+  rotatingSelectedCcw?: boolean;
+  selectedPdfCount: number;
+  fineRotation: number;
+  onFineRotationChange: (deg: number) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const active = fineRotation !== 0 || open;
+  const anyBusy = !!(rotatingThisCw || rotatingThisCcw || rotatingAllCw || rotatingAllCcw || rotatingSelectedCw || rotatingSelectedCcw);
+
+  const Row = ({
+    icon, label, onClick, busy, disabled,
+  }: {
+    icon: React.ReactNode; label: string; onClick?: () => void; busy?: boolean; disabled?: boolean;
+  }) => (
+    <button
+      className="flex items-center gap-2 w-full px-2 py-1.5 rounded text-xs text-left transition-colors
+                 hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed"
+      disabled={disabled || busy || !onClick}
+      onClick={() => { onClick?.(); }}
+    >
+      {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" /> : <span className="shrink-0 text-muted-foreground">{icon}</span>}
+      <span className="flex-1">{label}</span>
+    </button>
+  );
+
+  const SectionLabel = ({ text }: { text: string }) => (
+    <p className="text-[10px] uppercase font-semibold text-muted-foreground/80 tracking-wide px-2 pt-2 pb-0.5">
+      {text}
+    </p>
+  );
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <PopoverTrigger asChild>
+            <button
+              type="button"
+              className={`flex items-center gap-0.5 p-1.5 rounded transition-colors shrink-0
+                ${active
+                  ? 'bg-primary/15 text-primary'
+                  : 'text-muted-foreground hover:text-foreground hover:bg-muted'}`}
+              aria-label="Rotate…"
+            >
+              {anyBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <RotateCw className="w-4 h-4" />}
+              <ChevronDown className="w-2.5 h-2.5" />
+            </button>
+          </PopoverTrigger>
+        </TooltipTrigger>
+        <TooltipContent side="bottom" className="text-xs">
+          Rotate {fineRotation !== 0 && `(${fineRotation > 0 ? '+' : ''}${fineRotation}° straighten)`}
+        </TooltipContent>
+      </Tooltip>
+
+      <PopoverContent align="start" className="w-64 p-1.5">
+        <SectionLabel text="This PDF" />
+        {onRotateThisCcw && (
+          <Row icon={<RotateCcw className="w-3.5 h-3.5" />}
+               label="Rotate 90° left" onClick={onRotateThisCcw} busy={rotatingThisCcw} />
+        )}
+        <Row icon={<RotateCw className="w-3.5 h-3.5" />}
+             label="Rotate 90° right" onClick={onRotateThisCw} busy={rotatingThisCw} />
+
+        {(onRotateAllCw || onRotateAllCcw) && (
+          <>
+            <SectionLabel text="All open PDFs" />
+            {onRotateAllCcw && (
+              <Row icon={<RotateCcw className="w-3.5 h-3.5" />}
+                   label="Rotate all 90° left" onClick={onRotateAllCcw} busy={rotatingAllCcw} />
+            )}
+            {onRotateAllCw && (
+              <Row icon={<RotateCw className="w-3.5 h-3.5" />}
+                   label="Rotate all 90° right" onClick={onRotateAllCw} busy={rotatingAllCw} />
+            )}
+          </>
+        )}
+
+        {(onRotateSelectedCw || onRotateSelectedCcw) && selectedPdfCount > 0 && (
+          <>
+            <SectionLabel text={`Selected (${selectedPdfCount})`} />
+            {onRotateSelectedCcw && (
+              <Row icon={<RotateCcw className="w-3.5 h-3.5" />}
+                   label={`Rotate ${selectedPdfCount} 90° left`}
+                   onClick={onRotateSelectedCcw} busy={rotatingSelectedCcw} />
+            )}
+            {onRotateSelectedCw && (
+              <Row icon={<RotateCw className="w-3.5 h-3.5" />}
+                   label={`Rotate ${selectedPdfCount} 90° right`}
+                   onClick={onRotateSelectedCw} busy={rotatingSelectedCw} />
+            )}
+          </>
+        )}
+
+        {/* Straighten — for skewed scans that a 90° rotate can't fix. */}
+        <div className="border-t border-border mt-1 pt-1.5 px-2 pb-1">
+          <p className="text-[11px] font-semibold text-foreground mb-1.5 flex items-center gap-1.5">
+            <SlidersHorizontal className="w-3 h-3 text-muted-foreground" />
+            Straighten skewed scan
+          </p>
+          <input
+            type="range"
+            min={-15}
+            max={15}
+            step={0.5}
+            value={fineRotation}
+            onChange={e => onFineRotationChange(parseFloat(e.target.value))}
+            className="w-full h-1.5 bg-muted rounded-lg appearance-none cursor-pointer accent-primary"
+          />
+          <div className="flex items-center justify-between mt-1">
+            <span className="text-[10px] text-muted-foreground">−15°</span>
+            <span className="text-[11px] font-mono font-medium text-foreground">
+              {fineRotation > 0 ? '+' : ''}{fineRotation}°
+            </span>
+            <span className="text-[10px] text-muted-foreground">+15°</span>
+          </div>
+          {fineRotation !== 0 && (
+            <button
+              className="w-full text-[10px] text-primary hover:underline mt-1"
+              onClick={() => onFineRotationChange(0)}
+            >
+              Reset to 0°
+            </button>
+          )}
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
 
 function PageRangeButton({
   disabled,

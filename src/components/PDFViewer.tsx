@@ -6,7 +6,7 @@ import ViewerToolbar from './ViewerToolbar';
 import HighlightOverlay from './HighlightOverlay';
 import FieldLabelPicker from './FieldLabelPicker';
 import HighlightLegend from './HighlightLegend';
-import { downloadOcrPdf, downloadExcel, fetchTableRegions, extractRegions, searchBackend, extractTableRegion, downloadTableRegionExcel, type SearchMode } from '@/lib/api';
+import { downloadOcrPdf, fetchTableRegions, extractRegions, extractTableRegion, downloadTableRegionExcel } from '@/lib/api';
 import TableSanitizeDialog from './TableSanitizeDialog';
 import { findAllTextPositionsInPdfPage, detectTableRegionsInPdfPage, getTextAtRect } from '@/lib/pdf-extract';
 import { useAuth } from '@/contexts/AuthContext';
@@ -16,6 +16,25 @@ pdfjs.GlobalWorkerOptions.workerSrc = new URL(
   'pdfjs-dist/build/pdf.worker.min.mjs',
   import.meta.url,
 ).toString();
+
+// Module-level blob-URL cache. Alt+PageDown / Alt+PageUp cycles the parent
+// key across sessions, so PDFViewer fully unmounts and remounts every tab
+// switch. Without this cache we'd call URL.createObjectURL(file) → revoke
+// on every switch, causing pdf.js to redecode from a fresh blob URL each
+// time — visible as flicker. Keeping the URL keyed by File identity means
+// switching back to a previously-viewed PDF gets an instant hit and pdf.js
+// can reuse its already-loaded document. File blobs live in `sessions`
+// state (in memory) so URLs referring to them don't pin anything the app
+// wasn't already holding.
+const blobUrlCache = new WeakMap<File, string>();
+function getStableBlobUrl(file: File): string {
+  let url = blobUrlCache.get(file);
+  if (!url) {
+    url = URL.createObjectURL(file);
+    blobUrlCache.set(file, url);
+  }
+  return url;
+}
 
 const clamp01 = (v: number): number => Math.max(0, Math.min(1, v));
 
@@ -49,8 +68,6 @@ interface PDFViewerProps {
   // only the selected PDFs. The caller (Index) iterates sessions.
   onRemoveFieldFromAllPdfs?: (field: string) => void;
   onRemoveFieldFromSelectedPdfs?: (field: string) => void;
-  // Excel export for the selected (ctrl/cmd-clicked) PDFs — handled by Index.
-  onDownloadExcelSelected?: () => Promise<void>;
   // Force Re-OCR
   onForceOcr?: () => void;
   forcingOcr?: boolean;
@@ -66,6 +83,11 @@ interface PDFViewerProps {
   // Same but 90° CCW.
   onRotateAllPdfsCcw?: () => void;
   rotatingAllPdfsCcw?: boolean;
+  // Rotate only the ctrl/cmd-selected PDFs (mirrors the Rotate-all pair).
+  onRotateSelectedPdfs?: () => void;
+  rotatingSelectedPdfs?: boolean;
+  onRotateSelectedPdfsCcw?: () => void;
+  rotatingSelectedPdfsCcw?: boolean;
 
   onAutoApplyAllPdfs?: (
     pairs: ReadonlyArray<{
@@ -87,6 +109,18 @@ interface PDFViewerProps {
     }>,
     tableOnly: boolean,
   ) => void | Promise<void>;
+
+  // Copy the drawn table-select region to every other open PDF (or only the
+  // multi-selected ones) and pull a table from the same coords on each. The
+  // parent aggregates the results into one workbook and downloads it.
+  onExtractTableFromAllPdfs?: (
+    region: { page: number; x: number; y: number; width: number; height: number },
+    sourceRows: string[][],
+  ) => Promise<void>;
+  onExtractTableFromSelectedPdfs?: (
+    region: { page: number; x: number; y: number; width: number; height: number },
+    sourceRows: string[][],
+  ) => Promise<void>;
 }
 
 export default function PDFViewer({
@@ -108,7 +142,6 @@ export default function PDFViewer({
   onAutoApplyAllPdfs,
   onRemoveFieldFromAllPdfs,
   onRemoveFieldFromSelectedPdfs,
-  onDownloadExcelSelected,
   onForceOcr,
   forcingOcr = false,
   onRotateAll,
@@ -119,6 +152,12 @@ export default function PDFViewer({
   rotatingAllPdfs = false,
   onRotateAllPdfsCcw,
   rotatingAllPdfsCcw = false,
+  onRotateSelectedPdfs,
+  rotatingSelectedPdfs = false,
+  onRotateSelectedPdfsCcw,
+  rotatingSelectedPdfsCcw = false,
+  onExtractTableFromAllPdfs,
+  onExtractTableFromSelectedPdfs,
 }: PDFViewerProps) {
   // Usage trackers for OCR PDF download + table extraction. Errors are
   // swallowed so a failed telemetry POST never blocks a user action.
@@ -153,13 +192,8 @@ export default function PDFViewer({
 
   const [showFirstHint, setShowFirstHint] = useState(true);
   const [numPages, setNumPages]         = useState<number | null>(null);
-  const [fileUrl, setFileUrl]           = useState<string | null>(null);
+  // NOTE: fileUrl declared below via getStableBlobUrl-backed hook.
   const [pdfPageWidth, setPdfPageWidth] = useState<number | null>(null);
-  const [searchOpen, setSearchOpen]     = useState(false);
-  const [searchQuery, setSearchQuery]   = useState('');
-  const [searchResults, setSearchResults] = useState<Record<number, { x: number; y: number; width: number; height: number }[]>>({});
-  // -1 means "no match focused yet"; Enter in the search box advances this.
-  const [activeMatchIdx, setActiveMatchIdx] = useState<number>(-1);
   const [pdfLoaded, setPdfLoaded]       = useState(false);
   const [downloadingOcr, setDownloadingOcr] = useState(false);
 
@@ -181,6 +215,10 @@ export default function PDFViewer({
   };
   const [tablePreview, setTablePreview] = useState<TablePreview | null>(null);
   const [tableSelectLoading, setTableSelectLoading] = useState(false);
+  // True while we're batch-extracting the current region across the other
+  // open PDFs — disables Apply-to-all/selected so the user can't fire
+  // multiple bulk extracts on top of each other.
+  const [applyingTableToAll, setApplyingTableToAll] = useState(false);
   // Position + minimize state for the floating preview panel. Initialised
   // to a sensible centre on first open via the useEffect below.
   const [tablePanelPos, setTablePanelPos] = useState<{ x: number; y: number } | null>(null);
@@ -410,50 +448,8 @@ export default function PDFViewer({
       let pagesScanned = 0;
       const lastPage = numPages ?? session.total_pages;
 
-      // Pre-cache backend search results per (keyText) so we don't refetch
-      // for every page. Each entry is a Map<page, bbox-list> in 0-1 coords.
-      const backendByKey = new Map<string, Map<number, { x: number; y: number; width: number; height: number }[]>>();
-      const fetchBackendKey = async (q: string) => {
-        if (backendByKey.has(q)) return backendByKey.get(q)!;
-        const map = new Map<number, { x: number; y: number; width: number; height: number }[]>();
-        for (const mode of ['exact', 'partial', 'fuzzy'] as const) {
-          // Use sessionIdRef so we pick up any id renewed during resolveAutoPairs.
-          // Cap wait at 20 s — a freshly-renewed session won't have its OCR index
-          // ready yet; the source-page fallback handles it and the index is cached
-          // for the next run.
-          const ctrl = new AbortController();
-          const timer = setTimeout(() => ctrl.abort(), 5_000);
-          let r: Awaited<ReturnType<typeof searchBackend>>;
-          try {
-            r = await searchBackend(sessionIdRef.current, q, mode, { signal: ctrl.signal });
-          } catch { r = null; } finally { clearTimeout(timer); }
-          if (!r || r.results.length === 0) continue;
-          for (const m of r.results) {
-            const dims = r.page_sizes[String(m.page)];
-            if (!dims) continue;
-            const arr = map.get(m.page) ?? [];
-            for (const [x1, y1, x2, y2] of m.boxes) {
-              arr.push({
-                x: x1 / dims.width,
-                y: y1 / dims.height,
-                width:  (x2 - x1) / dims.width,
-                height: (y2 - y1) / dims.height,
-              });
-            }
-            map.set(m.page, arr);
-          }
-          if (map.size > 0) break;
-        }
-        backendByKey.set(q, map);
-        return map;
-      };
-
       // Skip every page that was a source for any pair, not just the first.
       const sourcePages = new Set(resolved.map(r => r.sourcePage));
-
-      // Prefetch all backend keys in parallel before the page loop so we don't
-      // block each page on a sequential network round-trip.
-      await Promise.all(resolved.filter(r => !r.useAbsoluteCoords).map(r => fetchBackendKey(r.keyText)));
 
       // Per-page table region cache — detect once per page, reuse across pairs.
       // When tableOnly is on, pre-seed from camelot backend (more accurate than
@@ -522,16 +518,13 @@ export default function PDFViewer({
                 return cx >= Math.max(0, r.sourceKeyX - 0.35) && cx <= Math.min(1, r.sourceKeyX + 0.35)
                     && cy >= Math.max(0, r.sourceKeyY - 0.25) && cy <= Math.min(1, r.sourceKeyY + 0.25);
               };
+              // Locate the key on this page via pdfjs (text layer). Constrain
+              // to the source region so we don't grab a same-named label
+              // elsewhere on the page.
               let match: { x: number; y: number; width: number; height: number } | null = null;
-              const map = await fetchBackendKey(r.keyText);
-              const backendAll = map.get(pg) ?? [];
-              const backendRegion = backendAll.filter(inSearchRegion);
-              match = await preferInTable(backendRegion.length > 0 ? backendRegion : backendAll, pg);
-              if (!match) {
-                const allCands = await findAllTextPositionsInPdfPage(file, pg, r.keyText);
-                const regionCands = allCands.filter(inSearchRegion);
-                match = await preferInTable(regionCands.length > 0 ? regionCands : allCands, pg);
-              }
+              const allCands = await findAllTextPositionsInPdfPage(file, pg, r.keyText);
+              const regionCands = allCands.filter(inSearchRegion);
+              match = await preferInTable(regionCands.length > 0 ? regionCands : allCands, pg);
               // No key found anywhere — place value at the source coordinates on every
               // page so layout drift is handled statically rather than skipping.
               if (!match) {
@@ -612,27 +605,6 @@ export default function PDFViewer({
     }
   }, [autoPairs, tableOnly, resolveAutoPairs, onAutoApplyAllPdfs]);
 
-  // Magic-wand button — entering setup mode. While setup is active a second
-  // click is a no-op; use the Cancel button in the banner to exit.
-  const handleAutoSearch = useCallback(() => {
-    if (!session.file) { toast.error('PDF file not loaded'); return; }
-    if (autoSetupActive) {
-      // Already active — toggle the bar's visibility without losing pairs.
-      setAutoBarVisible(v => !v);
-      return;
-    }
-    // Fresh start.
-    setAutoSetupActive(true);
-    setAutoBarVisible(true);
-    setAutoPairs([]);
-    setAutoNextStep('value');
-    setTool('highlight');
-    toast(
-      'Auto-extract setup: draw a VALUE box, label it, then draw its KEY box.',
-      { icon: '✨', duration: 4000 },
-    );
-  }, [autoSetupActive, session.file]);
-
   const handleDownloadOcr = useCallback(async () => {
     setDownloadingOcr(true);
     try {
@@ -660,18 +632,6 @@ export default function PDFViewer({
     }
     setDownloadingOcr(false);
   }, [session.id, session.filename, session.file, session.uploadedAt, onSessionRenewed, onPdfReplaced, trackOcrDownload]);
-
-  const handleDownloadExcel = useCallback(async (pages?: string): Promise<void> => {
-    try {
-      await downloadExcel(session.id, session.filename, pages);
-      toast.success('Excel tables downloaded');
-      // "Convert to Table" flow → counts as a table extract.
-      trackTableExtract(session.uploadedAt, Date.now()).catch(() => {});
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Excel export failed';
-      toast.error(msg);
-    }
-  }, [session.id, session.filename, session.uploadedAt, trackTableExtract]);
 
   const pageRefs  = useRef<Record<number, HTMLDivElement | null>>({});
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -706,12 +666,16 @@ export default function PDFViewer({
     [session.pages, currentPage],
   );
 
-  // Stable object URL from the File
+  // Stable object URL — pulled from the module-level cache so a tab switch
+  // (which unmounts + remounts this component) doesn't churn URLs and
+  // force pdf.js to redecode from scratch. Setting synchronously on the
+  // first render avoids a paint where fileUrl is still null.
+  const [fileUrl, setFileUrlDirect] = useState<string | null>(
+    () => (session.file ? getStableBlobUrl(session.file) : null),
+  );
   useEffect(() => {
-    if (!session.file) return;
-    const url = URL.createObjectURL(session.file);
-    setFileUrl(url);
-    return () => URL.revokeObjectURL(url);
+    if (!session.file) { setFileUrlDirect(null); return; }
+    setFileUrlDirect(getStableBlobUrl(session.file));
   }, [session.file]);
 
   // Compute fit-width zoom
@@ -866,7 +830,14 @@ export default function PDFViewer({
       if (r.width > 0.005 && r.height > 0.005) {
         setTableSelectLoading(true);
         try {
-          const result = await extractTableRegion(session.id, drawingPage, r.x, r.y, r.width, r.height);
+          const result = await extractTableRegion(
+            session.id, drawingPage, r.x, r.y, r.width, r.height,
+            false,
+            {
+              file: session.file,
+              onSessionRenewed: (oldId, newId) => onSessionRenewed?.(oldId, newId),
+            },
+          );
           setTablePreview({ ...result, page: drawingPage, region: r });
           // Open the panel near top-right by default. The user can drag
           // anywhere afterwards; the position persists across re-renders
@@ -1245,47 +1216,8 @@ export default function PDFViewer({
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }, [totalPages]);
 
-  // Flat, ordered list of every search hit (by page, then by occurrence)
-  // so Enter/Shift+Enter in the search box can cycle through them linearly.
-  const flatMatches = useMemo(() => {
-    const out: { page: number; boxIndex: number; box: { x: number; y: number; width: number; height: number } }[] = [];
-    const pages = Object.keys(searchResults).map(Number).sort((a, b) => a - b);
-    for (const p of pages) {
-      const hits = searchResults[p];
-      for (let i = 0; i < hits.length; i++) out.push({ page: p, boxIndex: i, box: hits[i] });
-    }
-    return out;
-  }, [searchResults]);
-
-  useEffect(() => { setActiveMatchIdx(-1); }, [searchResults]);
-
-  // Scroll so the i-th match is visible, ~1/3 of the way down the viewport.
-  const gotoMatch = useCallback((idx: number) => {
-    if (flatMatches.length === 0) return;
-    const wrapped = ((idx % flatMatches.length) + flatMatches.length) % flatMatches.length;
-    setActiveMatchIdx(wrapped);
-    const target = flatMatches[wrapped];
-    setCurrentPage(target.page);
-
-    const pageEl = pageRefs.current[target.page];
-    const container = scrollRef.current;
-    if (!pageEl || !container) return;
-
-    // pageEl.offsetTop is relative to its offsetParent — walk up until we
-    // find one inside the scroll container for a correct absolute offset.
-    let offsetTop = 0;
-    let node: HTMLElement | null = pageEl;
-    while (node && node !== container) {
-      offsetTop += node.offsetTop;
-      node = node.offsetParent as HTMLElement | null;
-    }
-    const matchY = target.box.y * pageEl.clientHeight;
-    const targetScroll = offsetTop + matchY - container.clientHeight / 3;
-    container.scrollTo({ top: Math.max(0, targetScroll), behavior: 'smooth' });
-  }, [flatMatches]);
-
   // PageUp / PageDown → previous / next PDF page. Skipped if focus is in
-  // an input field so search-bar / label-picker typing isn't broken.
+  // an input field so label-picker typing isn't broken.
   // Ctrl+PageUp / Ctrl+PageDown is reserved for switching PDF *tabs*
   // (handled at the Index level), so we explicitly opt out when Ctrl is
   // held — otherwise the page scroll fires + preventDefault swallows the
@@ -1352,119 +1284,7 @@ export default function PDFViewer({
   }, []);
 
 
-  const handleSearch = useCallback(async (query: string) => {
-    setSearchQuery(query);
-
-    const normalize = (s: string) => s
-      .toLowerCase()
-      .normalize('NFKD')
-      .replace(/[\u0300-\u036f]/g, '')  // strip combining diacritics
-      .replace(/\s+/g, ' ');             // collapse whitespace runs
-
-    const q = normalize(query).trim();
-    if (!q || !pdfDocRef.current) {
-      setSearchResults({});
-      return;
-    }
-
-    try {
-      const modes: SearchMode[] = ['exact', 'partial', 'fuzzy'];
-      for (const mode of modes) {
-        const resp = await searchBackend(session.id, query, mode);
-        if (!resp || resp.results.length === 0) continue;
-
-        const byPage: Record<number, { x: number; y: number; width: number; height: number }[]> = {};
-        for (const m of resp.results) {
-          const dims = resp.page_sizes[String(m.page)] ?? resp.page_sizes[m.page as unknown as string];
-          if (!dims || !dims.width || !dims.height) continue;
-          const arr = byPage[m.page] ?? (byPage[m.page] = []);
-          for (const [x1, y1, x2, y2] of m.boxes) {
-            arr.push({
-              x:      x1 / dims.width,
-              y:      y1 / dims.height,
-              width:  (x2 - x1) / dims.width,
-              height: (y2 - y1) / dims.height,
-            });
-          }
-        }
-        if (Object.keys(byPage).length > 0) {
-          setSearchResults(byPage);
-          return;
-        }
-      }
-    } catch { /* fall through to pdfjs */ }
-
-    try {
-      const allHits: Record<number, { x: number; y: number; width: number; height: number }[]> = {};
-      for (let p = 1; p <= totalPages; p++) {
-        const page = await pdfDocRef.current.getPage(p);
-        const content = await page.getTextContent();
-        const vp = page.getViewport({ scale: 1 });
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const items = content.items as any[];
-
-        type Slot = {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          item: any;
-          itemW: number;     // original width in PDF units
-          start: number;     // offset in pageText
-          end: number;       // exclusive
-          normLen: number;   // end - start, cached
-        };
-        const slots: Slot[] = [];
-        let pageText = '';
-        for (const item of items) {
-          if (!item.str || !item.transform) continue;
-          const nText = normalize(item.str);
-          if (!nText) continue;
-
-          if (pageText.length > 0 && !pageText.endsWith(' ')) pageText += ' ';
-
-          const start = pageText.length;
-          pageText += nText;
-          const end = pageText.length;
-          const itemW = item.width || item.str.length * 6;
-          slots.push({ item, itemW, start, end, normLen: end - start });
-        }
-
-        const hits: { x: number; y: number; width: number; height: number }[] = [];
-        let searchFrom = 0;
-        while (searchFrom <= pageText.length) {
-          const matchIdx = pageText.indexOf(q, searchFrom);
-          if (matchIdx === -1) break;
-          const matchEnd = matchIdx + q.length;
-
-          for (const slot of slots) {
-            const overlapStart = Math.max(slot.start, matchIdx);
-            const overlapEnd   = Math.min(slot.end,   matchEnd);
-            if (overlapStart >= overlapEnd) continue;
-
-            const pStart = (overlapStart - slot.start) / slot.normLen;
-            const pEnd   = (overlapEnd   - slot.start) / slot.normLen;
-
-            const item   = slot.item;
-            const itemX  = item.transform[4];
-            const itemH  = item.height || Math.abs(item.transform[3]) || 12;
-            const itemTop = vp.height - item.transform[5] - itemH;
-
-            hits.push({
-              x:      (itemX + pStart * slot.itemW) / vp.width,
-              y:      itemTop / vp.height,
-              width:  Math.max(1, (pEnd - pStart) * slot.itemW) / vp.width,
-              height: itemH / vp.height,
-            });
-          }
-
-          searchFrom = matchEnd; // non-overlapping, Chrome-Ctrl+F-style
-        }
-
-        if (hits.length > 0) allHits[p] = hits;
-      }
-      setSearchResults(allHits);
-    } catch { setSearchResults({}); }
-  }, [totalPages, session.id]);
-
-  // Close picker / search on Escape, toggle search with Ctrl+F, delete selected highlights
+  // Close picker on Escape, delete selected highlights
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       // Ignore if user is typing in an input
@@ -1472,8 +1292,7 @@ export default function PDFViewer({
       const isEditing = target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable);
 
       if (e.key === 'Escape') {
-        if (searchOpen) { setSearchOpen(false); setSearchQuery(''); setSearchResults({}); }
-        else if (selectedIds.size > 0) setSelectedIds(new Set());
+        if (selectedIds.size > 0) setSelectedIds(new Set());
         else setPickerPos(null);
       }
       if ((e.key === 'Delete' || e.key === 'Backspace') && !isEditing && selectedIds.size > 0) {
@@ -1486,10 +1305,6 @@ export default function PDFViewer({
         }
         onHighlightsChange(session.id, nextHighlights);
         setSelectedIds(new Set());
-      }
-      if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
-        e.preventDefault();
-        setSearchOpen(o => !o);
       }
       // Ctrl+A → select all highlights on current page
       if ((e.ctrlKey || e.metaKey) && e.key === 'a' && !isEditing) {
@@ -1548,7 +1363,7 @@ export default function PDFViewer({
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [searchOpen, selectedIds, session.highlights, session.id, onHighlightsChange, currentPage, handleMoveSelectedToPage]);
+  }, [selectedIds, session.highlights, session.id, onHighlightsChange, currentPage, handleMoveSelectedToPage]);
 
   if (!fileUrl) {
     return (
@@ -1561,7 +1376,10 @@ export default function PDFViewer({
   const startPg = session.startPage || 1;
 
   return (
-    <div className="flex flex-col h-full">
+    // animate-in / fade-in-0 softens the tab-switch remount. Combined with
+    // the stable blob-URL cache the PDF pops in without the previous "flash
+    // of blank viewer" between Alt+PageDown presses.
+    <div className="flex flex-col h-full animate-in fade-in-0 duration-150">
       <ViewerToolbar
         currentPage={currentPage}
         totalPages={totalPages}
@@ -1583,21 +1401,11 @@ export default function PDFViewer({
         allHighlights={allHighlights}
         onEraseAllPages={handleEraseAllPages}
         onApplyToPageRange={handleApplyToPageRange}
-        searchOpen={searchOpen}
-        onSearchToggle={() => {
-          setSearchOpen(o => !o);
-          if (searchOpen) { setSearchQuery(''); setSearchResults({}); }
-        }}
         fineRotation={fineRotation}
         onFineRotationChange={setFineRotation}
         onStartPageChange={(sp) => onStartPageChange(session.id, sp)}
         onDownloadOcr={handleDownloadOcr}
         downloadingOcr={downloadingOcr}
-        onDownloadExcel={() => handleDownloadExcel()}
-        onDownloadExcelSelected={onDownloadExcelSelected}
-        onDownloadExcelRange={(range) => handleDownloadExcel(range)}
-        onAutoSearch={handleAutoSearch}
-        autoSearching={false}
         selectedIds={selectedIds}
         onForceOcr={onForceOcr ?? (() => {})}
         forcingOcr={forcingOcr}
@@ -1610,6 +1418,10 @@ export default function PDFViewer({
         rotatingAllPdfs={rotatingAllPdfs}
         onRotateAllPdfsCcw={onRotateAllPdfsCcw}
         rotatingAllPdfsCcw={rotatingAllPdfsCcw}
+        onRotateSelectedPdfs={onRotateSelectedPdfs}
+        rotatingSelectedPdfs={rotatingSelectedPdfs}
+        onRotateSelectedPdfsCcw={onRotateSelectedPdfsCcw}
+        rotatingSelectedPdfsCcw={rotatingSelectedPdfsCcw}
       />
 
       {/* Auto-extract setup banner — visible while setup active AND bar not toggled off */}
@@ -1695,50 +1507,6 @@ export default function PDFViewer({
               ))}
             </div>
           )}
-        </div>
-      )}
-
-      {/* Search bar (Ctrl+F) */}
-      {searchOpen && (
-        <div className="bg-card border-b border-border shrink-0">
-          <div className="px-3 py-1.5 flex items-center gap-2">
-            <input
-              className="flex-1 h-7 text-xs bg-muted rounded px-2 border-none outline-none focus:ring-1 focus:ring-primary text-foreground"
-              placeholder="Search (Enter: next · Shift+Enter: previous)"
-              autoFocus
-              value={searchQuery}
-              onChange={e => handleSearch(e.target.value)}
-              onKeyDown={e => {
-                if (e.key === 'Escape') {
-                  setSearchOpen(false); setSearchQuery(''); setSearchResults({});
-                  return;
-                }
-                if (e.key === 'Enter') {
-                  e.preventDefault();
-                  if (flatMatches.length === 0) return;
-                  if (e.shiftKey) gotoMatch(activeMatchIdx - 1);
-                  else            gotoMatch(activeMatchIdx + 1);
-                }
-              }}
-            />
-            {searchQuery && (
-              <span className="text-[11px] text-muted-foreground shrink-0">
-                {flatMatches.length === 0
-                  ? 'No matches'
-                  : activeMatchIdx >= 0
-                    ? `${activeMatchIdx + 1} of ${flatMatches.length}`
-                    : `${flatMatches.length} match${flatMatches.length !== 1 ? 'es' : ''}`}
-              </span>
-            )}
-            <button
-              className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-200"
-              onClick={() => {
-                setSearchOpen(false); setSearchQuery(''); setSearchResults({});
-              }}
-            >
-              <span className="text-xs">Esc</span>
-            </button>
-          </div>
         </div>
       )}
 
@@ -1858,33 +1626,6 @@ export default function PDFViewer({
                     onRemoveFromSelectedPdfs={onRemoveFieldFromSelectedPdfs ? handleRemoveFromSelectedPdfs : undefined}
                     selectedPdfCount={selectedPdfCount}
                   />
-
-                  {/* Search highlights (active match gets brighter orange). */}
-                  {(searchResults[pageNum]?.length ?? 0) > 0 && (
-                    <div className="absolute inset-0 pointer-events-none overflow-hidden">
-                      {(searchResults[pageNum] ?? []).map((r, i) => {
-                        const isActive =
-                          activeMatchIdx >= 0 &&
-                          flatMatches[activeMatchIdx]?.page === pageNum &&
-                          flatMatches[activeMatchIdx]?.boxIndex === i;
-                        return (
-                          <div
-                            key={i}
-                            className="absolute rounded-sm"
-                            style={{
-                              left:            `${r.x * 100}%`,
-                              top:             `${r.y * 100}%`,
-                              width:           `${r.width * 100}%`,
-                              height:          `${r.height * 100}%`,
-                              backgroundColor: isActive ? 'rgba(251, 146, 60, 0.65)' : 'rgba(250, 204, 21, 0.4)',
-                              border:          isActive ? '1.5px solid rgba(234, 88, 12, 0.95)' : '1px solid rgba(250, 204, 21, 0.8)',
-                              zIndex:          isActive ? 6 : 5,
-                            }}
-                          />
-                        );
-                      })}
-                    </div>
-                  )}
 
                   {/* Field label picker — on the page where drawing happened */}
                   {pickerPos && pickerPos.page === pageNum && (
@@ -2050,6 +1791,18 @@ export default function PDFViewer({
           }
         }
 
+        // Flat rows respecting any sanitize / cell-merge edits — used by
+        // Export Excel and the two "Apply to … PDFs" batch handlers.
+        const buildExportRows = (): string[][] =>
+          displayCells && anchorMap && coveredSlots
+            ? Array.from({ length: cellRows }, (_, ri) =>
+                Array.from({ length: cellCols }, (_, ci) => {
+                  if (coveredSlots!.has(`${ri},${ci}`)) return '';
+                  return anchorMap!.get(`${ri},${ci}`)?.text ?? '';
+                })
+              )
+            : displayRows.map(r => r.map(c => String(c ?? '')));
+
         // ── Drag handlers ───────────────────────────────────────────────
         const onHeaderMouseDown = (e: React.MouseEvent) => {
           // Ignore drags that started on a button inside the header
@@ -2162,25 +1915,61 @@ export default function PDFViewer({
                 >
                   Sanitize
                 </button>
+                {onExtractTableFromAllPdfs && (
+                  <button
+                    className="text-xs px-2 py-1 rounded-md font-medium border border-primary/40 bg-primary/10 text-primary hover:bg-primary/20 disabled:opacity-50 disabled:cursor-not-allowed"
+                    disabled={applyingTableToAll}
+                    onClick={async () => {
+                      setApplyingTableToAll(true);
+                      try {
+                        await onExtractTableFromAllPdfs(
+                          { page: tablePreview.page, ...tablePreview.region },
+                          buildExportRows(),
+                        );
+                      } finally {
+                        setApplyingTableToAll(false);
+                      }
+                    }}
+                    title="Pull the same table region (same page + coords) from every other open PDF and download one workbook — a sheet per PDF"
+                  >
+                    {applyingTableToAll ? 'Working…' : 'Apply to all PDFs'}
+                  </button>
+                )}
+                {onExtractTableFromSelectedPdfs && (selectedPdfCount ?? 0) > 0 && (
+                  <button
+                    className="text-xs px-2 py-1 rounded-md font-medium border border-primary/40 bg-primary/10 text-primary hover:bg-primary/20 disabled:opacity-50 disabled:cursor-not-allowed"
+                    disabled={applyingTableToAll}
+                    onClick={async () => {
+                      setApplyingTableToAll(true);
+                      try {
+                        await onExtractTableFromSelectedPdfs(
+                          { page: tablePreview.page, ...tablePreview.region },
+                          buildExportRows(),
+                        );
+                      } finally {
+                        setApplyingTableToAll(false);
+                      }
+                    }}
+                    title="Same as 'Apply to all PDFs' but restricted to the ctrl/cmd-selected tabs"
+                  >
+                    {applyingTableToAll ? 'Working…' : `Apply to selected (${selectedPdfCount})`}
+                  </button>
+                )}
                 <button
                   className="text-xs bg-primary text-primary-foreground px-2.5 py-1 rounded-md font-medium hover:bg-primary/90"
                   onClick={async () => {
                     try {
-                      // Build flat rows from cells (respects sanitized state) or use rows directly
-                      const exportRows: string[][] = displayCells && anchorMap
-                        ? Array.from({ length: cellRows }, (_, ri) =>
-                            Array.from({ length: cellCols }, (_, ci) => {
-                              if (coveredSlots!.has(`${ri},${ci}`)) return '';
-                              return anchorMap!.get(`${ri},${ci}`)?.text ?? '';
-                            })
-                          )
-                        : displayRows.map(r => r.map(c => String(c ?? '')));
+                      const exportRows = buildExportRows();
                       await downloadTableRegionExcel(
                         session.id, tablePreview.page,
                         tablePreview.region.x, tablePreview.region.y,
                         tablePreview.region.width, tablePreview.region.height,
                         session.filename.replace(/\.[^.]+$/, '') + `_region_p${tablePreview.page}.xlsx`,
                         exportRows,
+                        {
+                          file: session.file,
+                          onSessionRenewed: (oldId, newId) => onSessionRenewed?.(oldId, newId),
+                        },
                       );
                       // Region Excel export counts as a table extract too.
                       trackTableExtract(session.uploadedAt, Date.now()).catch(() => {});

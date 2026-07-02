@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Upload, FileText, FolderOpen, ChevronDown, X } from 'lucide-react';
+import { Upload, FileText, FolderOpen, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { DOCUMENT_TYPES, type DocumentType } from '@/types/utilscraper';
 
@@ -9,13 +9,12 @@ interface UploadZoneProps {
   pendingFiles: File[];
   onFileRemove: (index: number) => void;
   docType: DocumentType;
-  onDocTypeChange: (t: DocumentType) => void;
   onProcess: () => void;
   processing: boolean;
 }
 
 export default function UploadZone({
-  compact, onFilesSelected, pendingFiles, onFileRemove, docType, onDocTypeChange, onProcess, processing,
+  compact, onFilesSelected, pendingFiles, onFileRemove, docType, onProcess, processing,
 }: UploadZoneProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
@@ -152,14 +151,14 @@ export default function UploadZone({
   const activeDt = DOCUMENT_TYPES.find(d => d.value === docType)!;
   const hasPending = pendingFiles.length > 0;
 
-  const docTypeDropdown = (
-    <DocTypeDropdown docType={docType} onChange={onDocTypeChange} />
-  );
+  // Doc-type picker used to live here at the top of the upload zone, but
+  // it duplicated the confirm-doc-type modal that already appears right
+  // before processing. Users were setting it twice. The dropdown component
+  // and the confirmation modal cover every case.
 
   if (compact) {
     return (
       <div className="space-y-2">
-        {docTypeDropdown}
         <div
           role="button"
           tabIndex={0}
@@ -198,6 +197,27 @@ export default function UploadZone({
 
         {hasPending && (
           <>
+            {/* Process button FIRST so a 300-file queue doesn't push it off
+                screen. The pending list below flows naturally beneath it. */}
+            <Button
+              className="w-full text-xs font-semibold text-white h-8"
+              style={{ backgroundColor: activeDt.color }}
+              onClick={onProcess}
+              disabled={processing}
+            >
+              {processing ? 'Processing...' : `Process ${pendingFiles.length} PDF${pendingFiles.length > 1 ? 's' : ''}`}
+            </Button>
+            <div className="flex items-center justify-between text-[10px] text-muted-foreground px-0.5">
+              <span>{pendingFiles.length} queued</span>
+              <button
+                type="button"
+                className="hover:text-destructive transition-colors"
+                onClick={() => { for (let i = pendingFiles.length - 1; i >= 0; i--) onFileRemove(i); }}
+                title="Remove all queued files"
+              >
+                Clear all
+              </button>
+            </div>
             <ul className="space-y-1">
               {pendingFiles.map((file, i) => (
                 <li key={i} className="group flex items-center gap-1.5 text-xs text-muted-foreground">
@@ -214,14 +234,6 @@ export default function UploadZone({
                 </li>
               ))}
             </ul>
-            <Button
-              className="w-full text-xs font-semibold text-white h-8"
-              style={{ backgroundColor: activeDt.color }}
-              onClick={onProcess}
-              disabled={processing}
-            >
-              {processing ? 'Processing...' : `Process ${pendingFiles.length} PDF${pendingFiles.length > 1 ? 's' : ''}`}
-            </Button>
           </>
         )}
       </div>
@@ -230,7 +242,6 @@ export default function UploadZone({
 
   return (
     <div className="space-y-3">
-      {docTypeDropdown}
       <div
         role="button"
         tabIndex={0}
@@ -279,6 +290,26 @@ export default function UploadZone({
 
       {hasPending && (
         <>
+          {/* Process button FIRST — see compact-mode comment above. */}
+          <Button
+            className="w-full text-sm font-semibold text-white"
+            style={{ backgroundColor: activeDt.color }}
+            onClick={onProcess}
+            disabled={processing}
+          >
+            {processing ? 'Processing...' : `Process ${pendingFiles.length} PDF${pendingFiles.length > 1 ? 's' : ''}`}
+          </Button>
+          <div className="flex items-center justify-between text-[11px] text-muted-foreground px-0.5">
+            <span>{pendingFiles.length} queued</span>
+            <button
+              type="button"
+              className="hover:text-destructive transition-colors"
+              onClick={() => { for (let i = pendingFiles.length - 1; i >= 0; i--) onFileRemove(i); }}
+              title="Remove all queued files"
+            >
+              Clear all
+            </button>
+          </div>
           <ul className="space-y-1">
             {pendingFiles.map((file, i) => (
               <li key={i} className="group flex items-center gap-1.5 text-xs text-muted-foreground bg-muted/50 rounded px-2 py-1">
@@ -295,52 +326,7 @@ export default function UploadZone({
               </li>
             ))}
           </ul>
-          <Button
-            className="w-full text-sm font-semibold text-white"
-            style={{ backgroundColor: activeDt.color }}
-            onClick={onProcess}
-            disabled={processing}
-          >
-            {processing ? 'Processing...' : `Process ${pendingFiles.length} PDF${pendingFiles.length > 1 ? 's' : ''}`}
-          </Button>
         </>
-      )}
-    </div>
-  );
-}
-
-function DocTypeDropdown({ docType, onChange }: { docType: DocumentType; onChange: (t: DocumentType) => void }) {
-  const [open, setOpen] = useState(false);
-  const active = DOCUMENT_TYPES.find(d => d.value === docType)!;
-
-  return (
-    <div className="relative">
-      <button
-        className="w-full flex items-center justify-between gap-2 px-3 py-2 rounded-lg border border-border
-                   bg-card text-xs font-medium text-foreground hover:border-primary/30 transition-all duration-200"
-        onClick={() => setOpen(o => !o)}
-      >
-        <span className="flex items-center gap-2">
-          <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: active.color }} />
-          {active.label}
-        </span>
-        <ChevronDown className={`w-3.5 h-3.5 text-muted-foreground transition-transform ${open ? 'rotate-180' : ''}`} />
-      </button>
-
-      {open && (
-        <div className="absolute z-30 mt-1 w-full bg-card border border-border rounded-lg shadow-lg py-1">
-          {DOCUMENT_TYPES.map(dt => (
-            <button
-              key={dt.value}
-              className={`w-full flex items-center gap-2 px-3 py-2 text-xs text-left transition-all duration-200
-                ${docType === dt.value ? 'bg-muted font-semibold text-foreground' : 'text-muted-foreground hover:bg-muted/50'}`}
-              onClick={() => { onChange(dt.value); setOpen(false); }}
-            >
-              <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: dt.color }} />
-              {dt.label}
-            </button>
-          ))}
-        </div>
       )}
     </div>
   );

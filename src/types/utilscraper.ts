@@ -1,4 +1,4 @@
-export type DocumentType = 'utility_bill' | 'bank_statement' | 'appraisal' | 'lease_contract' | 'tax';
+export type DocumentType = 'utility_bill' | 'bank_statement' | 'appraisal' | 'lease_contract' | 'tax' | 'others';
 
 export const DOCUMENT_TYPES: { value: DocumentType; label: string; color: string }[] = [
   { value: 'utility_bill',   label: 'Utility Bill',    color: '#16a34a' },
@@ -6,6 +6,12 @@ export const DOCUMENT_TYPES: { value: DocumentType; label: string; color: string
   { value: 'appraisal',       label: 'Appraisal',       color: '#9333ea' },
   { value: 'lease_contract',  label: 'Lease Contract',  color: '#d97706' },
   { value: 'tax',             label: 'Tax',             color: '#dc2626' },
+  // Others = free-form. No preset fields — every highlight is labelled with
+  // a user-typed custom name from session state. Excel export is a single
+  // plain sheet, one row per PAGE, columns = whichever custom fields the
+  // user used across the batch. Field names live only in the sessionsCache
+  // and vanish on hard refresh, matching the "clear on session end" ask.
+  { value: 'others',          label: 'Others',          color: '#64748b' },
 ];
 
 export interface PageInfo {
@@ -41,6 +47,14 @@ export interface PDFSession {
    *  dashboard can later show "time saved" per user. Optional because
    *  sessions hydrated from a cache may not have it. */
   uploadedAt?: number;
+  /** Frontend-only stable identifier for React reconciliation. Never
+   *  changes across a session's lifetime, even when the backend session id
+   *  (`id`) is renewed after LRU-eviction / reupload. Used as the React
+   *  `key` on the viewer so an in-progress drawn region survives the
+   *  session-renewal round-trip. Optional so cache-restored sessions from
+   *  earlier builds keep working — the viewer falls back to `id` in that
+   *  case. */
+  stableKey?: string;
 }
 
 export interface Highlight {
@@ -199,7 +213,7 @@ export const FIELD_LABELS: FieldLabelOption[] = [
   { value: 'total_tax_due',   label: 'Total Tax Due',       color: '#dc2626', bgColor: 'rgba(220,38,38,0.18)',  docTypes: ['tax'] },
   { value: 'parcel_id',       label: 'Parcel ID',           color: '#9333ea', bgColor: 'rgba(147,51,234,0.18)', docTypes: ['tax'] },
   // ── Fallback ──────────────────────────────────────────────────────
-  { value: 'custom', label: 'Custom', color: '#64748b', bgColor: 'rgba(100,116,139,0.18)', docTypes: ['utility_bill', 'bank_statement', 'appraisal', 'lease_contract', 'tax'] },
+  { value: 'custom', label: 'Custom', color: '#64748b', bgColor: 'rgba(100,116,139,0.18)', docTypes: ['utility_bill', 'bank_statement', 'appraisal', 'lease_contract', 'tax', 'others'] },
 ];
 
 // Returns only the field labels relevant to a document type
