@@ -4,14 +4,13 @@ import { toast } from 'sonner';
 import {
   Upload, ChevronLeft, ChevronRight,
   AlertTriangle, FileSearch, X, ShieldCheck, LogOut,
-  RotateCw, Eraser, DownloadCloud, Loader2, XCircle, Layers, Check,
+  RotateCw, Eraser, DownloadCloud, Loader2, XCircle, Check,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import UploadZone from '@/components/UploadZone';
 import PDFCardList from '@/components/PDFCardList';
 import PDFViewer from '@/components/PDFViewer';
 import ExcelPanel from '@/components/ExcelPanel';
-import BatchPanel from '@/components/BatchPanel';
 import ThemeToggle from '@/components/ThemeToggle';
 import type { PDFSession, Highlight, ExtractedRow, DocumentType } from '@/types/utilscraper';
 import { DOCUMENT_TYPES } from '@/types/utilscraper';
@@ -62,7 +61,6 @@ export default function Index() {
     window.addEventListener('click', onDocClick);
     return () => window.removeEventListener('click', onDocClick);
   }, [globalDocTypeOpen]);
-  const [showBatchPanel, setShowBatchPanel]     = useState(false);
   const [activeBatchId, setActiveBatchId]       = useState<number | null>(null);
   const [navCollapsed, setNavCollapsed]         = useState(false);
   const [pendingDocType, setPendingDocType]     = useState<DocumentType>('utility_bill');
@@ -171,25 +169,25 @@ export default function Index() {
   );
 
   const handleFilesSelected = useCallback((files: File[]) => {
+    if (files.length === 0) return;
+    // Drop the files straight into the queue and jump the user to the
+    // doc-type confirm modal — no intermediate "Process X PDFs" button
+    // click needed. If the modal is already open (user is adding more
+    // files while confirming an earlier batch), leave it as-is; the
+    // combined pendingFiles count updates live inside the modal.
     setPendingFiles(prev => [...prev, ...files]);
-  }, []);
-
-  // Opens the doc-type confirm modal. Actual processing kicks off only
-  // after the user clicks "Start processing" inside the modal — that's
-  // where they get one last chance to switch the type for the whole batch.
-  const handleProcess = useCallback(() => {
-    if (!pendingFiles.length) return;
     setConfirmProcessOpen(true);
-  }, [pendingFiles]);
+  }, []);
 
   const runProcessing = useCallback(async () => {
     if (!pendingFiles.length) return;
 
-    // Worker-pool concurrency for uploads. 3 in-flight is safe: browsers cap
-    // concurrent connections per host around 6, and the backend's
-    // OCR_MAX_CONCURRENCY is 2 so 3 keeps the OCR queue warm without
-    // flooding it. Drop to 2 if you see the Hostinger box struggling.
-    const CONCURRENCY = 3;
+    // Worker-pool concurrency for uploads. Bumped 3 → 6 to match the browser
+    // per-host cap (chrome ~6). With PEXL_MAX_SESSIONS now at 400 the
+    // backend session store is no longer the bottleneck, and each upload
+    // is I/O-bound so 6 in-flight is the sweet spot. Drop back to 3 if
+    // the Hostinger box shows sustained 4xx/5xx during a 300-file batch.
+    const CONCURRENCY = 6;
 
     setProcessing(true);
     // NOTE: we no longer open the ProcessingModal here. Files show up as
@@ -319,7 +317,18 @@ export default function Index() {
           ));
           setOpenTabs(prev => prev.map(t => t === tempId ? result.session_id : t));
           if (activeTabId === tempId) setActiveTabId(result.session_id);
-          if (ocrCount > 0) startOcrPolling(result.session_id);
+          // Auto-OCR polling used to fire here (one 2s poll chain per
+          // scanned-page session) — a 300-file batch would spawn ~150
+          // concurrent poll chains that each hit /ocr-progress every 2s,
+          // burying the backend under ~75 req/sec of pointless status
+          // pings while it should be serving actual work. Backend OCR
+          // still runs in the background whether or not the client
+          // polls; the extract path will either see values (OCR ready)
+          // or null (not ready yet, user can re-extract later). The
+          // Force Re-OCR flow still polls because that's a single-file
+          // user-initiated action where progress is worth showing.
+          // if (ocrCount > 0) startOcrPolling(result.session_id);
+          void ocrCount;
 
           return { originalIdx: item.originalIdx, sessionId: result.session_id, ocrCount };
         } catch (err: unknown) {
@@ -1381,11 +1390,6 @@ export default function Index() {
                   <UploadZone
                     compact={hasUploaded}
                     onFilesSelected={handleFilesSelected}
-                    pendingFiles={pendingFiles}
-                    onFileRemove={(idx) => setPendingFiles(prev => prev.filter((_, i) => i !== idx))}
-                    docType={pendingDocType}
-                    onProcess={handleProcess}
-                    processing={processing}
                   />
                 </div>
               )}
@@ -1569,14 +1573,6 @@ export default function Index() {
               <ShieldCheck className="w-3.5 h-3.5" />
               <span className="hidden sm:inline">Usage</span>
             </button>
-            <button
-              onClick={() => setShowBatchPanel(true)}
-              className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-all duration-200 px-2 py-1.5 rounded-lg hover:bg-muted"
-              title="Manage batches"
-            >
-              <Layers className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Batches</span>
-            </button>
             <ThemeToggle />
             <button
               onClick={() => { logout(); navigate('/login'); }}
@@ -1600,7 +1596,14 @@ export default function Index() {
                 const dt = DOCUMENT_TYPES.find(d => d.value === s.docType);
                 return (
                   <div
-                    key={s.id}
+                    // stableKey is the tempId assigned at upload and never
+                    // changes. `s.id` changes when a session's tempId gets
+                    // swapped for the backend's real session_id at the end
+                    // of processing — using it as the key here caused a
+                    // mass unmount + remount of the whole tab strip at the
+                    // moment all uploads finished (visible as a one-time
+                    // flicker on 300-file batches).
+                    key={s.stableKey ?? s.id}
                     draggable
                     onDragStart={e => {
                       setDragTabId(s.id);
@@ -2129,14 +2132,6 @@ export default function Index() {
             </div>
           </div>
         </div>
-      )}
-      {showBatchPanel && (
-        <BatchPanel
-          username={user?.username ?? 'unknown'}
-          activeBatchId={activeBatchId}
-          onSelect={(id, name) => { setActiveBatchId(id); setShowBatchPanel(false); toast.success(`Batch "${name}" selected`); }}
-          onClose={() => setShowBatchPanel(false)}
-        />
       )}
     </div>
   );

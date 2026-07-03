@@ -597,22 +597,36 @@ export function buildRawData(fileMap: Map<string, ExtractedRow[]>): {
     }
   }
 
-  const headers = ['#', 'File Name', ...fields];
+  const headers = ['#', 'File Name', 'Page', ...fields];
   const rows: (string | number)[][] = [];
 
+  // One row per (file, page) so a 10-page utility bill produces 10 rows
+  // instead of one collapsed row. The old first-wins-per-file rollup hid
+  // multi-page data — a batch with 11 records across 2 files was showing
+  // only 2 rows in Plain Data. Templated sheets still handle the
+  // collapsed / aggregated views; this is the raw supplement.
   let idx = 1;
   for (const [filename, rs] of fileMap.entries()) {
-    // First-wins per field — multi-page docs collapse into one row.
-    const values: Record<string, string> = {};
+    // Group by page. First-wins per field within a single page (same
+    // policy as before, just scoped to the page instead of the whole file).
+    const byPage = new Map<number, Record<string, string>>();
     for (const r of rs) {
       if (!r.value) continue;
-      if (!values[r.field]) values[r.field] = r.value;
+      const cur = byPage.get(r.page) ?? {};
+      if (!cur[r.field]) cur[r.field] = r.value;
+      byPage.set(r.page, cur);
     }
-    rows.push([
-      idx++,
-      filename.replace(/\.(pdf|docx?)$/i, ''),
-      ...fields.map(f => values[f] ?? ''),
-    ]);
+    const sortedPages = Array.from(byPage.keys()).sort((a, b) => a - b);
+    const cleanFilename = filename.replace(/\.(pdf|docx?)$/i, '');
+    for (const pg of sortedPages) {
+      const values = byPage.get(pg)!;
+      rows.push([
+        idx++,
+        cleanFilename,
+        pg,
+        ...fields.map(f => values[f] ?? ''),
+      ]);
+    }
   }
   return { headers, rows };
 }
@@ -699,7 +713,8 @@ function buildRawSheet(fileMap: Map<string, ExtractedRow[]>): XLSX.WorkSheet {
   const ws = XLSX.utils.aoa_to_sheet(aoa);
 
   // Borders on every cell, bold header row. No colors — matches the
-  // "plain raw data" requirement.
+  // "plain raw data" requirement. Columns: 0=#, 1=File Name, 2=Page,
+  // 3+=field values. Center-align the numeric columns (# and Page).
   const _b = { style: 'thin', color: { rgb: C.borderColor } };
   const borderAll = { top: _b, bottom: _b, left: _b, right: _b };
   const styles: { row: number; col: number; style: any }[] = [];
@@ -710,7 +725,7 @@ function buildRawSheet(fileMap: Map<string, ExtractedRow[]>): XLSX.WorkSheet {
         style: {
           font: { name: 'Arial', sz: 10, bold: r === 0 },
           alignment: {
-            horizontal: c === 0 ? 'center' : c === 1 ? 'left' : 'left',
+            horizontal: c === 0 || c === 2 ? 'center' : 'left',
             vertical: 'center',
             wrapText: true,
           },
@@ -722,9 +737,10 @@ function buildRawSheet(fileMap: Map<string, ExtractedRow[]>): XLSX.WorkSheet {
   applyStyles(ws, aoa, styles);
 
   ws['!cols'] = [
-    { wch: 5 },                            // #
-    { wch: 30 },                           // File Name
-    ...headers.slice(2).map(() => ({ wch: 22 })),
+    { wch: 5 },   // #
+    { wch: 30 }, // File Name
+    { wch: 6 },  // Page
+    ...headers.slice(3).map(() => ({ wch: 22 })),
   ];
   return ws;
 }

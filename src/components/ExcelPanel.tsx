@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import { X, Download, RefreshCw, Pencil, CheckCircle2, ArrowUpDown, ArrowUp, ArrowDown, Trash2, Check, Layers, ChevronDown, Plus, Loader2, Sparkles } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
@@ -40,10 +40,14 @@ const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000';
 
 const CONF_PCT: Record<string, number> = { high: 95, medium: 65, low: 25 };
 
-// Mirror of detectDocType in excel-export.ts: returns true if the dominant
-// doc type for this batch is utility_bill.
-function isUtilityExport(rows: ExtractedRow[]): boolean {
-  const fieldToType: Record<string, string> = {};
+// Count fields per doc type using only fields that are exclusive to a
+// single type (e.g. beginning_balance → bank_statement). Shared fields
+// like property_name / account_number / address are ignored because
+// they'd smear the signal across types. Returns the dominant type or
+// null when no exclusive-field signal exists (e.g. only shared fields
+// were extracted).
+function detectDocTypeFromRows(rows: ExtractedRow[]): DocumentType | null {
+  const fieldToType: Record<string, DocumentType> = {};
   for (const f of FIELD_LABELS) {
     if (f.value !== 'custom' && f.docTypes.length === 1) {
       fieldToType[f.value] = f.docTypes[0];
@@ -54,8 +58,14 @@ function isUtilityExport(rows: ExtractedRow[]): boolean {
     const dt = fieldToType[r.field];
     if (dt) counts[dt] = (counts[dt] || 0) + 1;
   }
-  const top = Object.entries(counts).sort((a, b) => b[1] - a[1])[0]?.[0];
-  return top === 'utility_bill';
+  const top = Object.entries(counts).sort((a, b) => b[1] - a[1])[0]?.[0] as DocumentType | undefined;
+  return top ?? null;
+}
+
+// Kept as a named helper for the utility-specific merge / date-picker
+// branches elsewhere in the panel. Delegates to the generic detector.
+function isUtilityExport(rows: ExtractedRow[]): boolean {
+  return detectDocTypeFromRows(rows) === 'utility_bill';
 }
 
 // PageRow holds ALL extracted values per field (arrays, so multi-value fields
@@ -175,23 +185,45 @@ export default function ExcelPanel({
     if (externalBatchId != null) setActiveBatchId(externalBatchId);
   }, [externalBatchId]);
 
+  // Pull the current batch's saved records from the server into
+  // batchSavedRows. Wrapped as a callback so we can also invoke it after
+  // approve / bulk-approve and right before Export, guaranteeing the
+  // export reflects the latest server state instead of a stale snapshot
+  // captured only at batch-selection time. Also seeds approvedKeys from
+  // whatever the server already has, so freshly opened sessions know
+  // which (sessionId, page) pairs are already saved.
+  //
+  // Returns the fresh rows so callers that need them synchronously (like
+  // the Export click handler) can use them without waiting for React to
+  // re-render — setBatchSavedRows schedules a state update but the
+  // ongoing async handler still holds the old exportData in closure.
+  const refreshBatchSavedRows = useCallback(async (batchId: number | null): Promise<ExtractedRow[]> => {
+    if (!batchId) { setBatchSavedRows([]); setApprovedKeys(new Set()); return []; }
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/batches/${batchId}/records`);
+      const d = await res.json();
+      if (d.status !== 'ok') return batchSavedRows;
+      const rows: ExtractedRow[] = [];
+      const keys = new Set<string>();
+      for (const rec of d.records) {
+        keys.add(`${rec.session_id}-${rec.page}`);
+        for (const [field, value] of Object.entries(rec.fields as Record<string, string>)) {
+          if (value) rows.push({ page: rec.page, field, value, confidence: 'high', wasOcr: false, filename: rec.filename, sessionId: rec.session_id });
+        }
+      }
+      setBatchSavedRows(rows);
+      setApprovedKeys(keys);
+      return rows;
+    } catch {
+      /* non-fatal — fall back to whatever's currently in state */
+      return batchSavedRows;
+    }
+  }, [batchSavedRows]);
+
   // Fetch saved batch records whenever the active batch changes
   useEffect(() => {
-    if (!activeBatchId) { setBatchSavedRows([]); return; }
-    fetch(`${BACKEND_URL}/api/batches/${activeBatchId}/records`)
-      .then(r => r.json())
-      .then((d: any) => {
-        if (d.status !== 'ok') return;
-        const rows: ExtractedRow[] = [];
-        for (const rec of d.records) {
-          for (const [field, value] of Object.entries(rec.fields as Record<string, string>)) {
-            if (value) rows.push({ page: rec.page, field, value, confidence: 'high', wasOcr: false, filename: rec.filename, sessionId: rec.session_id });
-          }
-        }
-        setBatchSavedRows(rows);
-      })
-      .catch(() => {});
-  }, [activeBatchId]);
+    void refreshBatchSavedRows(activeBatchId);
+  }, [activeBatchId, refreshBatchSavedRows]);
   const { user } = useAuth();
 
   // ── Build page rows grouped by PDF (multi-value cells) ─────────────────
@@ -389,32 +421,41 @@ export default function ExcelPanel({
     void cellKey;
   };
 
-  // Save every row (unique sessionId + page pair) that isn't already approved
-  // to the active batch. Skips rows with no values (nothing to save) and
-  // rows that are already approved (would be a redundant POST). Bounded
-  // 6-way parallelism so 300 rows don't fire 300 simultaneous requests.
+  // Save every eligible row (unique sessionId + page pair) to the active
+  // batch. UPSERT semantics: rows already in the batch get their fields
+  // OVERWRITTEN with whatever's in the current session — so if the user
+  // extracted more fields, edited values, or re-ran extract after the
+  // first approve, the batch reflects those changes. Previously this
+  // skipped already-approved rows, which stranded stale field sets on
+  // the server (e.g. the batch only had `total_water_bill` even after
+  // the user extracted `total_gas_bill` + more later). Bounded 6-way
+  // parallelism so 300 rows don't fire 300 simultaneous requests.
   const [approvingAll, setApprovingAll] = useState(false);
   const handleApproveAll = async () => {
     if (!activeBatchId) { toast.error('Select a batch before approving'); return; }
     if (approvingAll) return;
 
-    // De-duplicate to one entry per (sessionId, page) — each becomes one
-    // batch record, matching how toggleApprove treats a single row.
-    const pending = new Map<string, { sessionId: string; filename: string; page: number }>();
+    // De-duplicate to one entry per (sessionId, page). Everything with a
+    // value is eligible — approved or not.
+    const pending = new Map<string, { sessionId: string; filename: string; page: number; alreadyApproved: boolean }>();
     for (const g of sortedGroups) {
       for (const row of g.rows) {
         const key = `${row.sessionId}-${row.page}`;
-        if (approvedKeys.has(key)) continue;
         const pageData = data.filter(d => d.sessionId === row.sessionId && d.page === row.page && d.value);
         if (pageData.length === 0) continue;
         if (!pending.has(key)) {
-          pending.set(key, { sessionId: row.sessionId, filename: row.filename, page: row.page });
+          pending.set(key, {
+            sessionId: row.sessionId,
+            filename: row.filename,
+            page: row.page,
+            alreadyApproved: approvedKeys.has(key),
+          });
         }
       }
     }
 
     if (pending.size === 0) {
-      toast('Nothing new to approve', { icon: 'ℹ️' });
+      toast('Nothing to save', { icon: 'ℹ️' });
       return;
     }
 
@@ -423,6 +464,7 @@ export default function ExcelPanel({
     const toastId = toast.loading(`Saving 0 / ${total} to batch…`);
     let done = 0;
     let failed = 0;
+    let updated = 0;
     const succeededKeys: string[] = [];
 
     const queue = Array.from(pending.entries());
@@ -431,7 +473,7 @@ export default function ExcelPanel({
       while (queue.length > 0) {
         const next = queue.shift();
         if (!next) return;
-        const [key, { sessionId, filename, page }] = next;
+        const [key, { sessionId, filename, page, alreadyApproved }] = next;
         try {
           const fields: Record<string, string> = {};
           const pageData = data.filter(d => d.sessionId === sessionId && d.page === page);
@@ -440,13 +482,27 @@ export default function ExcelPanel({
             if (fields[d.field]) fields[d.field] += ', ' + d.value;
             else fields[d.field] = d.value;
           }
+          // Upsert: for rows already in the batch, DELETE first so the
+          // POST inserts a fresh record with the current field set. This
+          // mirrors how toggleApprove handles re-approval and prevents
+          // duplicate rows piling up on the server.
+          if (alreadyApproved) {
+            await fetch(
+              `${BACKEND_URL}/api/batches/${activeBatchId}/records/${encodeURIComponent(sessionId)}/${page}`,
+              { method: 'DELETE' },
+            );
+          }
           const res = await fetch(`${BACKEND_URL}/api/batches/${activeBatchId}/records`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ session_id: sessionId, filename, page, fields }),
           });
-          if (res.ok) succeededKeys.push(key);
-          else failed++;
+          if (res.ok) {
+            succeededKeys.push(key);
+            if (alreadyApproved) updated++;
+          } else {
+            failed++;
+          }
         } catch {
           failed++;
         }
@@ -466,13 +522,21 @@ export default function ExcelPanel({
     }
 
     toast.dismiss(toastId);
+    const added = succeededKeys.length - updated;
+    const parts: string[] = [];
+    if (added > 0)   parts.push(`${added} added`);
+    if (updated > 0) parts.push(`${updated} updated`);
+    const scope = parts.join(', ') || `${succeededKeys.length} saved`;
     if (failed === 0) {
-      toast.success(`Saved ${succeededKeys.length} record${succeededKeys.length !== 1 ? 's' : ''} to batch`);
+      toast.success(`Batch synced — ${scope}`);
     } else if (succeededKeys.length === 0) {
       toast.error(`All ${failed} record${failed !== 1 ? 's' : ''} failed`);
     } else {
-      toast.warning(`Saved ${succeededKeys.length} / ${total} — ${failed} failed`);
+      toast.warning(`Batch synced — ${scope}, ${failed} failed`);
     }
+    // Refresh batchSavedRows so the next Export includes everything we
+    // just wrote to the server (values, fields, updated timestamps).
+    if (succeededKeys.length > 0) await refreshBatchSavedRows(activeBatchId);
     setApprovingAll(false);
   };
 
@@ -503,6 +567,8 @@ export default function ExcelPanel({
         setApprovedKeys(prev => new Set([...prev, key]));
         toast.success(`Page ${row.page} saved to batch`);
       }
+      // Refresh so batchSavedRows (used by Export) mirrors the server.
+      await refreshBatchSavedRows(activeBatchId);
     } catch (err) {
       console.error('approve error', err);
       toast.error('Failed to save record');
@@ -606,6 +672,9 @@ export default function ExcelPanel({
               toast.success(`Batch "${newBatch.name}" created`);
             }}
             username={user?.username ?? 'unknown'}
+            // Doc type inherits from the session's active doc type — the
+            // user already picked it at upload time.
+            docType={forceDocType ?? 'utility_bill'}
           />
           <Button
             variant="outline"
@@ -648,25 +717,40 @@ export default function ExcelPanel({
           <Button
             size="sm"
             className="flex-1 h-8 text-xs bg-primary hover:bg-primary/90 text-primary-foreground font-semibold"
-            onClick={() => {
-              if (exportData.length === 0) { toast.error('No data to export'); return; }
+            onClick={async () => {
+              // Pull the freshest server state for the active batch before
+              // exporting. We use the RETURNED rows directly (not the
+              // exportData memo) because setBatchSavedRows schedules a
+              // React re-render but this async handler still holds the
+              // pre-refresh exportData in closure — waiting on it here
+              // would export stale data. Merge locally instead so every
+              // sheet (Utility / Bank / Appraisal / Tax / Lease / Plain
+              // Data) receives batch-saved + live rows in one array.
+              const freshBatchRows = activeBatchId
+                ? await refreshBatchSavedRows(activeBatchId)
+                : [];
+              const liveKeys = new Set(sortedFlat.map(r => `${r.sessionId}|${r.page}`));
+              const prevOnly = freshBatchRows.filter(r => !liveKeys.has(`${r.sessionId}|${r.page}`));
+              const finalData: ExtractedRow[] = [...prevOnly, ...sortedFlat];
+
+              if (finalData.length === 0) { toast.error('No data to export'); return; }
               // For utility bills run the utility-specific scan FIRST so we
               // surface provider_name groups too — the bank scan ignores
               // provider and would otherwise pre-empt this branch.
-              if (isUtilityExport(exportData)) {
-                const utilGroups = findUtilityMergeOpportunities(exportData);
+              if (isUtilityExport(finalData)) {
+                const utilGroups = findUtilityMergeOpportunities(finalData);
                 if (utilGroups.length > 0) {
                   setMergeGroups(utilGroups);
                   return;
                 }
               } else {
-                const bankGroups = findMergeOpportunities(exportData);
+                const bankGroups = findMergeOpportunities(finalData);
                 if (bankGroups.length > 0) {
                   setMergeGroups(bankGroups);
                   return;
                 }
               }
-              exportToExcel(exportData, filename, provider, { dateField: utilityDateField, forceDocType });
+              exportToExcel(finalData, filename, provider, { dateField: utilityDateField, forceDocType });
               onDownload?.();
             }}
           >
@@ -730,19 +814,34 @@ export default function ExcelPanel({
                 <th className="px-1 py-2.5 w-14 border-r border-white/10">
                   {(() => {
                     if (!activeBatchId) return null;
+                    // Count rows that will ACTUALLY hit the network — split
+                    // into "not yet saved" and "already saved but might
+                    // have new fields". Both contribute to the total; the
+                    // tooltip shows the breakdown so the user knows they
+                    // can re-sync existing rows after adding more fields.
                     const seen = new Set<string>();
-                    let pendingCount = 0;
+                    let newCount = 0;
+                    let syncCount = 0;
                     for (const g of sortedGroups) {
                       for (const row of g.rows) {
                         const key = `${row.sessionId}-${row.page}`;
-                        if (seen.has(key) || approvedKeys.has(key)) continue;
+                        if (seen.has(key)) continue;
                         const hasValue = data.some(d => d.sessionId === row.sessionId && d.page === row.page && d.value);
                         if (!hasValue) continue;
                         seen.add(key);
-                        pendingCount++;
+                        if (approvedKeys.has(key)) syncCount++;
+                        else newCount++;
                       }
                     }
-                    if (pendingCount === 0 && !approvingAll) return null;
+                    const total = newCount + syncCount;
+                    if (total === 0 && !approvingAll) return null;
+                    const tooltipText = approvingAll
+                      ? 'Saving to batch…'
+                      : newCount > 0 && syncCount > 0
+                        ? `Save ${newCount} new, re-sync ${syncCount} existing to batch`
+                        : newCount > 0
+                          ? `Save all ${newCount} row${newCount !== 1 ? 's' : ''} to batch`
+                          : `Re-sync ${syncCount} row${syncCount !== 1 ? 's' : ''} (updates fields with any newly-extracted values)`;
                     return (
                       <Tooltip>
                         <TooltipTrigger asChild>
@@ -752,17 +851,15 @@ export default function ExcelPanel({
                                        disabled:opacity-50 disabled:cursor-not-allowed transition-colors mx-auto"
                             onClick={() => void handleApproveAll()}
                             disabled={approvingAll}
-                            aria-label={`Approve all ${pendingCount} rows to batch`}
+                            aria-label={tooltipText}
                           >
                             {approvingAll
                               ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
                               : <CheckCircle2 className="w-3.5 h-3.5" />}
                           </button>
                         </TooltipTrigger>
-                        <TooltipContent side="right" className="text-xs">
-                          {approvingAll
-                            ? 'Saving to batch…'
-                            : `Approve all ${pendingCount} row${pendingCount !== 1 ? 's' : ''} to batch`}
+                        <TooltipContent side="right" className="text-xs max-w-[240px]">
+                          {tooltipText}
                         </TooltipContent>
                       </Tooltip>
                     );
@@ -1033,13 +1130,16 @@ export default function ExcelPanel({
 // records; creation was consolidated here so users don't have to open a
 // separate manager just to spin up a new batch.
 function BatchSelectorDropdown({
-  batches, activeBatchId, onSelect, onCreated, username,
+  batches, activeBatchId, onSelect, onCreated, username, docType,
 }: {
   batches: { id: number; name: string }[];
   activeBatchId: number | null;
   onSelect: (id: number | null) => void;
   onCreated: (batch: { id: number; name: string }) => void;
   username: string;
+  // Doc type baked into the new batch at creation — inherited from the
+  // session's active doc type, which the user picked at upload time.
+  docType: DocumentType;
 }) {
   const [open, setOpen]           = useState(false);
   const [creating, setCreating]   = useState(false);
@@ -1053,10 +1153,13 @@ function BatchSelectorDropdown({
     if (!trimmed) return;
     setSaving(true);
     try {
+      // Doc type comes straight from the session's active doc type — the
+      // user already picked it at upload time and shouldn't have to
+      // choose again just to create a batch.
       const res = await fetch(`${BACKEND_URL}/api/batches`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: trimmed, created_by: username }),
+        body: JSON.stringify({ name: trimmed, created_by: username, doc_type: docType }),
       });
       const data = await res.json();
       if (data.status === 'ok') {
@@ -1144,7 +1247,8 @@ function BatchSelectorDropdown({
         {/* Divider */}
         <div className="border-t border-border my-1.5" />
 
-        {/* Create new */}
+        {/* Create new — just a name field. Doc type inherits from the
+            session's active doc type (already chosen at upload time). */}
         {creating ? (
           <div className="p-1 space-y-1.5">
             <input
@@ -1181,7 +1285,7 @@ function BatchSelectorDropdown({
         ) : (
           <button
             className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs text-left text-primary hover:bg-primary/10 transition-colors font-medium"
-            onClick={() => setCreating(true)}
+            onClick={() => { setName(''); setCreating(true); }}
           >
             <Plus className="w-3.5 h-3.5 shrink-0" />
             Create new batch

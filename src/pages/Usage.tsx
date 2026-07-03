@@ -23,36 +23,14 @@ interface UsageRow {
   table_extracts: number;
   doc_types: string[] | null;
   used_at: string;
-  /** Wall-clock moment the user kicked off the upload that produced
-   *  this event. Optional — older rows (before this column existed)
-   *  return ``null`` from the backend. Used by Odin EMS to compute
-   *  ``finished_at - uploaded_at`` for the "time saved" report. */
   uploaded_at?: string | null;
-  /** Wall-clock moment this usage event completed. Optional for the
-   *  same backward-compat reason. */
   finished_at?: string | null;
-  /** Server-computed gap in seconds (MySQL TIMESTAMPDIFF). Preferred
-   *  over recomputing on the client because the timestamps are stored
-   *  naively and the parse-as-UTC-or-local heuristic can drift; doing
-   *  the math server-side sidesteps that entirely. */
   duration_seconds?: number | null;
 }
 
 type TimeRange = 'today' | 'week' | 'all';
 type SortKey   = 'files' | 'extracted' | 'downloads' | 'ocr_downloads' | 'table_extracts' | 'lastActive';
 
-// Parse a backend timestamp. The backend may send either:
-//   (a) naive UTC      — "2026-04-20T22:00:00"  (FastAPI datetime.utcnow)
-//   (b) naive local    — "2026-04-20T22:00:00"  (FastAPI datetime.now)
-//   (c) ISO with tz    — "2026-04-20T22:00:00Z" or "+06:00"
-// JavaScript's `new Date(iso)` treats case (a) and (b) the same — as LOCAL.
-// Case (c) is unambiguous.
-//
-// If we force-append "Z" to make it UTC, we correctly handle (a) but break
-// (b) — in UTC+6 a local 22:00 gets shifted ~6h forward, into tomorrow.
-//
-// Heuristic: try UTC first. If that lands the timestamp > 2h in the future,
-// the backend is almost certainly sending local time → re-parse as local.
 const parseTimestamp = (iso: string): Date => {
   if (!iso) return new Date(NaN);
   const hasTz = /[zZ]$|[+-]\d{2}:?\d{2}$/.test(iso);
@@ -65,8 +43,6 @@ const parseTimestamp = (iso: string): Date => {
   return asUtc;
 };
 
-// All usage timestamps are surfaced in Bangladesh Standard Time so the
-// dashboard reads the same regardless of where the viewer is sitting.
 const BD_TZ = 'Asia/Dhaka';
 
 const fmtDateTime = (iso: string) =>
@@ -89,9 +65,6 @@ const fmtDurationSec = (totalSec: number): string => {
   return `${hrs}h ${remM}m`;
 };
 
-/** Format the gap between two ISO timestamps. Used as the client-side
- *  fallback for old rows where the server didn't populate
- *  duration_seconds. */
 const fmtDuration = (fromIso?: string | null, toIso?: string | null): string => {
   if (!fromIso || !toIso) return '—';
   const a = parseTimestamp(fromIso).getTime();
@@ -118,17 +91,12 @@ const isInRange = (iso: string, range: TimeRange): boolean => {
   const t = parseTimestamp(iso).getTime();
   if (isNaN(t)) return false;
   if (range === 'today') {
-    // Rolling last 24 hours — surfaces activity from late yesterday too,
-    // which the user thinks of as "recent / today".
     return t >= Date.now() - 24 * 60 * 60 * 1000;
   }
   // week = last 7 × 24 h (rolling)
   return t >= Date.now() - 7 * 24 * 60 * 60 * 1000;
 };
 
-// ─── Stat card (top strip) ────────────────────────────────────────────────
-// Clickable. When expanded it reveals the top contributors to that metric —
-// e.g. "Downloads" shows which users downloaded the most.
 type MetricKey = 'users' | 'batches' | 'files' | 'extracted' | 'downloads' | 'ocr_downloads' | 'table_extracts';
 
 interface StatCardProps {
@@ -143,7 +111,6 @@ interface StatCardProps {
 }
 
 const StatCard = ({ icon: Icon, label, value, metric, expanded, onToggle, users }: StatCardProps) => {
-  // Top 5 contributors for this metric. "users" metric just lists active ones.
   const top = useMemo(() => {
     if (metric === 'users') {
       return [...users]

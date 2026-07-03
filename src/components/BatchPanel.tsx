@@ -1,12 +1,16 @@
 import { useState, useEffect, useCallback } from 'react';
-import { X, Pencil, Trash2, ChevronDown, ChevronRight, Check, Loader2, CheckCircle2 } from 'lucide-react';
+import { X, Pencil, Trash2, ChevronDown, ChevronRight, Check, Loader2, CheckCircle2, Download } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { DOCUMENT_TYPES, type DocumentType, type ExtractedRow } from '@/types/utilscraper';
+import { exportToExcel } from '@/lib/excel-export';
+import { toast } from 'sonner';
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000';
 
 interface Batch {
   id: number;
   name: string;
+  doc_type?: DocumentType;
   created_by: string;
   updated_by: string;
   created_at: string;
@@ -45,6 +49,56 @@ export default function BatchPanel({ username, activeBatchId, onClose, onSelect 
   const [expandedId, setExpandedId]   = useState<number | null>(null);
   const [records, setRecords]         = useState<Record<number, BatchRecord[]>>({});
   const [loadingRec, setLoadingRec]   = useState<number | null>(null);
+
+  const [downloadingId, setDownloadingId] = useState<number | null>(null);
+
+  // Fetch a batch's records and export using the doc type baked in at
+  // batch-creation time. No per-download picker — the batch's own
+  // doc_type wins.
+  //
+  // Pre-migration batches have doc_type = NULL (unknown). In that case we
+  // deliberately do NOT force a template — exportToExcel auto-detects the
+  // right doc type from the actual field names in the records. That's
+  // safer than defaulting to utility_bill, which would mislabel an old
+  // Bank Statement / Appraisal batch.
+  const handleDownload = async (batch: Batch) => {
+    setDownloadingId(batch.id);
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/batches/${batch.id}/records`);
+      const data = await res.json();
+      if (data.status !== 'ok') { toast.error('Failed to load batch records'); return; }
+      const rows: ExtractedRow[] = [];
+      for (const rec of data.records as BatchRecord[]) {
+        for (const [field, value] of Object.entries(rec.fields)) {
+          if (!value) continue;
+          rows.push({
+            page: rec.page,
+            field,
+            value,
+            confidence: 'high',
+            wasOcr: false,
+            filename: rec.filename,
+            sessionId: rec.session_id,
+          });
+        }
+      }
+      if (rows.length === 0) { toast('No records to export in this batch', { icon: 'ℹ️' }); return; }
+      const safeStem = batch.name.replace(/[^a-z0-9]+/gi, '_').replace(/^_|_$/g, '') || `batch_${batch.id}`;
+      // Only pass forceDocType when the batch actually has one. NULL →
+      // let the exporter's field-count heuristic pick the template.
+      const opts = batch.doc_type ? { forceDocType: batch.doc_type } : {};
+      await exportToExcel(rows, safeStem, safeStem, opts);
+      const label = batch.doc_type
+        ? (DOCUMENT_TYPES.find(t => t.value === batch.doc_type)?.label ?? batch.doc_type)
+        : 'auto-detected template';
+      toast.success(`Downloading "${batch.name}" as ${label}`);
+    } catch (err) {
+      console.error('batch download failed:', err);
+      toast.error('Download failed');
+    } finally {
+      setDownloadingId(null);
+    }
+  };
 
   const loadBatches = useCallback(async () => {
     setLoading(true);
@@ -119,7 +173,7 @@ export default function BatchPanel({ username, activeBatchId, onClose, onSelect 
           <div>
             <h2 className="text-sm font-bold text-foreground">Batch Manager</h2>
             <p className="text-[11px] text-muted-foreground mt-0.5">
-              {batches.length} batch{batches.length !== 1 ? 'es' : ''} · rename, delete, inspect records
+              {batches.length} batch{batches.length !== 1 ? 'es' : ''} · download, rename, delete, inspect records
             </p>
           </div>
           <button
@@ -163,7 +217,32 @@ export default function BatchPanel({ username, activeBatchId, onClose, onSelect 
                         className="flex-1 h-6 px-2 text-xs rounded border border-primary bg-background text-foreground outline-none"
                       />
                     ) : (
-                      <span className="text-xs font-semibold text-foreground truncate">{b.name}</span>
+                      <span className="flex items-center gap-2 min-w-0">
+                        <span className="text-xs font-semibold text-foreground truncate">{b.name}</span>
+                        {/* Doc-type badge — display only. Batches always get
+                            their doc type at creation time now, so there's
+                            no reason to change it after. Batches without a
+                            doc_type simply don't show a badge. */}
+                        {(() => {
+                          const dt = b.doc_type
+                            ? DOCUMENT_TYPES.find(t => t.value === b.doc_type)
+                            : null;
+                          if (!dt) return null;
+                          return (
+                            <span
+                              className="shrink-0 text-[10px] font-semibold px-1.5 py-0.5 rounded-full border"
+                              style={{
+                                backgroundColor: `${dt.color}22`,
+                                borderColor: `${dt.color}55`,
+                                color: dt.color,
+                              }}
+                              title={`Export template: ${dt.label}`}
+                            >
+                              {dt.label}
+                            </span>
+                          );
+                        })()}
+                      </span>
                     )}
                   </button>
 
@@ -212,6 +291,34 @@ export default function BatchPanel({ username, activeBatchId, onClose, onSelect 
                       </>
                     ) : (
                       <>
+                        {/* Download batch as Excel using the doc type baked in
+                            at creation. No picker — one click, one file.
+                            Pre-migration batches (doc_type = NULL) show
+                            "auto-detected" — the exporter picks the
+                            template from actual field names. */}
+                        {(() => {
+                          const dt = b.doc_type
+                            ? DOCUMENT_TYPES.find(t => t.value === b.doc_type)
+                            : null;
+                          return (
+                            <button
+                              className="p-1 rounded text-muted-foreground hover:text-primary hover:bg-primary/10 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                              disabled={downloadingId === b.id || b.record_count === 0}
+                              title={
+                                b.record_count === 0
+                                  ? 'No records to download'
+                                  : dt
+                                    ? `Download as ${dt.label}`
+                                    : 'Set the batch template first (click the pill next to the batch name)'
+                              }
+                              onClick={e => { e.stopPropagation(); void handleDownload(b); }}
+                            >
+                              {downloadingId === b.id
+                                ? <Loader2 className="w-3 h-3 animate-spin" />
+                                : <Download className="w-3 h-3" />}
+                            </button>
+                          );
+                        })()}
                         <button
                           className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-all"
                           onClick={() => { setEditingId(b.id); setEditName(b.name); }}
