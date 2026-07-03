@@ -947,14 +947,41 @@ function delay(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-export async function triggerForceOcr(sessionId: string): Promise<{ total_pages: number } | null> {
+export async function triggerForceOcr(
+  sessionId: string,
+  opts: { file?: File; onSessionRenewed?: (oldId: string, newId: string) => void } = {},
+): Promise<{ total_pages: number; sessionId: string } | null> {
+  const doFetch = (id: string) => fetch(
+    `${BACKEND_URL}/api/utility/session/${id}/force-ocr`,
+    { method: 'POST', signal: AbortSignal.timeout(10000) },
+  );
+
+  let liveId = sessionId;
+  let res: Response | null = null;
   try {
-    const res = await fetch(`${BACKEND_URL}/api/utility/session/${sessionId}/force-ocr`, {
-      method: 'POST',
-      signal: AbortSignal.timeout(10000),
-    });
-    if (!res.ok) return null;
-    return await res.json();
+    res = await doFetch(liveId);
+  } catch {
+    // Network-level failure (offline, CORS-blocked 404, timeout). Attempt
+    // the same reupload-recovery path the other endpoints use.
+  }
+
+  // Backend evicted the session, or the network-blocked response was
+  // actually a 404. Reupload the file and retry once.
+  if ((res === null || res.status === 404) && opts.file) {
+    const newId = await reprocessFile(opts.file);
+    if (newId) {
+      opts.onSessionRenewed?.(liveId, newId);
+      liveId = newId;
+      try {
+        res = await doFetch(liveId);
+      } catch { return null; }
+    }
+  }
+
+  if (!res || !res.ok) return null;
+  try {
+    const data = await res.json();
+    return { total_pages: data.total_pages, sessionId: liveId };
   } catch {
     return null;
   }

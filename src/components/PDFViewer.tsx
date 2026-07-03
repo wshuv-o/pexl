@@ -6,7 +6,7 @@ import ViewerToolbar from './ViewerToolbar';
 import HighlightOverlay from './HighlightOverlay';
 import FieldLabelPicker from './FieldLabelPicker';
 import HighlightLegend from './HighlightLegend';
-import { downloadOcrPdf, fetchTableRegions, extractRegions, extractTableRegion, downloadTableRegionExcel } from '@/lib/api';
+import { downloadOcrPdf, fetchTableRegions, extractRegions, extractTableRegion, downloadTableRegionExcel, getOcrProgress } from '@/lib/api';
 import TableSanitizeDialog from './TableSanitizeDialog';
 import { findAllTextPositionsInPdfPage, detectTableRegionsInPdfPage, getTextAtRect } from '@/lib/pdf-extract';
 import { useAuth } from '@/contexts/AuthContext';
@@ -607,31 +607,63 @@ export default function PDFViewer({
 
   const handleDownloadOcr = useCallback(async () => {
     setDownloadingOcr(true);
+
+    // Live progress toast that updates every 2s with the current page /
+    // total from the backend's ocr_progress dict. Backend OCR is CPU
+    // bound and can take 30-60s+ on a 30-page force-ocr rebuild; without
+    // this the user just sees a spinner and assumes it's stuck.
+    const toastId = toast.loading('Preparing OCR PDF…', { duration: Infinity });
+    let pollStopped = false;
+    const pollProgress = async () => {
+      const started = Date.now();
+      while (!pollStopped) {
+        const prog = await getOcrProgress(session.id).catch(() => null);
+        if (pollStopped) break;
+        if (prog && prog.total_pages > 0) {
+          const cur = prog.current_page ?? 0;
+          const tot = prog.total_pages;
+          const secs = Math.max(prog.elapsed_sec ?? 0, Math.floor((Date.now() - started) / 1000));
+          if (prog.done || cur >= tot) {
+            toast.loading(`Finalising OCR PDF… (${tot}/${tot} pages · ${secs}s)`, { id: toastId });
+          } else {
+            toast.loading(`Building OCR PDF — page ${cur}/${tot} (${secs}s)`, { id: toastId });
+          }
+        }
+        await new Promise(r => setTimeout(r, 2000));
+      }
+    };
+    void pollProgress();
+
     try {
       const { newSessionId, blob, filename } = await downloadOcrPdf(
         session.id, session.filename, session.file,
       );
+      pollStopped = true;
       if (newSessionId && newSessionId !== session.id) {
         onSessionRenewed?.(session.id, newSessionId);
       }
-      // Swap the in-viewer document to the freshly OCR'd copy so that
-      // text-select works on the new searchable layer without requiring
-      // the user to re-upload.
-      if (onPdfReplaced) {
-        const ocrFile = new File([blob], filename, { type: 'application/pdf' });
-        onPdfReplaced(ocrFile);
-      }
+      // NOTE: we deliberately do NOT call onPdfReplaced here anymore. Swapping
+      // the in-viewer PDF to the OCR'd copy caused pdf.js to redecode the
+      // entire document immediately after a 30-60s wait — the viewer looked
+      // frozen for several more seconds AFTER the file had already saved to
+      // disk. If the user wants text-select on the OCR'd version they can
+      // drop the downloaded file back onto the app. Keeping the original
+      // in-viewer keeps the click → save flow feeling snappy.
+      void blob; void filename;
+      toast.dismiss(toastId);
       toast.success('OCR\'d PDF downloaded');
       // Bump the per-user OCR-download counter (Odin /pexl/usage).
       // Pass session.uploadedAt + now so the backend records the time
       // span; Errors are swallowed so telemetry never blocks the UX.
       trackOcrDownload(session.uploadedAt, Date.now()).catch(() => {});
     } catch (err: unknown) {
+      pollStopped = true;
+      toast.dismiss(toastId);
       const msg = err instanceof Error ? err.message : 'Download failed';
       toast.error(msg);
     }
     setDownloadingOcr(false);
-  }, [session.id, session.filename, session.file, session.uploadedAt, onSessionRenewed, onPdfReplaced, trackOcrDownload]);
+  }, [session.id, session.filename, session.file, session.uploadedAt, onSessionRenewed, trackOcrDownload]);
 
   const pageRefs  = useRef<Record<number, HTMLDivElement | null>>({});
   const scrollRef = useRef<HTMLDivElement>(null);

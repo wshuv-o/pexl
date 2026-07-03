@@ -1959,20 +1959,43 @@ export default function Index() {
                   forcingOcr={forcingOcrId === activeSession.id}
                   onForceOcr={async () => {
                     if (forcingOcrId === activeSession.id) return;
-                    if (!confirm('Re-OCR this PDF from scratch, ignoring its existing text layer?\n\nUse this when the PDF has a corrupt or unreadable text layer.')) return;
                     setForcingOcrId(activeSession.id);
+                    // Optimistically mark the session as force-ocr — the
+                    // toolbar badge flips to the amber "Force OCR active"
+                    // state immediately. We DON'T seed a fake ocrProgress
+                    // here because the backend endpoint just flips a flag
+                    // and clears caches; the actual OCR runs later when
+                    // the user clicks Download OCR. Seeding a 0/N progress
+                    // bar made it look like something was hanging forever.
+                    let liveId = activeSession.id;
                     setSessions(prev => prev.map(s => s.id === activeSession.id
-                      ? { ...s, forceOcr: true, ocrProgress: { current_page: 0, total_pages: s.total_pages, done: false, elapsed_sec: 0 } }
+                      ? { ...s, forceOcr: true, ocrProgress: null }
                       : s
                     ));
-                    const result = await triggerForceOcr(activeSession.id);
+                    const result = await triggerForceOcr(activeSession.id, {
+                      file: activeSession.file,
+                      onSessionRenewed: (oldId, newId) => {
+                        liveId = newId;
+                        setSessions(prev => prev.map(s => s.id === oldId ? { ...s, id: newId } : s));
+                        setOpenTabs(prev => prev.map(t => t === oldId ? newId : t));
+                        setActiveTabId(prev => prev === oldId ? newId : prev);
+                      },
+                    });
                     setForcingOcrId(null);
                     if (!result) {
-                      toast.error('Force Re-OCR failed — session may have expired, try re-uploading');
+                      // Roll back the optimistic flag so the toolbar badge
+                      // matches reality (nothing changed on the server).
+                      setSessions(prev => prev.map(s => s.id === liveId
+                        ? { ...s, forceOcr: false }
+                        : s
+                      ));
+                      toast.error('Force Re-OCR failed — check your connection and try again');
                       return;
                     }
-                    startOcrPolling(activeSession.id);
-                    toast.success('Force Re-OCR started — all pages will be scanned from the image layer');
+                    toast.success(
+                      'Force Re-OCR enabled — click "Download OCR" to build a fresh searchable PDF',
+                      { duration: 6000 },
+                    );
                   }}
                 />
               </div>
