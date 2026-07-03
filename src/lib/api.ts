@@ -496,15 +496,23 @@ async function fetchWithReuploadRecovery(
 ): Promise<Response> {
   let res: Response | null = null;
   let threwNetworkError = false;
-  try {
-    res = await doFetch(sessionId);
-  } catch {
-    threwNetworkError = true;
+
+  // Skip the doomed initial POST when the id is still the client-side
+  // placeholder — the backend has never heard of a `temp-...` id, so
+  // it'd be a guaranteed 404 that clutters the console. Go straight to
+  // the reupload path when we have the file blob.
+  const isTemp = sessionId.startsWith('temp-');
+  if (!isTemp) {
+    try {
+      res = await doFetch(sessionId);
+    } catch {
+      threwNetworkError = true;
+    }
   }
 
   const shouldRetry =
     !!opts.file &&
-    (threwNetworkError || (res !== null && res.status === 404));
+    (isTemp || threwNetworkError || (res !== null && res.status === 404));
 
   if (shouldRetry) {
     const newId = await reprocessFile(opts.file!);
@@ -834,13 +842,25 @@ export async function extractRegions(
       },
     );
 
-    let res = await doFetch(liveId);
-    if (res.status === 404 && file) {
+    // Skip the initial POST when the id is still the client-side
+    // temp placeholder — guaranteed 404, only fills the console.
+    const isTemp = liveId.startsWith('temp-');
+    let res: Response;
+    if (isTemp && file) {
       const newId = await reprocessFile(file);
-      if (newId) {
-        opts.onSessionRenewed?.(liveId, newId);
-        liveId = newId;
-        res = await doFetch(liveId);
+      if (!newId) return null;
+      opts.onSessionRenewed?.(liveId, newId);
+      liveId = newId;
+      res = await doFetch(liveId);
+    } else {
+      res = await doFetch(liveId);
+      if (res.status === 404 && file) {
+        const newId = await reprocessFile(file);
+        if (newId) {
+          opts.onSessionRenewed?.(liveId, newId);
+          liveId = newId;
+          res = await doFetch(liveId);
+        }
       }
     }
     if (!res.ok) return null;
@@ -958,15 +978,23 @@ export async function triggerForceOcr(
 
   let liveId = sessionId;
   let res: Response | null = null;
-  try {
-    res = await doFetch(liveId);
-  } catch {
-    // Network-level failure (offline, CORS-blocked 404, timeout). Attempt
-    // the same reupload-recovery path the other endpoints use.
+
+  // Skip the doomed initial POST when the id is still the client-side
+  // placeholder — the backend has never heard of a `temp-...` id, so
+  // it'd be a guaranteed 404 that clutters the console. Go straight to
+  // the reupload path when we have the file.
+  const isTemp = sessionId.startsWith('temp-');
+  if (!isTemp) {
+    try {
+      res = await doFetch(liveId);
+    } catch {
+      // Network-level failure (offline, CORS-blocked 404, timeout). Fall
+      // through to the same reupload-recovery path.
+    }
   }
 
-  // Backend evicted the session, or the network-blocked response was
-  // actually a 404. Reupload the file and retry once.
+  // Backend evicted the session (or the id was still a temp placeholder).
+  // Reupload the file and retry once.
   if ((res === null || res.status === 404) && opts.file) {
     const newId = await reprocessFile(opts.file);
     if (newId) {
