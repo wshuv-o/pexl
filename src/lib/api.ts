@@ -484,6 +484,44 @@ export interface TableRegionResult {
   cells?: TableCell[];
 }
 
+// Helper: run `fetch` and treat both real 404s AND CORS/network failures
+// (which fetch() throws instead of returning a response) as "session
+// gone, try reupload". Some deployed backends CORS-block their own error
+// responses so a 404 arrives at the client as a TypeError; without this
+// wrapping the reupload path never fires and users see "session expired".
+async function fetchWithReuploadRecovery(
+  doFetch: (id: string) => Promise<Response>,
+  sessionId: string,
+  opts: { file?: File; onSessionRenewed?: (oldId: string, newId: string) => void },
+): Promise<Response> {
+  let res: Response | null = null;
+  let threwNetworkError = false;
+  try {
+    res = await doFetch(sessionId);
+  } catch {
+    threwNetworkError = true;
+  }
+
+  const shouldRetry =
+    !!opts.file &&
+    (threwNetworkError || (res !== null && res.status === 404));
+
+  if (shouldRetry) {
+    const newId = await reprocessFile(opts.file!);
+    if (newId) {
+      opts.onSessionRenewed?.(sessionId, newId);
+      try {
+        res = await doFetch(newId);
+      } catch (err) {
+        throw new Error((err as Error)?.message ?? 'Network error after reupload');
+      }
+    }
+  }
+
+  if (!res) throw new Error('Network error — check the backend is reachable and CORS is configured');
+  return res;
+}
+
 export async function extractTableRegion(
   sessionId: string,
   page: number,
@@ -497,17 +535,7 @@ export async function extractTableRegion(
     { method: 'POST', headers: { 'Content-Type': 'application/json' }, body },
   );
 
-  let res = await doFetch(sessionId);
-  // Backend LRU-evicted the session — silently reupload and retry once so
-  // the user doesn't see "session expired" mid-workflow.
-  if (res.status === 404 && opts.file) {
-    const newId = await reprocessFile(opts.file);
-    if (newId) {
-      opts.onSessionRenewed?.(sessionId, newId);
-      res = await doFetch(newId);
-    }
-  }
-
+  const res = await fetchWithReuploadRecovery(doFetch, sessionId, opts);
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error((data as any).error ?? `Extraction failed (${res.status})`);
   return data as TableRegionResult;
@@ -527,15 +555,7 @@ export async function downloadTableRegionExcel(
     { method: 'POST', headers: { 'Content-Type': 'application/json' }, body },
   );
 
-  let res = await doFetch(sessionId);
-  if (res.status === 404 && opts.file) {
-    const newId = await reprocessFile(opts.file);
-    if (newId) {
-      opts.onSessionRenewed?.(sessionId, newId);
-      res = await doFetch(newId);
-    }
-  }
-
+  const res = await fetchWithReuploadRecovery(doFetch, sessionId, opts);
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     throw new Error((data as any).error ?? `Export failed (${res.status})`);
