@@ -288,7 +288,7 @@ export async function fetchConvertedPdf(sessionId: string, originalName: string)
   }
 }
 
-export type OcrFetchReason = 'ok' | 'server-error' | 'not-found' | 'network' | 'not-pdf' | 'unknown';
+export type OcrFetchReason = 'ok' | 'server-error' | 'gateway-timeout' | 'not-found' | 'network' | 'not-pdf' | 'unknown';
 
 export interface OcrFetchResult {
   blob: Blob | null;
@@ -317,6 +317,7 @@ export async function fetchOcrPdfBlobWithReason(sessionId: string): Promise<OcrF
     if (skipRemainingEndpoints) break;
 
     for (let attempt = 0; attempt < 2; attempt++) {
+      const startedAt = Date.now();
       try {
         // OCR on multi-page PDFs can easily exceed a minute, especially on
         // CPU-only Paddle with oneDNN disabled. 10 minutes is the upper bound
@@ -330,6 +331,14 @@ export async function fetchOcrPdfBlobWithReason(sessionId: string): Promise<OcrF
           }
           lastReason = 'not-pdf';
           break; // bad body, move to next endpoint
+        }
+        // 504 (or 502/408) → reverse-proxy timeout while OCR was still running.
+        // Distinct from a 5xx server crash because the OCR *is* progressing
+        // on the backend, the proxy just didn't wait long enough.
+        if (res.status === 504 || res.status === 502 || res.status === 408) {
+          lastReason = 'gateway-timeout';
+          skipRemainingEndpoints = true;
+          break;
         }
         // Non-OK: retry on transient statuses, otherwise move on.
         if (TRANSIENT_STATUSES.has(res.status) && attempt === 0) {
@@ -349,6 +358,19 @@ export async function fetchOcrPdfBlobWithReason(sessionId: string): Promise<OcrF
         break;
       } catch (err: unknown) {
         void err;
+        // If the request threw after more than ~30 seconds, the browser most
+        // likely got a 504 (or Cloudflare 524) that lacked CORS headers and
+        // couldn't be surfaced as a real Response object. Treat those as
+        // gateway timeouts so the message points the user at the actual
+        // problem (nginx timeout) instead of confusing them with "network
+        // error".
+        const elapsedSec = (Date.now() - startedAt) / 1000;
+        if (elapsedSec > 30) {
+          lastReason = 'gateway-timeout';
+          lastStatus = undefined;
+          skipRemainingEndpoints = true;
+          break;
+        }
         lastReason = 'network';
         lastStatus = undefined;
         if (attempt === 0) {
@@ -395,6 +417,8 @@ export async function fetchOcrPdfBlobWithRecovery(
 export function ocrFetchErrorMessage(result: OcrFetchResult, filename?: string): string {
   const name = filename ? ` for ${filename}` : '';
   switch (result.reason) {
+    case 'gateway-timeout':
+      return `OCR is taking longer than the reverse-proxy timeout allows${name}. The backend is still processing but nginx (or Cloudflare) closed the connection. Ask ops to raise proxy_read_timeout to 900s+ on /api/utility/ and turn off Cloudflare proxying for pexlbackend (grey-cloud the DNS record).`;
     case 'server-error':
       return `Backend error${result.status ? ` (${result.status})` : ''}${name} — the server couldn't build the OCR'd PDF. Try again in a moment.`;
     case 'not-found':
@@ -600,7 +624,7 @@ export async function downloadAllOcrPdfsAsZip(
   }));
 
   const reasonCounts: Record<OcrFetchReason, number> = {
-    ok: 0, 'server-error': 0, 'not-found': 0, network: 0, 'not-pdf': 0, unknown: 0,
+    ok: 0, 'server-error': 0, 'gateway-timeout': 0, 'not-found': 0, network: 0, 'not-pdf': 0, unknown: 0,
   };
 
   for (const r of results) {
@@ -616,7 +640,7 @@ export async function downloadAllOcrPdfsAsZip(
 
   if (added === 0) {
     // Pick the most common non-ok reason to surface
-    const dominant = (['server-error', 'not-found', 'network', 'not-pdf', 'unknown'] as OcrFetchReason[])
+    const dominant = (['gateway-timeout', 'server-error', 'not-found', 'network', 'not-pdf', 'unknown'] as OcrFetchReason[])
       .find(r => reasonCounts[r] > 0) ?? 'unknown';
     throw new Error(ocrFetchErrorMessage({ blob: null, reason: dominant }));
   }
