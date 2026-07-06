@@ -40,7 +40,6 @@ module.exports = {
   apps: [
     {
       name: 'pexl_api',
-      cwd: '/root/test/pexl_api',
       script: 'venv/bin/uvicorn',
       args: 'main:app --host 0.0.0.0 --port 8006 --workers 1 --proxy-headers --forwarded-allow-ips=*',
       interpreter: 'none',
