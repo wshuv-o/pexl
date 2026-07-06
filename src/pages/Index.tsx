@@ -580,15 +580,11 @@ export default function Index() {
     if (!targets.length) { toast('Draw highlight boxes first', { icon: 'ℹ️' }); return; }
 
     setExtracting(true);
+    // Reveal the results panel up front so extracted rows stream into it live
+    // as each file finishes, instead of appearing all at once at the end.
+    setShowExcel(true);
     let totalExtracted = 0;
     let totalNull = 0;
-
-    // Track any renewed session IDs so we can swap them in one batched
-    // setSessions call after the worker pool finishes. When the backend
-    // has evicted a session (LRU cap or TTL), extractRegions transparently
-    // re-uploads and returns the new id via onSessionRenewed. Without this
-    // swap, the next extract call would hit the stale id and re-upload again.
-    const renewals: Array<{ oldId: string; newId: string }> = [];
 
     // Bounded worker pool. The old `Promise.allSettled(targets.map(...))`
     // fired all N requests simultaneously, which just stacked up in the
@@ -622,9 +618,8 @@ export default function Index() {
       let liveId = sess.id;
       const results = await extractRegions(liveId, allHl, sess.file!, {
         strict: true,
-        onSessionRenewed: (oldId, newId) => {
+        onSessionRenewed: (_oldId, newId) => {
           liveId = newId;
-          renewals.push({ oldId, newId });
         },
       });
 
@@ -646,17 +641,37 @@ export default function Index() {
       return { sess, newHighlights, sessResults, liveId };
     };
 
+    // Apply each file's results to state the instant its worker finishes,
+    // instead of collecting everything and doing one setSessions after the
+    // whole pool drains. The results panel reads from sessions[].extractedData
+    // (see combinedExtractedData), so streaming the updates in makes rows
+    // appear live as each PDF completes — no waiting for all N files.
+    const applyOne = (value: WorkerResult) => {
+      const { sess, newHighlights, sessResults, liveId } = value;
+      totalExtracted += sessResults.length;
+      totalNull      += sessResults.filter(r => !r.value).length;
+      setSessions(prev => prev.map(s =>
+        s.id === sess.id
+          ? { ...s, id: liveId, highlights: newHighlights, extractedData: sessResults, status: 'extracted' as const }
+          : s,
+      ));
+      // A renewed backend session means the id changed mid-flight; keep the
+      // open-tabs list and active tab pointing at the live id.
+      if (liveId !== sess.id) {
+        setOpenTabs(prev => prev.map(t => (t === sess.id ? liveId : t)));
+        setActiveTabId(prev => (prev === sess.id ? liveId : prev));
+      }
+    };
+
     const queue = [...targets];
-    const settled: PromiseSettledResult<WorkerResult>[] = [];
     const workers = Array.from({ length: Math.min(CONCURRENCY, queue.length) }, async () => {
       while (queue.length > 0) {
         const sess = queue.shift();
         if (!sess) return;
         try {
-          const value = await runOne(sess);
-          settled.push({ status: 'fulfilled', value });
-        } catch (reason) {
-          settled.push({ status: 'rejected', reason });
+          applyOne(await runOne(sess));
+        } catch (reason: any) {
+          toast.error(`Extraction failed: ${reason?.message ?? 'unknown error'}`);
         }
         done++;
         if (targets.length > 1) {
@@ -678,36 +693,6 @@ export default function Index() {
       clearDocumentCache();
     } catch { /* non-fatal */ }
 
-    const updates: { oldId: string; newId: string; highlights: Record<number, Highlight[]>; extractedData: ExtractedRow[] }[] = [];
-    for (const result of settled) {
-      if (result.status === 'fulfilled') {
-        const { sess, newHighlights, sessResults, liveId } = result.value;
-        updates.push({ oldId: sess.id, newId: liveId, highlights: newHighlights, extractedData: sessResults });
-        totalExtracted += sessResults.length;
-        totalNull += sessResults.filter(r => !r.value).length;
-      } else {
-        toast.error(`Extraction failed: ${result.reason?.message ?? 'unknown error'}`);
-      }
-    }
-    if (updates.length > 0) {
-      setSessions(prev => prev.map(s => {
-        const u = updates.find(x => x.oldId === s.id);
-        if (!u) return s;
-        return {
-          ...s,
-          id: u.newId,
-          highlights: u.highlights,
-          extractedData: u.extractedData,
-          status: 'extracted' as const,
-        };
-      }));
-      if (renewals.length > 0) {
-        setOpenTabs(prev => prev.map(t => renewals.find(r => r.oldId === t)?.newId ?? t));
-        setActiveTabId(prev => (prev && renewals.find(r => r.oldId === prev)?.newId) ?? prev);
-      }
-    }
-
-    setShowExcel(true);
     toast.success(`Extracted ${totalExtracted} value${totalExtracted !== 1 ? 's' : ''} from ${targets.length} PDF${targets.length !== 1 ? 's' : ''}`);
     if (totalNull > 0) toast.warning(`${totalNull} field${totalNull !== 1 ? 's' : ''} returned empty`);
     setExtracting(false);
