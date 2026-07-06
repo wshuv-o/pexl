@@ -39,7 +39,7 @@
 module.exports = {
   apps: [
     {
-      name: 'pexl_api',
+      name: 'pexl-backend',
       script: 'venv/bin/uvicorn',
       args: 'main:app --host 0.0.0.0 --port 8006 --workers 1 --proxy-headers --forwarded-allow-ips=*',
       interpreter: 'none',
@@ -60,8 +60,8 @@ module.exports = {
       kill_timeout: 8000,
 
       // Logs
-      out_file:    '/root/.pm2/logs/pexl_api-out.log',
-      error_file:  '/root/.pm2/logs/pexl_api-error.log',
+      out_file:    '/root/.pm2/logs/pexl-backend-out.log',
+      error_file:  '/root/.pm2/logs/pexl-backend-error.log',
       merge_logs:  true,
       time:        true,
 
