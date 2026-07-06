@@ -5,6 +5,7 @@ import {
   Upload, ChevronLeft, ChevronRight,
   AlertTriangle, FileSearch, X, ShieldCheck, LogOut,
   RotateCw, Eraser, DownloadCloud, Loader2, XCircle, Check,
+  Pause, Play, Square,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import UploadZone from '@/components/UploadZone';
@@ -34,6 +35,12 @@ export default function Index() {
   // blocking overlay. Each file's tab now spawns immediately with its own
   // 'processing' spinner. Matches boss-pdf's queue-list UX.
   const [extracting, setExtracting]             = useState(false);
+  // Batch-extract run controls (pause / resume / stop) + live progress for
+  // the floating control card. `extractCtrl` is a ref so the worker pool
+  // always reads the latest flags without stale-closure issues.
+  const [batchProgress, setBatchProgress]       = useState<{ done: number; total: number } | null>(null);
+  const [batchPaused, setBatchPaused]           = useState(false);
+  const extractCtrl = useRef<{ paused: boolean; cancelled: boolean }>({ paused: false, cancelled: false });
   const [showExcel, setShowExcel]               = useState(false);
   const [excelWidth, setExcelWidth]             = useState(480); // px, draggable
   const [backendDown, setBackendDown]           = useState(false);
@@ -555,6 +562,18 @@ export default function Index() {
     }));
   }, []);
 
+  // Pause/resume/stop controls for an in-flight batch extract. These flip
+  // flags on the ref the worker pool polls; up-to-CONCURRENCY requests that
+  // are already awaiting will still finish, but no NEW files start until
+  // resumed (or the run is abandoned on stop).
+  const pauseExtract  = useCallback(() => { extractCtrl.current.paused = true;  setBatchPaused(true);  }, []);
+  const resumeExtract = useCallback(() => { extractCtrl.current.paused = false; setBatchPaused(false); }, []);
+  const stopExtract   = useCallback(() => {
+    extractCtrl.current.cancelled = true;
+    extractCtrl.current.paused = false; // release the pause gate so workers can exit
+    setBatchPaused(false);
+  }, []);
+
   // Extract every session whose tab is currently OPEN and has highlights.
   // Closed-tab sessions keep their existing extractedData (still visible in
   // the Excel panel) but are skipped on subsequent extract runs — closing a
@@ -583,6 +602,10 @@ export default function Index() {
     // Reveal the results panel up front so extracted rows stream into it live
     // as each file finishes, instead of appearing all at once at the end.
     setShowExcel(true);
+    // Fresh run: clear any leftover pause/stop flags and seed the progress card.
+    extractCtrl.current = { paused: false, cancelled: false };
+    setBatchPaused(false);
+    setBatchProgress({ done: 0, total: targets.length });
     let totalExtracted = 0;
     let totalNull = 0;
 
@@ -593,11 +616,9 @@ export default function Index() {
     // exactly — same total throughput, cleaner progress feedback, no
     // browser thrash. Progress toast updates as each session completes.
     const CONCURRENCY = 6;
-    const toastId = toast.loading(
-      targets.length > 1
-        ? `Extracting 0 / ${targets.length}…`
-        : 'Extracting…',
-    );
+    // Multi-file runs surface progress in the floating control card (with
+    // pause/stop); a single file just gets a lightweight spinner toast.
+    const toastId = targets.length > 1 ? null : toast.loading('Extracting…');
     let done = 0;
 
     type WorkerResult = {
@@ -666,6 +687,13 @@ export default function Index() {
     const queue = [...targets];
     const workers = Array.from({ length: Math.min(CONCURRENCY, queue.length) }, async () => {
       while (queue.length > 0) {
+        // Stop → abandon the run. Pause → hold here (polling the flag) until
+        // resumed or stopped, without spinning the CPU.
+        if (extractCtrl.current.cancelled) return;
+        while (extractCtrl.current.paused && !extractCtrl.current.cancelled) {
+          await new Promise(r => setTimeout(r, 150));
+        }
+        if (extractCtrl.current.cancelled) return;
         const sess = queue.shift();
         if (!sess) return;
         try {
@@ -674,13 +702,11 @@ export default function Index() {
           toast.error(`Extraction failed: ${reason?.message ?? 'unknown error'}`);
         }
         done++;
-        if (targets.length > 1) {
-          toast.loading(`Extracting ${done} / ${targets.length}…`, { id: toastId });
-        }
+        setBatchProgress({ done, total: targets.length });
       }
     });
     await Promise.all(workers);
-    toast.dismiss(toastId);
+    if (toastId) toast.dismiss(toastId);
 
     // Batch extract loads pdfjs documents for every session it touched via
     // the client-first fast path. Even with the LRU cap in pdf-extract.ts,
@@ -693,20 +719,32 @@ export default function Index() {
       clearDocumentCache();
     } catch { /* non-fatal */ }
 
-    toast.success(`Extracted ${totalExtracted} value${totalExtracted !== 1 ? 's' : ''} from ${targets.length} PDF${targets.length !== 1 ? 's' : ''}`);
+    const stopped = extractCtrl.current.cancelled;
+    setBatchProgress(null);
+    setBatchPaused(false);
+
+    if (stopped) {
+      toast(`Stopped — extracted ${totalExtracted} value${totalExtracted !== 1 ? 's' : ''} from ${done} of ${targets.length} PDF${targets.length !== 1 ? 's' : ''}`, { icon: '⏹️' });
+    } else {
+      toast.success(`Extracted ${totalExtracted} value${totalExtracted !== 1 ? 's' : ''} from ${targets.length} PDF${targets.length !== 1 ? 's' : ''}`);
+    }
     if (totalNull > 0) toast.warning(`${totalNull} field${totalNull !== 1 ? 's' : ''} returned empty`);
     setExtracting(false);
 
-    // Track usage — also report each session's doc type so the usage
-    // dashboard can show "user X scraped N appraisal, M utility_bill, …".
-    // Use the *earliest* session uploadedAt as the batch start so
-    // (finished_at − uploaded_at) reflects the user's full waiting time.
-    const docTypes = targets.map(t => t.docType);
-    const uploadStarts = targets
+    // Track usage — count only the files actually processed, so a stopped run
+    // isn't billed for the PDFs it never touched. On a full run `done` equals
+    // targets.length, so this is unchanged for the common case.
+    // Report each session's doc type so the usage dashboard can show
+    // "user X scraped N appraisal, M utility_bill, …", and use the *earliest*
+    // uploadedAt as the batch start so (finished_at − uploaded_at) reflects
+    // the user's full waiting time.
+    const processed = targets.slice(0, done);
+    const docTypes = processed.map(t => t.docType);
+    const uploadStarts = processed
       .map(t => t.uploadedAt)
       .filter((n): n is number => typeof n === 'number');
     const batchUploadedAt = uploadStarts.length > 0 ? Math.min(...uploadStarts) : undefined;
-    trackUsage(targets.length, totalExtracted, docTypes, batchUploadedAt, Date.now())
+    trackUsage(processed.length, totalExtracted, docTypes, batchUploadedAt, Date.now())
       .catch(() => {});
   }, [sessions, openTabs, trackUsage]);
 
@@ -2139,6 +2177,47 @@ export default function Index() {
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Floating batch-extract control — pause / resume / stop a long run.
+          Shown only while a batch is in flight (batchProgress != null). */}
+      {batchProgress && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[70] flex items-center gap-3 rounded-xl border border-border bg-card/95 backdrop-blur px-4 py-2.5 shadow-2xl">
+          <Loader2 className={`w-4 h-4 text-primary ${batchPaused ? 'opacity-40' : 'animate-spin'}`} />
+          <span className="text-sm font-medium tabular-nums whitespace-nowrap">
+            {batchPaused ? 'Paused' : 'Extracting'} {batchProgress.done} / {batchProgress.total}
+          </span>
+          <div className="w-28 h-1.5 rounded-full bg-muted overflow-hidden">
+            <div
+              className="h-full bg-primary transition-all duration-300"
+              style={{ width: `${Math.round((batchProgress.done / Math.max(1, batchProgress.total)) * 100)}%` }}
+            />
+          </div>
+          {batchPaused ? (
+            <button
+              type="button"
+              onClick={resumeExtract}
+              className="inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
+            >
+              <Play className="w-3.5 h-3.5" /> Resume
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={pauseExtract}
+              className="inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium bg-muted hover:bg-muted/70 transition-colors"
+            >
+              <Pause className="w-3.5 h-3.5" /> Pause
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={stopExtract}
+            className="inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium text-red-600 hover:bg-red-500/10 transition-colors"
+          >
+            <Square className="w-3.5 h-3.5" /> Stop
+          </button>
         </div>
       )}
     </div>
