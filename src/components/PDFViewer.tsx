@@ -952,8 +952,10 @@ export default function PDFViewer({
       }
 
       setPickerPos({
-        x:    Math.min(px, (el.offsetWidth  ?? 600) - 160),
-        y:    Math.min(py, (el.offsetHeight ?? 800) - 200),
+        // Anchor the label picker at the cursor-release point, clamped so the
+        // popover (w-48 ≈ 192px wide) stays fully on the page.
+        x:    Math.max(0, Math.min(px, (el.offsetWidth  ?? 600) - 200)),
+        y:    Math.max(0, Math.min(py, (el.offsetHeight ?? 800) - 200)),
         rect,
         page: drawingPage,
       });

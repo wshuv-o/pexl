@@ -25,7 +25,7 @@ export default function FieldLabelPicker({ x, y, docType, customFields, onSelect
   return (
     <div
       className="absolute z-20 bg-card border border-border rounded-lg shadow-lg p-2 w-48"
-      style={{ left: Math.min(x, 200), top: y }}
+      style={{ left: x, top: y }}
       onClick={e => e.stopPropagation()}
       onMouseDown={e => e.stopPropagation()}
     >
