@@ -25,6 +25,7 @@ from typing import Optional
 
 from pdf_store import store
 from table_extract import router as table_extract_router
+from table_calibrate import router as table_calibrate_router
 import batch_service as bs
 from date_extract import extract_date
 from services.doc_converter import is_doc_file, convert_to_pdf
@@ -35,6 +36,7 @@ from ocr_lazy import get_ocr_engine
 
 app = FastAPI(title="PDF OCR API")
 app.include_router(table_extract_router)
+app.include_router(table_calibrate_router)
 
 # CORS — enumerate origins explicitly. allow_origins=["*"] combined with
 # allow_credentials=True is an invalid pairing per the CORS spec: browsers

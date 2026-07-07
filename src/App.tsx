@@ -9,6 +9,7 @@ import Index from "./pages/Index";
 import Login from "./pages/Login";
 import Usage from "./pages/Usage";
 import AutoMap from "./pages/AutoMap";
+import TableScrape from "./pages/TableScrape";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -43,6 +44,14 @@ const App = () => (
               element={
                 <ProtectedRoute>
                   <AutoMap />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/table-scrape"
+              element={
+                <ProtectedRoute>
+                  <TableScrape />
                 </ProtectedRoute>
               }
             />

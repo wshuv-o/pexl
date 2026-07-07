@@ -37,13 +37,16 @@ export default function UploadZone({
     }
   }, []);
 
-  // Backend accepts PDF + Word (DOC / DOCX); Word docs are converted to
-  // PDF server-side before OCR/extraction.
+  // Backend accepts PDF + Word (DOC / DOCX) + raster images. Word docs are
+  // converted to PDF server-side; images are wrapped in a single-page PDF
+  // server-side. Keep the image list in sync with the backend's
+  // _IMAGE_EXTENSIONS (png/jpg/jpeg/tiff/tif/bmp/webp/gif).
   const isSupportedDoc = (f: File) =>
     f.type === 'application/pdf'
     || f.type === 'application/msword'
     || f.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-    || /\.(pdf|docx?)$/i.test(f.name);
+    || f.type.startsWith('image/')
+    || /\.(pdf|docx?|png|jpe?g|tiff?|bmp|webp|gif)$/i.test(f.name);
 
   // Recursively walk a dropped FileSystemEntry tree (folders on drag-drop).
   const collectFilesFromEntry = useCallback(
@@ -159,7 +162,7 @@ export default function UploadZone({
           onDrop={handleDrop}
         >
           <Upload className="w-4 h-4 text-primary shrink-0" />
-          <span className="text-muted-foreground text-xs">Drop more PDFs or Word docs · click to browse</span>
+          <span className="text-muted-foreground text-xs">Drop more PDFs, Word docs, or images · click to browse</span>
         </div>
         <input
           type="text"
@@ -180,7 +183,7 @@ export default function UploadZone({
             <span className="text-[10px] text-muted-foreground font-normal">(filtered)</span>
           )}
         </button>
-        <input ref={inputRef} type="file" accept=".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document" multiple className="hidden" onChange={handleFileChange} />
+        <input ref={inputRef} type="file" accept=".pdf,.doc,.docx,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.webp,.gif,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,image/*" multiple className="hidden" onChange={handleFileChange} />
         <input ref={folderInputCompactRef} type="file" multiple className="hidden" onChange={handleFolderChange} />
       </div>
     );
@@ -205,7 +208,7 @@ export default function UploadZone({
           <Upload className={`w-6 h-6 transition-all duration-200 ${dragOver ? 'text-primary' : 'text-muted-foreground'}`} />
         </div>
         <p className="text-sm font-semibold text-foreground">Click to upload or drag and drop</p>
-        <p className="text-xs text-muted-foreground mt-1">PDFs, Word docs (.doc / .docx), or folders · Word is converted server-side</p>
+        <p className="text-xs text-muted-foreground mt-1">PDFs, Word docs (.doc / .docx), images (JPG / PNG / …), or folders · converted server-side</p>
       </div>
       <div className="space-y-1.5">
         <label className="text-[11px] text-muted-foreground">
