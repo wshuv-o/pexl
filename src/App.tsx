@@ -10,6 +10,7 @@ import Login from "./pages/Login";
 import Usage from "./pages/Usage";
 import AutoMap from "./pages/AutoMap";
 import TableScrape from "./pages/TableScrape";
+import UtilityImport from "./pages/UtilityImport";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -52,6 +53,14 @@ const App = () => (
               element={
                 <ProtectedRoute>
                   <TableScrape />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/utility-import"
+              element={
+                <ProtectedRoute>
+                  <UtilityImport />
                 </ProtectedRoute>
               }
             />

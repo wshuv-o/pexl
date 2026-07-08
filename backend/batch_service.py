@@ -131,6 +131,42 @@ def upsert_record(batch_id: int, session_id: str, filename: str, page: int, fiel
         conn.close()
 
 
+def bulk_insert_records(batch_id: int, records: list) -> int:
+    """Insert many records at once. ``records`` is a list of dicts with keys
+    session_id, filename, page, fields. Used by the utility-Excel importer,
+    which can add tens of thousands of rows in one shot — an executemany is
+    orders of magnitude faster than per-row upserts.
+
+    Inserts in chunks so a single huge packet doesn't exceed MySQL's
+    max_allowed_packet. Returns the number of rows inserted.
+    """
+    if not records:
+        return 0
+    conn = _connect()
+    total = 0
+    try:
+        cur = conn.cursor()
+        CHUNK = 1000
+        sql = (
+            "INSERT INTO batch_records (batch_id, session_id, filename, page, fields) "
+            "VALUES (%s, %s, %s, %s, %s)"
+        )
+        for i in range(0, len(records), CHUNK):
+            chunk = records[i:i + CHUNK]
+            params = [
+                (batch_id, r["session_id"], r["filename"], r["page"], json.dumps(r["fields"]))
+                for r in chunk
+            ]
+            cur.executemany(sql, params)
+            total += cur.rowcount
+        conn.commit()
+        return total
+    except Error as e:
+        logger.error("bulk_insert_records: %s", e); raise
+    finally:
+        conn.close()
+
+
 def delete_record(batch_id: int, session_id: str, page: int) -> bool:
     conn = _connect()
     try:
