@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Scrape the crime-map table from every folder's screenshot in public/test,
 prepend the folder (community) name, and merge into one Excel."""
+import io
 import os
 import sys
 import glob
@@ -180,8 +181,9 @@ def cluster_rows(words, tol):
     return rows
 
 
-def extract_table(img_path):
-    words = ocr_words(img_path)
+def rows_from_words(words):
+    """Turn an OCR word list into crime-table row dicts. Shared by the CLI
+    (file path) and the web gateway (uploaded bytes)."""
     if not words:
         return []
     header_cy, col_cx = find_columns(words)
@@ -219,6 +221,24 @@ def extract_table(img_path):
         if row_vals["Incident #"] or row_vals["Crime"] or row_vals["Class"]:
             table.append(row_vals)
     return table
+
+
+def extract_table(img_path, engine=None):
+    """Scrape one screenshot file (CLI path)."""
+    return rows_from_words(ocr_words(img_path, engine=engine))
+
+
+def extract_table_from_bytes(image_bytes, engine=None, scale=2.0):
+    """Scrape one screenshot given raw bytes (web gateway path).
+
+    Mirrors ocr_words()'s 2x upscale so faint small text (e.g. the 'Theft'
+    class label) is detected."""
+    from PIL import Image
+    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    if scale and scale != 1.0:
+        img = img.resize((int(img.width * scale), int(img.height * scale)), Image.LANCZOS)
+    words = words_from_array(np.array(img), engine=engine)
+    return rows_from_words(words)
 
 
 def main():

@@ -11,6 +11,7 @@ import Usage from "./pages/Usage";
 import AutoMap from "./pages/AutoMap";
 import TableScrape from "./pages/TableScrape";
 import UtilityImport from "./pages/UtilityImport";
+import CrimeScrape from "./pages/CrimeScrape";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -61,6 +62,14 @@ const App = () => (
               element={
                 <ProtectedRoute>
                   <UtilityImport />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/crime-scrape"
+              element={
+                <ProtectedRoute>
+                  <CrimeScrape />
                 </ProtectedRoute>
               }
             />
