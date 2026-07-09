@@ -12,6 +12,7 @@ import AutoMap from "./pages/AutoMap";
 import TableScrape from "./pages/TableScrape";
 import UtilityImport from "./pages/UtilityImport";
 import CrimeScrape from "./pages/CrimeScrape";
+import ImagesToPdf from "./pages/ImagesToPdf";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -70,6 +71,14 @@ const App = () => (
               element={
                 <ProtectedRoute>
                   <CrimeScrape />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/images-to-pdf"
+              element={
+                <ProtectedRoute>
+                  <ImagesToPdf />
                 </ProtectedRoute>
               }
             />
