@@ -21,6 +21,7 @@ export default function TableScrape() {
   const [detecting, setDetecting] = useState(false);
   const [scraping, setScraping] = useState(false);
   const [table, setTable] = useState<string[][] | null>(null);
+  const [srcName, setSrcName] = useState('table');   // uploaded file's base name
   const [firstRowHeader, setFirstRowHeader] = useState(true);
   const [drag, setDrag] = useState<DragState>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -52,6 +53,7 @@ export default function TableScrape() {
   const onFile = useCallback(async (file: File) => {
     setUploading(true);
     setTable(null); setColumns([]); setRows([]); setSessionId(null);
+    setSrcName((file.name || 'table').replace(/\.[^.]+$/, '') || 'table');
     try {
       const fd = new FormData();
       fd.append('file', file);
@@ -140,13 +142,13 @@ export default function TableScrape() {
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
-      a.href = url; a.download = 'table_all_pages.xlsx'; a.click();
+      a.href = url; a.download = `${srcName}.xlsx`; a.click();   // same name as the uploaded PDF
       URL.revokeObjectURL(url);
       toast.success(`Excel downloaded — ${nRows} rows from ${nPages} page${nPages !== '1' ? 's' : ''}`);
     } catch (e: any) {
       toast.error('Excel error: ' + String(e).slice(0, 120));
     }
-  }, [sessionId, columns, rows, natural.w, natural.h, firstRowHeader]);
+  }, [sessionId, columns, rows, natural.w, natural.h, firstRowHeader, srcName]);
 
   return (
     <div className="min-h-screen bg-background text-foreground p-5">

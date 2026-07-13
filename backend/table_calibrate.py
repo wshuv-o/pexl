@@ -375,8 +375,9 @@ def scrape_excel_all(session_id: str, body: dict = Body(...)):
     buf = io.BytesIO()
     wb.save(buf)
 
+    # Name the Excel after the uploaded file (report.pdf -> report.xlsx).
     base = (pdf_doc.filename or session_id).rsplit(".", 1)[0]
-    fname = f"{base}_all_pages.xlsx"
+    fname = f"{base}.xlsx"
     return Response(
         content=buf.getvalue(),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
