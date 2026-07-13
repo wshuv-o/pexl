@@ -69,11 +69,18 @@ export default function TableScrape() {
     }
   }, [loadDetect]);
 
+  // Navigating pages keeps the SAME calibrated lines (they apply to every
+  // page). We only change which page image is shown — no re-detect, no reset.
   const gotoPage = useCallback((pg: number) => {
     if (!sessionId || pg < 1 || pg > totalPages) return;
     setPage(pg);
-    loadDetect(sessionId, pg);
-  }, [sessionId, totalPages, loadDetect]);
+  }, [sessionId, totalPages]);
+
+  // Explicit re-detect for the current page (replaces the shared lines with
+  // this page's auto-detected grid).
+  const reDetect = useCallback(() => {
+    if (sessionId) loadDetect(sessionId, page);
+  }, [sessionId, page, loadDetect]);
 
   // ---- line dragging ----
   const onMouseMove = useCallback((e: React.MouseEvent) => {
@@ -95,43 +102,51 @@ export default function TableScrape() {
   const delColumn = (i: number) => setColumns(prev => prev.filter((_, idx) => idx !== i));
   const delRow = (i: number) => setRows(prev => prev.filter((_, idx) => idx !== i));
 
+  // Preview the WHOLE PDF: the calibrated lines are applied to every page and
+  // all rows are stacked (first column = page number).
   const doScrape = useCallback(async () => {
     if (!sessionId) return;
     setScraping(true);
     try {
-      const res = await fetch(`${BACKEND_URL}/api/table/scrape/${sessionId}/${page}`, {
+      const res = await fetch(`${BACKEND_URL}/api/table/scrape-all/${sessionId}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ columns, rows }),
+        body: JSON.stringify({ columns, rows, ref_width: natural.w, ref_height: natural.h }),
       });
       if (!res.ok) { toast.error('Scrape failed: ' + (await res.text()).slice(0, 120)); return; }
       const j = await res.json();
       setTable(j.rows);
-      toast.success(`Scraped ${j.rows.length} rows × ${(columns.length + 1)} columns`);
+      toast.success(`Scraped ${j.rows.length} rows across ${j.page_count} page${j.page_count !== 1 ? 's' : ''}`);
     } catch (e: any) {
       toast.error('Scrape error: ' + String(e).slice(0, 120));
     } finally {
       setScraping(false);
     }
-  }, [sessionId, page, columns, rows]);
+  }, [sessionId, columns, rows, natural.w, natural.h]);
 
+  // Download the whole PDF (all pages) as one Excel with the same lines.
   const downloadExcel = useCallback(async () => {
     if (!sessionId) return;
     try {
-      const res = await fetch(`${BACKEND_URL}/api/table/excel/${sessionId}/${page}`, {
+      const res = await fetch(`${BACKEND_URL}/api/table/excel-all/${sessionId}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ columns, rows, first_row_header: firstRowHeader }),
+        body: JSON.stringify({
+          columns, rows, ref_width: natural.w, ref_height: natural.h,
+          first_row_header: firstRowHeader,
+        }),
       });
       if (!res.ok) { toast.error('Excel failed'); return; }
+      const nRows = res.headers.get('X-Table-Rows');
+      const nPages = res.headers.get('X-Table-Pages');
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
-      a.href = url; a.download = 'table.xlsx'; a.click();
+      a.href = url; a.download = 'table_all_pages.xlsx'; a.click();
       URL.revokeObjectURL(url);
-      toast.success('Excel downloaded');
+      toast.success(`Excel downloaded — ${nRows} rows from ${nPages} page${nPages !== '1' ? 's' : ''}`);
     } catch (e: any) {
       toast.error('Excel error: ' + String(e).slice(0, 120));
     }
-  }, [sessionId, page, columns, rows, firstRowHeader]);
+  }, [sessionId, columns, rows, natural.w, natural.h, firstRowHeader]);
 
   return (
     <div className="min-h-screen bg-background text-foreground p-5">
@@ -140,7 +155,7 @@ export default function TableScrape() {
           <ScanLine className="w-6 h-6 text-primary" />
           <div>
             <h1 className="text-lg font-bold">Table Scrape (calibrate lines)</h1>
-            <p className="text-xs text-muted-foreground">Upload a PDF or photo → adjust the grid lines → scrape the table.</p>
+            <p className="text-xs text-muted-foreground">Upload a PDF or photo → adjust the grid lines once → they apply to every page → scrape the whole PDF.</p>
           </div>
           <a href="/" className="ml-auto text-xs text-primary underline">← Back to main</a>
         </header>
@@ -162,23 +177,25 @@ export default function TableScrape() {
                 <span className="tabular-nums">Page {page} / {totalPages}</span>
                 <button type="button" aria-label="Next page" title="Next page" className="p-1.5 rounded hover:bg-muted disabled:opacity-40" disabled={page >= totalPages} onClick={() => gotoPage(page + 1)}><ChevronRight className="w-4 h-4" /></button>
               </div>
-              <button onClick={addColumn} className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-xs hover:bg-muted"><Plus className="w-3.5 h-3.5" /> Column line</button>
-              <button onClick={addRow} className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-xs hover:bg-muted"><Plus className="w-3.5 h-3.5" /> Row line</button>
-              <button onClick={doScrape} disabled={scraping || detecting}
+              <button type="button" onClick={addColumn} className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-xs hover:bg-muted"><Plus className="w-3.5 h-3.5" /> Column line</button>
+              <button type="button" onClick={addRow} className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-xs hover:bg-muted"><Plus className="w-3.5 h-3.5" /> Row line</button>
+              <button type="button" onClick={reDetect} disabled={detecting} title="Replace the lines with this page's auto-detected grid"
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-xs hover:bg-muted disabled:opacity-50"><ScanLine className="w-3.5 h-3.5" /> Auto-detect</button>
+              <button type="button" onClick={doScrape} disabled={scraping || detecting}
                       className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-primary text-primary-foreground text-sm font-medium disabled:opacity-50">
-                {scraping ? <Loader2 className="w-4 h-4 animate-spin" /> : <ScanLine className="w-4 h-4" />} Scrape
+                {scraping ? <Loader2 className="w-4 h-4 animate-spin" /> : <ScanLine className="w-4 h-4" />} Scrape all pages
               </button>
               <label className="inline-flex items-center gap-1.5 text-xs">
                 <input type="checkbox" checked={firstRowHeader} onChange={e => setFirstRowHeader(e.target.checked)} /> first row = header
               </label>
-              <button onClick={downloadExcel} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-sm hover:bg-muted"><Download className="w-4 h-4" /> Excel</button>
+              <button type="button" onClick={downloadExcel} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-sm hover:bg-muted"><Download className="w-4 h-4" /> Excel (all pages)</button>
             </>
           )}
         </div>
 
         {sessionId && (
           <p className="text-[11px] text-muted-foreground flex items-center gap-1">
-            <Info className="w-3 h-3" /> Drag any line to move it. Double-click a line to delete it. Blue = columns, green = rows.
+            <Info className="w-3 h-3" /> Drag a line to move · double-click to delete · these lines apply to <b>every page</b>. Blue = columns, green = rows. Use ◀ ▶ to preview other pages; "Auto-detect" re-detects the current page.
           </p>
         )}
 
@@ -227,7 +244,7 @@ export default function TableScrape() {
         {/* Result table */}
         {table && (
           <div className="space-y-2">
-            <h2 className="text-sm font-semibold">Result — {table.length} rows × {columns.length + 1} columns</h2>
+            <h2 className="text-sm font-semibold">Result — {table.length} rows across all pages (first column = page)</h2>
             <div className="overflow-auto border rounded-lg max-h-[420px]">
               <table className="text-xs border-collapse w-full">
                 <tbody>

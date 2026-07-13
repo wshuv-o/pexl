@@ -276,3 +276,114 @@ def scrape_excel(session_id: str, page: int, body: dict = Body(...)):
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{fname}"'},
     )
+
+
+# ---------------------------------------------------------------------------
+# All-pages: apply ONE set of calibrated lines to every page of the PDF
+# ---------------------------------------------------------------------------
+
+def _scaled_lines(columns, rows, ref_w, ref_h, page_w, page_h):
+    """Scale the calibrated lines (defined in the reference page's pixel space)
+    into a target page's pixel space. For a uniform-size PDF this is a no-op;
+    for pages of differing size it keeps the grid proportional."""
+    sx = (page_w / ref_w) if ref_w else 1.0
+    sy = (page_h / ref_h) if ref_h else 1.0
+    return [c * sx for c in columns], [r * sy for r in rows]
+
+
+def _scrape_all_pages(pdf_doc, columns, rows, ref_w, ref_h):
+    """Scrape every page with the same (scaled) calibrated lines.
+    Returns list of (page_number, table_rows)."""
+    out = []
+    for i in range(pdf_doc.page_count):
+        words, w_px, h_px = _page_words_px(pdf_doc, i)
+        cols_i, rows_i = _scaled_lines(columns, rows, ref_w or w_px, ref_h or h_px, w_px, h_px)
+        table = _scrape_with_lines(words, w_px, h_px, cols_i, rows_i)
+        out.append((i + 1, table))
+    return out
+
+
+@router.post("/api/table/scrape-all/{session_id}")
+def scrape_all(session_id: str, body: dict = Body(...)):
+    """Preview: scrape every page with the calibrated lines. Returns rows with
+    a leading page number so the frontend can show the whole-PDF result."""
+    pdf_doc = store.get(session_id)
+    if not pdf_doc:
+        return JSONResponse(status_code=404, content={"error": "Session not found. Re-upload."})
+    columns = body.get("columns", []) or []
+    rows = body.get("rows", []) or []
+    ref_w = float(body.get("ref_width") or 0)
+    ref_h = float(body.get("ref_height") or 0)
+
+    pages = _scrape_all_pages(pdf_doc, columns, rows, ref_w, ref_h)
+    combined = []
+    for page_no, table in pages:
+        for r in table:
+            combined.append([str(page_no)] + r)
+    return {
+        "rows": combined,
+        "n_cols": len(columns) + 2,     # page col + data cols
+        "n_rows": len(combined),
+        "page_count": pdf_doc.page_count,
+    }
+
+
+@router.post("/api/table/excel-all/{session_id}")
+def scrape_excel_all(session_id: str, body: dict = Body(...)):
+    """Download the WHOLE PDF as one Excel: the calibrated lines are applied to
+    every page and all rows are stacked with a leading Page column."""
+    pdf_doc = store.get(session_id)
+    if not pdf_doc:
+        return JSONResponse(status_code=404, content={"error": "Session not found. Re-upload."})
+
+    import openpyxl
+    from openpyxl.styles import Font
+
+    columns = body.get("columns", []) or []
+    rows = body.get("rows", []) or []
+    ref_w = float(body.get("ref_width") or 0)
+    ref_h = float(body.get("ref_height") or 0)
+    first_row_header = bool(body.get("first_row_header", False))
+
+    pages = _scrape_all_pages(pdf_doc, columns, rows, ref_w, ref_h)
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Table"
+
+    header_written = False
+    total = 0
+    for page_no, table in pages:
+        if not table:
+            continue
+        start = 0
+        if first_row_header:
+            if not header_written:
+                ws.append(["Page"] + table[0])
+                for cell in ws[ws.max_row]:
+                    cell.font = Font(bold=True)
+                header_written = True
+            # On every page the first row is the repeated column header — skip it.
+            start = 1
+        for r in table[start:]:
+            ws.append([str(page_no)] + r)
+            total += 1
+
+    if total == 0 and not header_written:
+        ws.append(["Page", "(no rows found on any page)"])
+
+    buf = io.BytesIO()
+    wb.save(buf)
+
+    base = (pdf_doc.filename or session_id).rsplit(".", 1)[0]
+    fname = f"{base}_all_pages.xlsx"
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f'attachment; filename="{fname}"',
+            "X-Table-Rows": str(total),
+            "X-Table-Pages": str(pdf_doc.page_count),
+            "Access-Control-Expose-Headers": "X-Table-Rows,X-Table-Pages",
+        },
+    )
