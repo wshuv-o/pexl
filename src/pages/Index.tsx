@@ -90,14 +90,11 @@ export default function Index() {
   const activeSession = sessions.find(s => s.id === activeTabId);
   const hasUploaded   = sessions.length > 0 || pendingFiles.length > 0;
 
-  // Hide the upload zone only AFTER files have actually been processed
-  // (sessions exist). While `pendingFiles` is populated the Process button
-  // lives inside the zone, so we must keep it visible until the user
-  // clicks it. The "+ Add PDFs" chip in the Your-PDFs header brings it
-  // back when the user wants to queue more.
-  useEffect(() => {
-    if (sessions.length > 0 && pendingFiles.length === 0) setShowUploadZone(false);
-  }, [sessions.length, pendingFiles.length]);
+  // The upload zone NEVER auto-hides. It used to collapse after processing,
+  // which made adding the next folder a hunt for the "+ Add PDFs" chip every
+  // time. After the first upload it renders in its compact form (a slim
+  // "drop more" strip), and the user can still hide it manually with the
+  // "hide" button if they want the sidebar tidy.
 
   // Mirror tab/session state into the module-level cache so it survives
   // unmounts (e.g. when navigating to /usage and back).
@@ -175,6 +172,21 @@ export default function Index() {
     [sessions],
   );
 
+  // Auto-process repeat uploads: the doc-type modal shows for the FIRST batch
+  // (it has to — that's where the type gets picked), and afterwards every
+  // further upload processes immediately with the same type, zero clicks.
+  // Opt-out via the modal checkbox; the preference persists in localStorage.
+  // autoProcessKick defers the runProcessing call one render so it sees the
+  // freshly-appended pendingFiles.
+  const [skipDocTypeConfirm, setSkipDocTypeConfirm] = useState<boolean>(
+    () => localStorage.getItem('pexl_skip_doctype_confirm') !== '0',
+  );
+  useEffect(() => {
+    localStorage.setItem('pexl_skip_doctype_confirm', skipDocTypeConfirm ? '1' : '0');
+  }, [skipDocTypeConfirm]);
+  const docTypeConfirmedOnce = useRef(false);
+  const [autoProcessKick, setAutoProcessKick] = useState(0);
+
   const handleFilesSelected = useCallback((files: File[]) => {
     if (files.length === 0) return;
     // Drop the files straight into the queue and jump the user to the
@@ -183,8 +195,12 @@ export default function Index() {
     // files while confirming an earlier batch), leave it as-is; the
     // combined pendingFiles count updates live inside the modal.
     setPendingFiles(prev => [...prev, ...files]);
-    setConfirmProcessOpen(true);
-  }, []);
+    if (skipDocTypeConfirm && docTypeConfirmedOnce.current) {
+      setAutoProcessKick(k => k + 1);
+    } else {
+      setConfirmProcessOpen(true);
+    }
+  }, [skipDocTypeConfirm]);
 
   const runProcessing = useCallback(async () => {
     if (!pendingFiles.length) return;
@@ -395,6 +411,20 @@ export default function Index() {
 
     setProcessing(false);
   }, [pendingFiles, pendingDocType, activeTabId]);
+
+  // Auto-process kicked off by handleFilesSelected when "don't ask again"
+  // is on. Runs in an effect (not inline) so runProcessing's closure sees
+  // the pendingFiles that were appended in the same render.
+  useEffect(() => {
+    if (autoProcessKick === 0) return;
+    setAutoProcessKick(0);
+    if (pendingFiles.length > 0) {
+      const label = DOCUMENT_TYPES.find(t => t.value === pendingDocType)?.label ?? pendingDocType;
+      toast.success(`Processing ${pendingFiles.length} file${pendingFiles.length !== 1 ? 's' : ''} as ${label}`);
+      runProcessing();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoProcessKick]);
 
   // Tracks which sessions have active OCR polls running. Setting to true stops the loop.
   const ocrPollStopsRef = useRef<Record<string, boolean>>({});
@@ -2157,7 +2187,23 @@ export default function Index() {
               ))}
             </div>
 
-            <div className="px-5 py-3 border-t border-border flex justify-end gap-2">
+            <div className="px-5 pt-3 border-t border-border">
+              <label className="flex items-start gap-2 text-xs text-muted-foreground cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  checked={skipDocTypeConfirm}
+                  onChange={e => setSkipDocTypeConfirm(e.target.checked)}
+                />
+                <span>
+                  Process future uploads immediately as this type — no dialog,
+                  no extra clicks (recommended). Uncheck to be asked every
+                  time. The type can be changed any time from the toolbar
+                  dropdown.
+                </span>
+              </label>
+            </div>
+            <div className="px-5 py-3 flex justify-end gap-2">
               <button
                 type="button"
                 className="px-4 py-1.5 text-sm rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
@@ -2169,6 +2215,7 @@ export default function Index() {
                 type="button"
                 className="px-4 py-1.5 text-sm font-medium rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
                 onClick={() => {
+                  docTypeConfirmedOnce.current = true;
                   setConfirmProcessOpen(false);
                   runProcessing();
                 }}

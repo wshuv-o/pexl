@@ -53,10 +53,84 @@ const MONTH_MAP: Record<string, number> = {
   january: 1, february: 2, march: 3, april: 4, may: 5, june: 6,
   july: 7, august: 8, september: 9, october: 10, november: 11, december: 12,
   jan: 1, feb: 2, mar: 3, apr: 4, jun: 6, jul: 7,
-  aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
+  aug: 8, sep: 9, sept: 9, oct: 10, nov: 11, dec: 12,
 };
 
-function normalizeDateValue(raw: string): string {
+// Longest names first so "sept" wins over "sep" in alternation.
+const MONTH_ALT = Object.keys(MONTH_MAP).sort((a, b) => b.length - a.length).join('|');
+
+const expandYear = (y: number): number => (y < 100 ? (y < 70 ? 2000 + y : 1900 + y) : y);
+
+const isValidDate = (m: number, d: number, y: number): boolean => {
+  if (m < 1 || m > 12 || d < 1 || d > 31) return false;
+  const dt = new Date(y, m - 1, d);
+  return dt.getFullYear() === y && dt.getMonth() === m - 1 && dt.getDate() === d;
+};
+
+const fmtMDY = (m: number, d: number, y: number): string =>
+  `${String(m).padStart(2, '0')}/${String(d).padStart(2, '0')}/${String(y).padStart(4, '0')}`;
+
+// Find the FIRST complete date (day + month + year) in the string and return
+// it as MM/DD/YYYY. Search-based, not anchored: once a date ending in a year
+// is found, everything after it is ignored — so statement-period ranges like
+// "Nov 11, 2025 - Dec 10, 2025" (any separator, spaced or not) yield only the
+// start date. Two-digit years expand ("Nov 11 26" → 11/11/2026).
+function findFirstDate(s: string): string | null {
+  const cands: { index: number; fmt: () => string | null }[] = [];
+
+  // Month D [YY]YY — "Nov 11 2026", "nov 11 26", "September 5 2025"
+  const mdy = s.match(new RegExp(`\\b(${MONTH_ALT})\\.?\\s+(\\d{1,2})\\s+((?:19|20)\\d{2}|\\d{2})\\b`, 'i'));
+  if (mdy && mdy.index !== undefined) {
+    const [, mon, dd, yy] = mdy;
+    cands.push({ index: mdy.index, fmt: () => {
+      const m = MONTH_MAP[mon.toLowerCase()];
+      const d = parseInt(dd, 10), y = expandYear(parseInt(yy, 10));
+      return m && isValidDate(m, d, y) ? fmtMDY(m, d, y) : null;
+    }});
+  }
+
+  // D Month [YY]YY — "11 Nov 2026", "15 Jan 22"
+  const dmy = s.match(new RegExp(`\\b(\\d{1,2})\\s+(${MONTH_ALT})\\.?\\s+((?:19|20)\\d{2}|\\d{2})\\b`, 'i'));
+  if (dmy && dmy.index !== undefined) {
+    const [, dd, mon, yy] = dmy;
+    cands.push({ index: dmy.index, fmt: () => {
+      const m = MONTH_MAP[mon.toLowerCase()];
+      const d = parseInt(dd, 10), y = expandYear(parseInt(yy, 10));
+      return m && isValidDate(m, d, y) ? fmtMDY(m, d, y) : null;
+    }});
+  }
+
+  // ISO YYYY-MM-DD
+  const iso = s.match(/\b((?:19|20)\d{2})\s*[/\-.]\s*(\d{1,2})\s*[/\-.]\s*(\d{1,2})\b/);
+  if (iso && iso.index !== undefined) {
+    const [, yy, mm, dd] = iso;
+    cands.push({ index: iso.index, fmt: () => {
+      const y = parseInt(yy, 10), m = parseInt(mm, 10), d = parseInt(dd, 10);
+      return isValidDate(m, d, y) ? fmtMDY(m, d, y) : null;
+    }});
+  }
+
+  // Numeric M/D/[YY]YY (falls back to D/M when M/D is invalid)
+  const num = s.match(/\b(\d{1,2})\s*[/\-.]\s*(\d{1,2})\s*[/\-.]\s*((?:19|20)\d{2}|\d{2})\b/);
+  if (num && num.index !== undefined) {
+    const [, aa, bb, yy] = num;
+    cands.push({ index: num.index, fmt: () => {
+      const a = parseInt(aa, 10), b = parseInt(bb, 10), y = expandYear(parseInt(yy, 10));
+      if (isValidDate(a, b, y)) return fmtMDY(a, b, y);
+      if (isValidDate(b, a, y)) return fmtMDY(b, a, y);
+      return null;
+    }});
+  }
+
+  cands.sort((a, b) => a.index - b.index);
+  for (const c of cands) {
+    const r = c.fmt();
+    if (r) return r;
+  }
+  return null;
+}
+
+export function normalizeDateValue(raw: string, opts: { takeEnd?: boolean } = {}): string {
   let s = raw;
 
   // --- Strip an arbitrary "<label>:" prefix that OCR glued onto the value
@@ -105,36 +179,55 @@ function normalizeDateValue(raw: string): string {
   s = s.replace(/\bof\b/gi, '');
   s = s.replace(/\bthe\b/gi, '');
 
+  // --- Range handling. Default keeps the START date; opts.takeEnd keeps the
+  // END date instead (utility billing_date wants the close of the period,
+  // mirroring the backend's take_end). Whichever half is kept borrows a
+  // 4-digit year from the other half when it has none ("Dec 11 - Jan 13,
+  // 2025" → "Dec 11 2025").
+  {
+    const seps = [' to ', ' through ', ' thru ', ' - ', ' – ', ' — ', '—', '–'];
+    const lower = s.toLowerCase();
+    if (opts.takeEnd) {
+      let lastIdx = -1, lastLen = 0;
+      for (const sep of seps) {
+        const i = lower.lastIndexOf(sep);
+        if (i > lastIdx) { lastIdx = i; lastLen = sep.length; }
+      }
+      if (lastIdx >= 0) {
+        let end = s.slice(lastIdx + lastLen).trim();
+        const before = s.slice(0, lastIdx);
+        if (!/(?:19|20)\d{2}/.test(end)) {
+          const y = before.match(/\b((?:19|20)\d{2})\b/);
+          if (y) end = `${end} ${y[1]}`;
+        }
+        if (end) s = end;
+      }
+    } else {
+      for (const sep of seps) {
+        const idx = lower.indexOf(sep);
+        if (idx > 0) {
+          let start = s.slice(0, idx).trim();
+          const rest = s.slice(idx + sep.length);
+          if (!/(?:19|20)\d{2}/.test(start)) {
+            const y = rest.match(/\b((?:19|20)\d{2})\b/);
+            if (y) start = `${start} ${y[1]}`;
+          }
+          s = start;
+          break;
+        }
+      }
+    }
+  }
+
   // --- Normalise whitespace ---
   s = s.replace(/[,]+/g, ' ');
   s = s.replace(/\s+/g, ' ').trim();
 
-  // --- Numeric date with spaces around separators: "01 / 31 / 2026" or "1-31-2026" ---
-  // DocuSign date fields often insert spaces around the slash separator.
-  const numericSpaced = s.replace(/\s*[/-]\s*/g, '/').match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (numericSpaced) {
-    return `${numericSpaced[1].padStart(2, '0')}/${numericSpaced[2].padStart(2, '0')}/${numericSpaced[3]}`;
-  }
+  // --- First complete date wins; anything after it is discarded ---
+  const first = findFirstDate(s);
+  if (first) return first;
 
-  // --- Try to parse "D Month YYYY" or "Month D YYYY" ---
-  const patA = s.match(/^(\d{1,2})\s+([a-zA-Z]+)\s+(\d{4})$/);
-  if (patA) {
-    const month = MONTH_MAP[patA[2].toLowerCase()];
-    if (month) {
-      const day = parseInt(patA[1], 10);
-      return `${String(month).padStart(2, '0')}/${String(day).padStart(2, '0')}/${patA[3]}`;
-    }
-  }
-
-  const patB = s.match(/^([a-zA-Z]+)\s+(\d{1,2})\s+(\d{4})$/);
-  if (patB) {
-    const month = MONTH_MAP[patB[1].toLowerCase()];
-    if (month) {
-      const day = parseInt(patB[2], 10);
-      return `${String(month).padStart(2, '0')}/${String(day).padStart(2, '0')}/${patB[3]}`;
-    }
-  }
-
+  // Month + year only, e.g. "September 2025" → first of the month
   const patC = s.match(/^([a-zA-Z]+)\s+(\d{4})$/);
   if (patC) {
     const month = MONTH_MAP[patC[1].toLowerCase()];
@@ -233,7 +326,7 @@ function sanitizeResults(results: ExtractedRow[]): ExtractedRow[] {
     const cleaned = sanitizeValue(r.value);
     if (!cleaned) return { ...r, value: cleaned };
     let v = cleaned;
-    if (DATE_FIELDS.has(r.field))         v = normalizeDateValue(v);
+    if (DATE_FIELDS.has(r.field))         v = normalizeDateValue(v, { takeEnd: r.field === 'billing_date' });
     else if (AMOUNT_FIELDS.has(r.field))  v = normalizeAmountValue(v);
     else if (PERCENT_FIELDS.has(r.field)) v = normalizePercentValue(v);
     else if (YEAR_FIELDS.has(r.field))    v = normalizeYearValue(v);
@@ -916,7 +1009,9 @@ export async function extractRegions(
       }
 
       // Everything was found client-side → done, no backend call.
-      if (missingIdx.length === 0) return clientResults;
+      // sanitizeResults is what normalizes dates/amounts — the client-side
+      // pdfjs text is raw and MUST go through it, same as backend results.
+      if (missingIdx.length === 0) return sanitizeResults(clientResults);
 
       // Ask the backend for just the missing ones and merge into the
       // client-side result array in-place, preserving original order.
@@ -930,12 +1025,12 @@ export async function extractRegions(
           const br = backendCall.results[backendIdx];
           if (br) merged[origIdx] = br;
         });
-        return merged;
+        return sanitizeResults(merged);
       }
 
       // Backend call failed — return what we have. Nulls stay null,
       // which is the same accuracy as the old client-side-fallback path.
-      return clientResults;
+      return sanitizeResults(clientResults);
     } catch (err) {
       console.warn('Client-first extraction failed, falling back to backend-first:', err);
       // Fall through to the legacy path below.

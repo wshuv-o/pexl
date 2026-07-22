@@ -13,6 +13,7 @@ import {
 } from '@/lib/bank-excel-export';
 import MergeDialog from '@/components/bank/MergeDialog';
 import BatchPanel from '@/components/BatchPanel';
+import { normalizeDateValue } from '@/lib/api';
 import { FIELD_LABELS } from '@/types/utilscraper';
 import { useAuth } from '@/contexts/AuthContext';
 import { toast } from 'sonner';
@@ -250,7 +251,16 @@ export default function ExcelPanel({
       }
       const pageRow = pdf.pages.get(row.page)!;
       if (!pageRow.cellsMulti[row.field]) pageRow.cellsMulti[row.field] = [];
-      pageRow.cellsMulti[row.field].push(row);
+      // Date values extracted before normalization existed (or saved in a
+      // batch back then) can still be raw ranges like "Jan 1, 2024 - Jan 31,
+      // 2024" — re-normalize at display time so only one date shows.
+      // billing_date keeps the END of the range (close of billing period).
+      let displayRow = row;
+      if (isDateField(row.field) && row.value) {
+        const norm = normalizeDateValue(row.value, { takeEnd: row.field === 'billing_date' });
+        if (norm !== row.value) displayRow = { ...row, value: norm };
+      }
+      pageRow.cellsMulti[row.field].push(displayRow);
 
       if (!seenFields.has(row.field)) {
         seenFields.add(row.field);

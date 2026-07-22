@@ -183,6 +183,9 @@ export default function UploadZone({
             <span className="text-[10px] text-muted-foreground font-normal">(filtered)</span>
           )}
         </button>
+        <p className="text-[10px] text-muted-foreground/70 leading-snug">
+          Tip: drag several folders at once into the box above, or pick one parent folder — all subfolders are included.
+        </p>
         <input ref={inputRef} type="file" accept=".pdf,.doc,.docx,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.webp,.gif,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,image/*" multiple className="hidden" onChange={handleFileChange} />
         <input ref={folderInputCompactRef} type="file" multiple className="hidden" onChange={handleFolderChange} />
       </div>
@@ -234,6 +237,9 @@ export default function UploadZone({
           <span className="text-[10px] text-muted-foreground font-normal">(prefix-filtered)</span>
         )}
       </button>
+      <p className="text-[11px] text-muted-foreground/70 leading-snug text-center">
+        Tip: drag several folders at once into the drop zone, or pick one parent folder — all subfolders are included.
+      </p>
       <input ref={inputRef} type="file" accept=".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document" multiple className="hidden" onChange={handleFileChange} />
       <input ref={folderInputRef} type="file" multiple className="hidden" onChange={handleFolderChange} />
     </div>

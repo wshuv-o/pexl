@@ -121,6 +121,47 @@ def _take_end_date(text: str) -> str:
     return end
 
 
+_MONTH_ALT = "|".join(sorted(MONTHS, key=len, reverse=True))
+
+# A "complete" date substring — month-name, numeric, or ISO, with a 4- or
+# 2-digit year. Used to cut the text at the FIRST full date so a range end
+# ("... - Dec 10, 2025"), an unspaced range separator ("11/01/2025-11/30/2025"),
+# or trailing clutter never leaks into the extracted value.
+_FIRST_DATE_PATTERNS = [
+    # Month D[,] YYYY|YY   e.g. "Nov 11, 2026", "nov 11,26", "November 11 2026"
+    re.compile(
+        rf"\b(?:{_MONTH_ALT})\.?\s+\d{{1,2}}(?:st|nd|rd|th)?\s*[,.]?\s*(?:(?:19|20)\d{{2}}|\d{{2}})\b",
+        re.IGNORECASE,
+    ),
+    # D Month[,] YYYY|YY   e.g. "11 Nov 2026", "15-Jan-2022"
+    re.compile(
+        rf"\b\d{{1,2}}(?:st|nd|rd|th)?[\s\-]+(?:{_MONTH_ALT})\.?[\s\-,.]*(?:(?:19|20)\d{{2}}|\d{{2}})\b",
+        re.IGNORECASE,
+    ),
+    # Numeric M/D/YYYY, M-D-YY, M.D.YYYY
+    re.compile(r"\b\d{1,2}[/\-.]\d{1,2}[/\-.](?:(?:19|20)\d{2}|\d{2})\b"),
+    # ISO YYYY-MM-DD
+    re.compile(r"\b(?:19|20)\d{2}[/\-.]\d{1,2}[/\-.]\d{1,2}\b"),
+]
+
+
+def _truncate_after_first_date(text: str) -> str:
+    """Cut the text down to its FIRST complete date.
+
+    Once one full date (day + month + year) is found, everything after it is
+    ignored — so a highlighted statement period like
+    "Nov 11, 2025 - Dec 10, 2025" yields just "Nov 11, 2025" no matter what
+    separator the bank used. Text with no complete date passes through
+    unchanged (the caller's parsers then get the whole string as before).
+    """
+    best = None
+    for rx in _FIRST_DATE_PATTERNS:
+        m = rx.search(text)
+        if m is not None and (best is None or m.start() < best.start()):
+            best = m
+    return best.group(0) if best else text
+
+
 def _normalize_extra_spaces(text: str) -> str:
     """Fix OCR artifacts like 'Jan 9 ,2025' → 'Jan 9, 2025'."""
     text = re.sub(r"\s+,", ",", text)       # space before comma
@@ -255,6 +296,11 @@ def extract_date(text: str, take_end: bool = False) -> str:
     # Catches arbitrary `<label>: <date>` patterns the curated list misses.
     text = _strip_inline_label(text)
     text = _take_end_date(text) if take_end else _take_start_date(text)
+    if not take_end:
+        # Ranges with unspaced separators ("11/01/2025-11/30/2025") survive
+        # _take_start_date; keeping only the first complete date fixes those
+        # and drops any trailing clutter after the date.
+        text = _truncate_after_first_date(text)
     text = text.strip()
 
     if not text:

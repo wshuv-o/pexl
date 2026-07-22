@@ -2,6 +2,7 @@
 import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
 import type { ExtractedRow } from '@/types/utilscraper';
+import { normalizeDateValue } from './api';
 
 // ─── Sheet name helper ───────────────────────────────────────────────────────
 const uniqueSheetName = (wb: ExcelJS.Workbook, base: string): string => {
@@ -88,13 +89,22 @@ const getEndOfMonth = (year: number, month: number) => new Date(year, month + 1,
 const fmtDate = (d: Date) =>
   `${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}/${d.getFullYear()}`;
 
-// Build ordered array of 12 month-end date strings ending at anchorDate
-const buildT12Months = (anchorDate: Date): string[] => {
-  const months: string[] = [];
+// Build ordered array of month-end date strings ending at anchorDate.
+// Always covers at least the trailing 12 months; when earliestDate falls
+// before that window (more than 12 statements uploaded), the range extends
+// back to it so every statement gets a row — the trailing metrics still
+// read the last N rows, so T-1..T-12 keep their meaning.
+export const buildT12Months = (anchorDate: Date, earliestDate?: Date): string[] => {
   const t12StartMonth = anchorDate.getMonth() - 11;
   const t12StartYear  = anchorDate.getFullYear();
   let cy = t12StartYear + Math.floor(t12StartMonth / 12);
   let cm = ((t12StartMonth % 12) + 12) % 12;
+  if (earliestDate && !isNaN(earliestDate.getTime())) {
+    const ey = earliestDate.getFullYear();
+    const em = earliestDate.getMonth();
+    if (ey < cy || (ey === cy && em < cm)) { cy = ey; cm = em; }
+  }
+  const months: string[] = [];
   const ey = anchorDate.getFullYear();
   const em = anchorDate.getMonth();
   while (cy < ey || (cy === ey && cm <= em)) {
@@ -401,7 +411,10 @@ const flattenToItem = (filename: string, rows: ExtractedRow[]): BankStatementIte
     accountNumber:    map.account_number     || '',
     accountName:      map.account_name       || '',
     address:          map.address            || '',
-    statementDate:    map.statement_date     || '',
+    // Re-normalize at export time: statements extracted/saved before date
+    // normalization existed can still hold a raw range ("Jan 1, 2024 -
+    // Jan 31, 2024") — keep only the first date so month bucketing works.
+    statementDate:    map.statement_date ? normalizeDateValue(map.statement_date) : '',
     beginningBalance: parseNum(map.beginning_balance),
     endingBalance:    parseNum(map.ending_balance),
     totalCredits:     creditSum,
@@ -597,7 +610,7 @@ const addRollupTable = (
     .sort((a, b) => a.getTime() - b.getTime());
 
   const anchorDate = allDates.length > 0 ? allDates[allDates.length - 1] : new Date();
-  const t12Months  = buildT12Months(anchorDate);
+  const t12Months  = buildT12Months(anchorDate, allDates[0]);
 
   let firstDataRn: number | null = null;
   let lastDataRn   = 0;
@@ -849,7 +862,7 @@ export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilen
       const anchorDate = parsedDates.length > 0
         ? parsedDates[parsedDates.length - 1]
         : new Date();
-      const t12Months = buildT12Months(anchorDate);
+      const t12Months = buildT12Months(anchorDate, parsedDates[0]);
 
       const itemsByMonth = new Map<string, BankStatementItem>();
       for (const it of acctItems) {
