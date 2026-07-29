@@ -169,6 +169,10 @@ export default function ExcelPanel({
 }: Props) {
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const [mergeGroups, setMergeGroups] = useState<MergeGroup[] | null>(null);
+  // Which action the merge dialog is gating: 'export' downloads the .xlsx,
+  // 'batch' saves the (optionally merged) rows to the active batch. Lets the
+  // one shared MergeDialog serve both the Export and the Save-to-batch flows.
+  const [pendingMergeAction, setPendingMergeAction] = useState<'export' | 'batch'>('export');
   // Date-source selector for utility exports. 'auto' picks billing_date
   // when any row has it, otherwise falls back to the 'date' field.
   const [utilityDateField, setUtilityDateField] = useState<'auto' | 'billing_date' | 'date'>('auto');
@@ -255,8 +259,10 @@ export default function ExcelPanel({
       // batch back then) can still be raw ranges like "Jan 1, 2024 - Jan 31,
       // 2024" — re-normalize at display time so only one date shows.
       // billing_date keeps the END of the range (close of billing period).
+      // Normalize date values for display — but NEVER a value the user has
+      // edited by hand; their exact text wins and must not be reformatted.
       let displayRow = row;
-      if (isDateField(row.field) && row.value) {
+      if (isDateField(row.field) && row.value && !row.edited) {
         const norm = normalizeDateValue(row.value, { takeEnd: row.field === 'billing_date' });
         if (norm !== row.value) displayRow = { ...row, value: norm };
       }
@@ -422,13 +428,36 @@ export default function ExcelPanel({
     if (selectedRowKey === `${row.sessionId}-${row.page}-${row.subIndex}`) setSelectedRowKey(null);
   };
 
-  const handleEdit = (cellKey: string, cell: ExtractedRow, newValue: string) => {
-    const next = data.map(r =>
-      r === cell ? { ...r, value: newValue, edited: true } : r,
-    );
+  // Persist a cell edit by STABLE IDENTITY — (sessionId, page, field, and
+  // the occurrence index for multi-value fields) — not by object reference.
+  // Date cells are rendered from a normalized *copy* of the row (see the
+  // groups memo), so a reference match (`r === cell`) never hits the object
+  // in `data` and the edit silently reverts. Matching the Nth occurrence of
+  // (sessionId, page, field) always lands on the real row, so edits stick in
+  // the frontend AND flow through to batch saves (which read from `data`).
+  const handleEdit = (
+    sessionId: string, page: number, field: string, occ: number, newValue: string,
+  ) => {
+    let seen = -1;
+    let matched = false;
+    const next = data.map(r => {
+      if (r.sessionId === sessionId && r.page === page && r.field === field) {
+        seen++;
+        if (seen === occ) { matched = true; return { ...r, value: newValue, edited: true }; }
+      }
+      return r;
+    });
+    // Fallback: the occurrence wasn't found (e.g. an edited empty cell that
+    // never had a row). Append a fresh edited row so the value isn't lost.
+    if (!matched && newValue.trim()) {
+      const ref = data.find(r => r.sessionId === sessionId && r.page === page);
+      next.push({
+        page, field, value: newValue, confidence: 'high', wasOcr: false,
+        filename: ref?.filename ?? '', sessionId, edited: true,
+      });
+    }
     onDataChange(next);
     setEditingKey(null);
-    void cellKey;
   };
 
   // Save every eligible row (unique sessionId + page pair) to the active
@@ -441,27 +470,34 @@ export default function ExcelPanel({
   // the user extracted `total_gas_bill` + more later). Bounded 6-way
   // parallelism so 300 rows don't fire 300 simultaneous requests.
   const [approvingAll, setApprovingAll] = useState(false);
-  const handleApproveAll = async () => {
+
+  // Actually write rows to the active batch, one record per (sessionId, page).
+  // Takes the rows to save as an argument so callers can pass either the raw
+  // live data or a MERGED copy (from the merge dialog) — the save always
+  // reflects exactly what the user confirmed.
+  const runBatchSave = async (rows: ExtractedRow[]) => {
     if (!activeBatchId) { toast.error('Select a batch before approving'); return; }
     if (approvingAll) return;
 
-    // De-duplicate to one entry per (sessionId, page). Everything with a
-    // value is eligible — approved or not.
-    const pending = new Map<string, { sessionId: string; filename: string; page: number; alreadyApproved: boolean }>();
-    for (const g of sortedGroups) {
-      for (const row of g.rows) {
-        const key = `${row.sessionId}-${row.page}`;
-        const pageData = data.filter(d => d.sessionId === row.sessionId && d.page === row.page && d.value);
-        if (pageData.length === 0) continue;
-        if (!pending.has(key)) {
-          pending.set(key, {
-            sessionId: row.sessionId,
-            filename: row.filename,
-            page: row.page,
-            alreadyApproved: approvedKeys.has(key),
-          });
-        }
+    // Group rows into one record per (sessionId, page), concatenating
+    // repeated fields. Only rows with a value are saved.
+    const pending = new Map<string, {
+      sessionId: string; filename: string; page: number;
+      alreadyApproved: boolean; fields: Record<string, string>;
+    }>();
+    for (const d of rows) {
+      if (!d.value) continue;
+      const key = `${d.sessionId}-${d.page}`;
+      let entry = pending.get(key);
+      if (!entry) {
+        entry = {
+          sessionId: d.sessionId, filename: d.filename, page: d.page,
+          alreadyApproved: approvedKeys.has(key), fields: {},
+        };
+        pending.set(key, entry);
       }
+      if (entry.fields[d.field]) entry.fields[d.field] += ', ' + d.value;
+      else entry.fields[d.field] = d.value;
     }
 
     if (pending.size === 0) {
@@ -483,15 +519,8 @@ export default function ExcelPanel({
       while (queue.length > 0) {
         const next = queue.shift();
         if (!next) return;
-        const [key, { sessionId, filename, page, alreadyApproved }] = next;
+        const [key, { sessionId, filename, page, alreadyApproved, fields }] = next;
         try {
-          const fields: Record<string, string> = {};
-          const pageData = data.filter(d => d.sessionId === sessionId && d.page === page);
-          for (const d of pageData) {
-            if (!d.value) continue;
-            if (fields[d.field]) fields[d.field] += ', ' + d.value;
-            else fields[d.field] = d.value;
-          }
           // Upsert: for rows already in the batch, DELETE first so the
           // POST inserts a fresh record with the current field set. This
           // mirrors how toggleApprove handles re-approval and prevents
@@ -548,6 +577,32 @@ export default function ExcelPanel({
     // just wrote to the server (values, fields, updated timestamps).
     if (succeededKeys.length > 0) await refreshBatchSavedRows(activeBatchId);
     setApprovingAll(false);
+  };
+
+  // Save-to-batch entry point. Mirrors the Export flow: scan the live rows
+  // for merge opportunities FIRST and, if any exist, open the merge dialog so
+  // the user can combine fields before the data lands in the batch. When
+  // there's nothing to merge, save straight away.
+  const handleApproveAll = async () => {
+    if (!activeBatchId) { toast.error('Select a batch before approving'); return; }
+    if (approvingAll) return;
+
+    if (isUtilityExport(data)) {
+      const utilGroups = findUtilityMergeOpportunities(data);
+      if (utilGroups.length > 0) {
+        setPendingMergeAction('batch');
+        setMergeGroups(utilGroups);
+        return;
+      }
+    } else {
+      const bankGroups = findMergeOpportunities(data);
+      if (bankGroups.length > 0) {
+        setPendingMergeAction('batch');
+        setMergeGroups(bankGroups);
+        return;
+      }
+    }
+    await runBatchSave(data);
   };
 
   const toggleApprove = async (row: DisplayRow) => {
@@ -750,12 +805,14 @@ export default function ExcelPanel({
               if (isUtilityExport(finalData)) {
                 const utilGroups = findUtilityMergeOpportunities(finalData);
                 if (utilGroups.length > 0) {
+                  setPendingMergeAction('export');
                   setMergeGroups(utilGroups);
                   return;
                 }
               } else {
                 const bankGroups = findMergeOpportunities(finalData);
                 if (bankGroups.length > 0) {
+                  setPendingMergeAction('export');
                   setMergeGroups(bankGroups);
                   return;
                 }
@@ -790,16 +847,26 @@ export default function ExcelPanel({
         />
       )}
 
-      {/* Shared merge dialog — works for bank-style and utility-style groups */}
+      {/* Shared merge dialog — gates either Export or Save-to-batch, depending
+          on pendingMergeAction. On confirm we apply the chosen merges, then
+          run whichever action opened the dialog. */}
       {mergeGroups && (
         <MergeDialog
           groups={mergeGroups}
           onCancel={() => setMergeGroups(null)}
           onConfirm={(choices: MergeChoice[]) => {
-            const merged = choices.length > 0 ? applyMerges(exportData, choices) : exportData;
-            exportToExcel(merged, filename, provider, { dateField: utilityDateField, forceDocType });
-            onDownload?.();
             setMergeGroups(null);
+            if (pendingMergeAction === 'batch') {
+              // Apply merges to the live rows, reflect them in the UI, then
+              // persist the merged data to the batch.
+              const merged = choices.length > 0 ? applyMerges(data, choices) : data;
+              if (choices.length > 0) onDataChange(merged);
+              void runBatchSave(merged);
+            } else {
+              const merged = choices.length > 0 ? applyMerges(exportData, choices) : exportData;
+              exportToExcel(merged, filename, provider, { dateField: utilityDateField, forceDocType });
+              onDownload?.();
+            }
           }}
         />
       )}
@@ -1032,9 +1099,9 @@ export default function ExcelPanel({
                                   defaultValue={cell.value || ''}
                                   autoFocus
                                   onClick={e => e.stopPropagation()}
-                                  onBlur={e => handleEdit(cellKey, cell, e.target.value)}
+                                  onBlur={e => handleEdit(g.sessionId, row.page, f, row.subIndex, e.target.value)}
                                   onKeyDown={e => {
-                                    if (e.key === 'Enter') handleEdit(cellKey, cell, (e.target as HTMLInputElement).value);
+                                    if (e.key === 'Enter') handleEdit(g.sessionId, row.page, f, row.subIndex, (e.target as HTMLInputElement).value);
                                     if (e.key === 'Escape') setEditingKey(null);
                                   }}
                                 />

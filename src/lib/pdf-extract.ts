@@ -102,6 +102,27 @@ async function getDocumentCached(file: File): Promise<any> {
   return proxy;
 }
 
+/** Free every cached document EXCEPT the given files. Used after a batch
+ *  extract to reclaim the memory of the (potentially hundreds of) processed
+ *  PDFs while KEEPING the documents the user is still looking at (open tabs)
+ *  warm — so a single-row Re-extract on one of them is instant instead of
+ *  paying a full cold pdfjs reload + text re-parse of the whole PDF. */
+export function clearDocumentCacheExcept(keepFiles: File[]): void {
+  const keep = new Set(keepFiles.filter(Boolean).map(_fileKey));
+  for (const [key, v] of Array.from(_docCache.entries())) {
+    if (keep.has(key)) continue;
+    try { v.proxy.destroy?.(); } catch { /* ignore */ }
+    URL.revokeObjectURL(v.blobUrl);
+    _docCache.delete(key);
+  }
+  for (const k of Array.from(_pageContentCache.keys())) {
+    // page-content key is `${_fileKey}::${pageNumber}` — the doc key is the
+    // first three ::-separated segments.
+    const docKey = k.split('::').slice(0, 3).join('::');
+    if (!keep.has(docKey)) _pageContentCache.delete(k);
+  }
+}
+
 /** Call this when a session is closed, or after a large batch extract, to
  *  free the cached documents. Explicitly destroys the pdfjs proxies so the
  *  worker can drop the parsed page arrays — revoking blob URLs alone isn't

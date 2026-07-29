@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback } from 'react';
-import { X, Pencil, Trash2, ChevronDown, ChevronRight, Check, Loader2, CheckCircle2, Download } from 'lucide-react';
+import { X, Pencil, Trash2, ChevronDown, ChevronRight, Check, Loader2, CheckCircle2, Download, Eye } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { DOCUMENT_TYPES, type DocumentType, type ExtractedRow } from '@/types/utilscraper';
 import { exportToExcel } from '@/lib/excel-export';
+import BatchPreview from '@/components/BatchPreview';
 import { toast } from 'sonner';
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000';
@@ -51,6 +52,7 @@ export default function BatchPanel({ username, activeBatchId, onClose, onSelect 
   const [loadingRec, setLoadingRec]   = useState<number | null>(null);
 
   const [downloadingId, setDownloadingId] = useState<number | null>(null);
+  const [previewBatch, setPreviewBatch] = useState<Batch | null>(null);
 
   // Fetch a batch's records and export using the doc type baked in at
   // batch-creation time. No per-download picker — the batch's own
@@ -291,6 +293,16 @@ export default function BatchPanel({ username, activeBatchId, onClose, onSelect 
                       </>
                     ) : (
                       <>
+                        {/* Preview the saved records in a template + raw view,
+                            with each saved session tinted a light colour. */}
+                        <button
+                          className="p-1 rounded text-muted-foreground hover:text-primary hover:bg-primary/10 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                          disabled={b.record_count === 0}
+                          title={b.record_count === 0 ? 'No records to preview' : 'Preview saved records'}
+                          onClick={e => { e.stopPropagation(); setPreviewBatch(b); }}
+                        >
+                          <Eye className="w-3 h-3" />
+                        </button>
                         {/* Download batch as Excel using the doc type baked in
                             at creation. No picker — one click, one file.
                             Pre-migration batches (doc_type = NULL) show
@@ -406,6 +418,16 @@ export default function BatchPanel({ username, activeBatchId, onClose, onSelect 
           )}
         </div>
       </div>
+
+      {/* Saved-records preview (template + raw, per-session colours) */}
+      {previewBatch && (
+        <BatchPreview
+          batchId={previewBatch.id}
+          batchName={previewBatch.name}
+          docType={previewBatch.doc_type ?? null}
+          onClose={() => setPreviewBatch(null)}
+        />
+      )}
     </div>
   );
 }

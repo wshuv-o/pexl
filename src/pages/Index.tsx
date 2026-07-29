@@ -5,13 +5,14 @@ import {
   Upload, ChevronLeft, ChevronRight,
   AlertTriangle, FileSearch, X, ShieldCheck, LogOut,
   RotateCw, Eraser, DownloadCloud, Loader2, XCircle, Check,
-  Pause, Play, Square,
+  Pause, Play, Square, Layers,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import UploadZone from '@/components/UploadZone';
 import PDFCardList from '@/components/PDFCardList';
 import PDFViewer from '@/components/PDFViewer';
 import ExcelPanel from '@/components/ExcelPanel';
+import BatchPanel from '@/components/BatchPanel';
 import ThemeToggle from '@/components/ThemeToggle';
 import type { PDFSession, Highlight, ExtractedRow, DocumentType } from '@/types/utilscraper';
 import { DOCUMENT_TYPES } from '@/types/utilscraper';
@@ -42,6 +43,7 @@ export default function Index() {
   const [batchPaused, setBatchPaused]           = useState(false);
   const extractCtrl = useRef<{ paused: boolean; cancelled: boolean }>({ paused: false, cancelled: false });
   const [showExcel, setShowExcel]               = useState(false);
+  const [showBatchPanel, setShowBatchPanel]     = useState(false);
   const [excelWidth, setExcelWidth]             = useState(480); // px, draggable
   const [backendDown, setBackendDown]           = useState(false);
   const [zippingOcr, setZippingOcr]             = useState(false);
@@ -189,18 +191,14 @@ export default function Index() {
 
   const handleFilesSelected = useCallback((files: File[]) => {
     if (files.length === 0) return;
-    // Drop the files straight into the queue and jump the user to the
-    // doc-type confirm modal — no intermediate "Process X PDFs" button
-    // click needed. If the modal is already open (user is adding more
-    // files while confirming an earlier batch), leave it as-is; the
-    // combined pendingFiles count updates live inside the modal.
+    // STAGE the files only — do NOT open the doc-type modal or start
+    // processing yet. This lets the user upload several times (files from
+    // different folders / paths) in one session and accumulate them all.
+    // The doc-type picker is deferred to the explicit "Proceed" button, so
+    // the type is chosen ONCE for the whole staged set instead of on every
+    // upload. The staging bar in the sidebar shows the running count.
     setPendingFiles(prev => [...prev, ...files]);
-    if (skipDocTypeConfirm && docTypeConfirmedOnce.current) {
-      setAutoProcessKick(k => k + 1);
-    } else {
-      setConfirmProcessOpen(true);
-    }
-  }, [skipDocTypeConfirm]);
+  }, []);
 
   const runProcessing = useCallback(async () => {
     if (!pendingFiles.length) return;
@@ -412,7 +410,20 @@ export default function Index() {
     setProcessing(false);
   }, [pendingFiles, pendingDocType, activeTabId]);
 
-  // Auto-process kicked off by handleFilesSelected when "don't ask again"
+  // The user clicked "Proceed" after staging one or more upload batches.
+  // NOW pick the doc type (once, for everything staged) and then process.
+  // If the user previously ticked "don't ask again", skip straight to
+  // processing with the remembered type.
+  const handleProceed = useCallback(() => {
+    if (!pendingFiles.length) return;
+    if (skipDocTypeConfirm && docTypeConfirmedOnce.current) {
+      setAutoProcessKick(k => k + 1);
+    } else {
+      setConfirmProcessOpen(true);
+    }
+  }, [pendingFiles.length, skipDocTypeConfirm]);
+
+  // Auto-process kicked off by handleProceed when "don't ask again"
   // is on. Runs in an effect (not inline) so runProcessing's closure sees
   // the pendingFiles that were appended in the same render.
   useEffect(() => {
@@ -744,9 +755,18 @@ export default function Index() {
     // fine mid-run but wasteful afterwards; free them so the browser can
     // reclaim the memory before the user opens the next tab / extracts
     // another batch. Also drops the per-page text-content cache.
+    //
+    // BUT keep the documents for the tabs the user still has open cached —
+    // otherwise a single-row Re-extract right after a batch pays a full cold
+    // pdfjs reload + text re-parse of the whole PDF, which is what made the
+    // per-row Re-extract button feel like it hung ("40 rows fast, one row
+    // slow"). Open tabs are the only files a Re-extract can realistically hit.
     try {
-      const { clearDocumentCache } = await import('@/lib/pdf-extract');
-      clearDocumentCache();
+      const { clearDocumentCacheExcept } = await import('@/lib/pdf-extract');
+      const keepFiles = sessions
+        .filter(s => openTabs.includes(s.id) && s.file)
+        .map(s => s.file!) as File[];
+      clearDocumentCacheExcept(keepFiles);
     } catch { /* non-fatal */ }
 
     const stopped = extractCtrl.current.cancelled;
@@ -1447,6 +1467,37 @@ export default function Index() {
                 </div>
               )}
 
+              {/* Staging bar — appears once files are staged. Lets the user
+                  keep adding files from other folders/paths, then click
+                  Proceed to pick the doc type ONCE and process everything. */}
+              {pendingFiles.length > 0 && !processing && (
+                <div className="rounded-xl border border-primary/30 bg-primary/5 p-3 space-y-2">
+                  <p className="text-[11px] text-foreground">
+                    <span className="font-semibold">
+                      {pendingFiles.length} file{pendingFiles.length !== 1 ? 's' : ''} staged
+                    </span>
+                    {' '}— add more from other folders, then proceed.
+                  </p>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleProceed}
+                      className="flex-1 h-8 rounded-md bg-primary text-primary-foreground text-xs font-semibold hover:bg-primary/90 transition-colors"
+                    >
+                      Proceed
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPendingFiles([])}
+                      className="px-3 h-8 rounded-md text-xs text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
+                      title="Clear the staged files"
+                    >
+                      Clear
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {/* Instructions — shown before first upload */}
               {!hasUploaded && (
                 <div className="bg-primary/5 border border-primary/20 rounded-xl p-3">
@@ -1617,6 +1668,14 @@ export default function Index() {
             >
               <Eraser className="w-3.5 h-3.5" />
               <span className="hidden sm:inline">Clear</span>
+            </button>
+            <button
+              onClick={() => setShowBatchPanel(true)}
+              className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-all duration-200 px-2 py-1.5 rounded-lg hover:bg-muted"
+              title="Batches — download, rename, delete & inspect saved batches"
+            >
+              <Layers className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Batches</span>
             </button>
             <button
               onClick={() => navigate('/usage')}
@@ -2266,6 +2325,16 @@ export default function Index() {
             <Square className="w-3.5 h-3.5" /> Stop
           </button>
         </div>
+      )}
+
+      {/* Batch Manager — opened from the "Batches" button in the header.
+          Manager-only (download / rename / delete / inspect); batch
+          creation still happens from the Excel panel's batch selector. */}
+      {showBatchPanel && (
+        <BatchPanel
+          username={user?.username ?? 'unknown'}
+          onClose={() => setShowBatchPanel(false)}
+        />
       )}
     </div>
   );
