@@ -228,6 +228,16 @@ export function getFieldConfig(field: string): FieldLabelOption {
     ?? { value: 'custom', label: field, color: '#64748b', bgColor: 'rgba(100,116,139,0.18)', docTypes: ['utility_bill', 'bank_statement', 'appraisal'] };
 }
 
+// Why a cell might deserve a second look. Additive metadata — none of these
+// change the extracted value, they only steer the user's attention.
+//   empty       nothing was read from the region
+//   clipped     the highlight rectangle cuts through a word, so part of the
+//               value was never read (e.g. "1,234.56" read as "1,23")
+//   low_ocr     the OCR engine's own weakest word score for this cell was low
+//   bad_amount  an amount field whose value will not parse as a number
+//   bad_date    a date field that did not normalise to MM/DD/YYYY
+export type CellIssue = 'empty' | 'clipped' | 'low_ocr' | 'bad_amount' | 'bad_date';
+
 export interface ExtractedRow {
   page: number;
   field: string;
@@ -238,6 +248,12 @@ export interface ExtractedRow {
   filename?: string;     // set when combining data from multiple PDFs
   folderName?: string;   // top-level folder name from the upload (if uploaded via folder picker)
   sessionId?: string;    // which session this row belongs to
+  // ── Quality diagnostics (all optional; absent on older/saved rows) ──
+  ocrScore?: number;     // lowest per-word OCR confidence, 0–1
+  ocrScoreAvg?: number;  // mean per-word OCR confidence, 0–1
+  clipped?: boolean;     // rectangle truncated a word
+  clippedText?: string[];// which words were cut, for the review UI
+  issues?: CellIssue[];  // computed verdict; empty/absent = nothing suspicious
 }
 
 export type ViewerTool = 'cursor' | 'highlight' | 'eraser' | 'text-select' | 'select' | 'table-select';

@@ -1,10 +1,10 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import React, { useState, useMemo, useEffect, useCallback } from 'react';
-import { X, Download, RefreshCw, Pencil, CheckCircle2, ArrowUpDown, ArrowUp, ArrowDown, Trash2, Check, Layers, ChevronDown, Plus, Loader2, Sparkles } from 'lucide-react';
+import { X, Download, RefreshCw, Pencil, CheckCircle2, ArrowUpDown, ArrowUp, ArrowDown, Trash2, Check, Layers, ChevronDown, Plus, Loader2, Sparkles, AlertTriangle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
-import type { ExtractedRow, DocumentType } from '@/types/utilscraper';
+import type { ExtractedRow, DocumentType, CellIssue } from '@/types/utilscraper';
 import { getFieldConfig } from '@/types/utilscraper';
 import { exportToExcel } from '@/lib/excel-export';
 import {
@@ -40,6 +40,16 @@ interface Props {
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000';
 
 const CONF_PCT: Record<string, number> = { high: 95, medium: 65, low: 25 };
+
+// Plain-English reason shown on a flagged cell, so the warning is actionable
+// rather than mysterious.
+const ISSUE_LABELS: Record<CellIssue, string> = {
+  empty:      'Nothing was read from this region',
+  clipped:    'The highlight cut through the text — part of the value was never read',
+  low_ocr:    'Weak OCR confidence on this value',
+  bad_amount: 'Does not parse as an amount',
+  bad_date:   'Not a valid MM/DD/YYYY date',
+};
 
 // Count fields per doc type using only fields that are exclusive to a
 // single type (e.g. beginning_balance → bank_statement). Shared fields
@@ -178,6 +188,8 @@ export default function ExcelPanel({
   const [utilityDateField, setUtilityDateField] = useState<'auto' | 'billing_date' | 'date'>('auto');
   const [sortCol, setSortCol]       = useState<string | null>(null);
   const [sortAsc, setSortAsc]       = useState(true);
+  // When on, the table shows only rows containing a cell flagged for review.
+  const [showOnlySuspect, setShowOnlySuspect] = useState(false);
   const [selectedRowKey, setSelectedRowKey] = useState<string | null>(null);
   const [approvedKeys, setApprovedKeys] = useState<Set<string>>(new Set());
   const [approvingKey, setApprovingKey] = useState<string | null>(null);
@@ -651,7 +663,35 @@ export default function ExcelPanel({
 
   const extracted = data.filter(r => r.value).length;
   const nullCount = data.filter(r => !r.value).length;
-  const totalRows = sortedGroups.reduce((s, g) => s + g.rows.length, 0);
+  // Cells that have a value but something about it looks off — a truncated
+  // number, a weak OCR read, an amount/date that won't parse. These are the
+  // dangerous ones: they look fine in the table but are quietly wrong.
+  // Empty cells are counted separately (nullCount) since the user already
+  // sees those as blanks.
+  const suspectRows = useMemo(
+    () => data.filter(r => r.value && (r.issues?.length ?? 0) > 0),
+    [data],
+  );
+  const suspectCount = suspectRows.length;
+
+  // "Review only" view — narrows the table to rows containing a flagged cell
+  // so the user can work through just those. Off by default; when off this is
+  // the untouched sortedGroups reference, so the normal table is unaffected.
+  const visibleGroups = useMemo(() => {
+    if (!showOnlySuspect) return sortedGroups;
+    return sortedGroups
+      .map(g => ({
+        ...g,
+        rows: g.rows.filter(row =>
+          fieldColumns.some(f => {
+            const c = row.cells[f];
+            return c?.value && (c.issues?.length ?? 0) > 0;
+          }),
+        ),
+      }))
+      .filter(g => g.rows.length > 0);
+  }, [sortedGroups, showOnlySuspect, fieldColumns]);
+  const totalRows = visibleGroups.reduce((s, g) => s + g.rows.length, 0);
   // +1 for the delete column at the end, +1 for the actions column at the start
   const totalCols = 1 + (multiFile ? 1 : 0) + 1 + fieldColumns.length + 1;
 
@@ -711,6 +751,25 @@ export default function ExcelPanel({
               {extracted} value{extracted !== 1 ? 's' : ''} extracted
               {nullCount > 0 && <span className="text-warning ml-1">· {nullCount} empty</span>}
             </p>
+            {suspectCount > 0 && (
+              <button
+                type="button"
+                onClick={() => setShowOnlySuspect(v => !v)}
+                title={
+                  showOnlySuspect
+                    ? 'Show all rows again'
+                    : `Show only rows with a flagged cell. These have a value, but it looks truncated, weakly OCR'd, or unparseable — they would otherwise pass unnoticed.`
+                }
+                className={`mt-1.5 inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-[11px] font-medium border transition-colors
+                  ${showOnlySuspect
+                    ? 'bg-warning/15 border-warning/50 text-warning'
+                    : 'bg-warning/5 border-warning/30 text-warning hover:bg-warning/15'}`}
+              >
+                <AlertTriangle className="w-3 h-3" />
+                {suspectCount} cell{suspectCount !== 1 ? 's' : ''} need{suspectCount === 1 ? 's' : ''} review
+                {showOnlySuspect && <span className="opacity-70">· filtering</span>}
+              </button>
+            )}
           </div>
           <button
             className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-200"
@@ -976,7 +1035,7 @@ export default function ExcelPanel({
               </tr>
             </thead>
             <tbody>
-              {sortedGroups.map((g, gi) => (
+              {visibleGroups.map((g, gi) => (
                 <React.Fragment key={g.sessionId}>
                   {g.rows.map((row, ri) => {
                     const isLastInGroup = ri === g.rows.length - 1;
@@ -991,7 +1050,7 @@ export default function ExcelPanel({
                         className={`group/row transition-all duration-200 cursor-pointer
                           ${isApproved ? 'bg-green-500/10 hover:bg-green-500/15' : `hover:bg-primary/5 ${ri % 2 === 0 ? 'bg-card' : 'bg-muted/20'}`}
                           ${isApproved ? 'shadow-[inset_3px_0_0_0_#22c55e]' : isSelected ? 'bg-primary/10 shadow-[inset_3px_0_0_0_hsl(var(--primary))]' : ''}
-                          ${isLastInGroup && gi < sortedGroups.length - 1 ? 'border-b-2 border-b-primary/40' : 'border-b border-border/40'}`}
+                          ${isLastInGroup && gi < visibleGroups.length - 1 ? 'border-b-2 border-b-primary/40' : 'border-b border-border/40'}`}
                         onClick={() => {
                           // If the user just finished a text selection, treat the
                           // "click" as a selection end — don't navigate. Keeps
@@ -1084,11 +1143,17 @@ export default function ExcelPanel({
                           const pct     = CONF_PCT[cell.confidence ?? 'low'] ?? 25;
                           const pctColor = pct >= 90 ? '#22c55e' : pct >= 60 ? '#f59e0b' : '#ef4444';
                           const isEditing = editingKey === cellKey;
+                          // Flagged cells have a value that looks wrong. Empty
+                          // cells already read as "—" and are counted in the
+                          // header, so we don't badge those too.
+                          const cellIssues = (!isNull && cell.issues) ? cell.issues : [];
+                          const hasIssues  = cellIssues.length > 0;
 
                           return (
                             <td
                               key={f}
-                              className="px-3 py-2 cursor-text border-l border-border/40 min-w-[120px] select-text"
+                              className={`px-3 py-2 cursor-text border-l border-border/40 min-w-[120px] select-text
+                                ${hasIssues ? 'bg-warning/10' : ''}`}
                               onDoubleClick={() => setEditingKey(cellKey)}
                               onMouseDown={e => e.stopPropagation()}
                               title={isNull ? 'Double-click to edit' : String(cell.value)}
@@ -1125,6 +1190,27 @@ export default function ExcelPanel({
                                         <div className="space-y-0.5">
                                           <div>{pct >= 90 ? 'High' : pct >= 60 ? 'Medium' : 'Low'} accuracy ({pct}%)</div>
                                           {cell.wasOcr && <div className="text-amber-300">🔍 OCR extracted</div>}
+                                        </div>
+                                      </TooltipContent>
+                                    </Tooltip>
+                                  )}
+                                  {hasIssues && (
+                                    <Tooltip>
+                                      <TooltipTrigger asChild>
+                                        <AlertTriangle className="w-3 h-3 text-warning shrink-0" />
+                                      </TooltipTrigger>
+                                      <TooltipContent side="left" className="text-xs max-w-[260px]">
+                                        <div className="space-y-1">
+                                          <div className="font-semibold">Worth checking</div>
+                                          {cellIssues.map(i => (
+                                            <div key={i}>· {ISSUE_LABELS[i] ?? i}</div>
+                                          ))}
+                                          {cell.clippedText?.length ? (
+                                            <div className="opacity-80">Cut word{cell.clippedText.length !== 1 ? 's' : ''}: {cell.clippedText.join(', ')}</div>
+                                          ) : null}
+                                          {typeof cell.ocrScore === 'number' && (
+                                            <div className="opacity-80">OCR score: {(cell.ocrScore * 100).toFixed(0)}%</div>
+                                          )}
                                         </div>
                                       </TooltipContent>
                                     </Tooltip>
@@ -1189,7 +1275,10 @@ export default function ExcelPanel({
       {data.length > 0 && (
         <div className="bg-card border-t border-border px-5 py-2.5 shrink-0">
           <div className="flex items-center justify-between text-[11px] text-muted-foreground">
-            <span>{totalRows} row{totalRows !== 1 ? 's' : ''} across {sortedGroups.length} PDF{sortedGroups.length !== 1 ? 's' : ''} · double-click any cell to edit</span>
+            <span>
+              {totalRows} row{totalRows !== 1 ? 's' : ''} across {visibleGroups.length} PDF{visibleGroups.length !== 1 ? 's' : ''}
+              {showOnlySuspect && <span className="text-warning"> (review filter on)</span>} · double-click any cell to edit
+            </span>
             <span className="text-primary font-medium">{extracted} extracted</span>
           </div>
         </div>

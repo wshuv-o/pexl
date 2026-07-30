@@ -36,6 +36,7 @@ from automap import match_headers
 from searchable_pdf import make_searchable_pdf
 from text_pipeline import build_structured_pages
 from ocr_lazy import get_ocr_engine
+import cell_quality
 
 app = FastAPI(title="PDF OCR API")
 app.include_router(table_extract_router)
@@ -200,22 +201,38 @@ def extract_native_text_in_rect(page: fitz.Page, rect: fitz.Rect) -> str:
     return (page.get_text("text", clip=rect) or "").strip()
 
 
-def ocr_image_array(img_array: np.ndarray) -> str:
-    """Run OCR on a numpy image array and return plain text."""
+def ocr_image_array_scored(img_array: np.ndarray) -> tuple[str, list[float]]:
+    """Run OCR and return ``(text, per-word confidence scores)``.
+
+    The text is exactly what ``ocr_image_array`` has always returned; the
+    scores are extra information the engine already computes and that we
+    used to discard. Kept as the single implementation so the plain-text
+    wrapper below can never drift from it.
+    """
     engine = get_ocr_engine()
     if engine is None:
-        return ""
+        return "", []
     try:
         results = engine.ocr(img_array, cls=True)
     except (RuntimeError, Exception):
-        return ""
+        return "", []
     if not results or not results[0]:
-        return ""
-    return "\n".join(line[1][0] for line in results[0])
+        return "", []
+    text = "\n".join(line[1][0] for line in results[0])
+    return text, cell_quality.ocr_scores(results)
 
 
-def ocr_region_image(page: fitz.Page, rect: fitz.Rect) -> str:
+def ocr_image_array(img_array: np.ndarray) -> str:
+    """Run OCR on a numpy image array and return plain text."""
+    return ocr_image_array_scored(img_array)[0]
+
+
+def ocr_region_image_scored(page: fitz.Page, rect: fitz.Rect) -> tuple[str, list[float]]:
     """Render a specific region of the page at high DPI and OCR it.
+
+    Returns ``(text, per-word scores)``. The text is identical to what
+    ``ocr_region_image`` returns — that function delegates here so the
+    pixmap-lifetime handling below exists in exactly one place.
 
     Carefully releases the C-allocated pixmap and PIL image buffers as soon
     as the numpy array is built — otherwise each call leaves ~25 MB of
@@ -235,7 +252,12 @@ def ocr_region_image(page: fitz.Page, rect: fitz.Rect) -> str:
         # Explicit C-side free; CPython refcount alone is sometimes not
         # enough on long-lived workers because of fitz's own caching.
         pix = None
-    return ocr_image_array(arr)
+    return ocr_image_array_scored(arr)
+
+
+def ocr_region_image(page: fitz.Page, rect: fitz.Rect) -> str:
+    """Render a specific region of the page at high DPI and OCR it."""
+    return ocr_region_image_scored(page, rect)[0]
 
 
 def _words_in_rect_text(cached_words, rect: fitz.Rect) -> str:
@@ -312,12 +334,12 @@ def _words_in_rect_text(cached_words, rect: fitz.Rect) -> str:
     return " ".join(out)
 
 
-def extract_region(
+def extract_region_detailed(
     page: fitz.Page,
     rect: fitz.Rect,
     cached_words=None,
-) -> tuple[str, str, bool]:
-    """Smart region extraction.
+) -> dict:
+    """Smart region extraction, plus per-cell quality diagnostics.
 
     Strategy (adapts to document type without hard-coding OCR everywhere):
       1. Try the native text layer first (fast, precise, covers digital PDFs).
@@ -330,8 +352,21 @@ def extract_region(
       5. If both native and OCR return something, combine them (handles mixed
          pages where values are in the text layer but labels are image-baked).
 
-    Returns (text, confidence, was_ocr).
+    Returns ``{"text", "confidence", "was_ocr", "diagnostics"}``. The first
+    three are byte-for-byte what ``extract_region`` has always produced —
+    this is now the single implementation, and ``extract_region`` is a thin
+    wrapper over it.
+
+    ``diagnostics`` is purely additive (see cell_quality.assess_region): OCR
+    word scores and clip geometry. It never influences the extracted text or
+    the confidence label.
     """
+    scores: list[float] = []
+    # True only when OCR output is actually part of the returned value — a
+    # supplementary OCR pass on a mixed page whose text we then discard must
+    # not tag the value with that pass's scores.
+    value_from_ocr = False
+
     native_text = _strip_docusign(extract_native_text_in_rect(page, rect))
 
     if native_text:
@@ -345,33 +380,70 @@ def extract_region(
 
         if not has_images:
             # Pure text page — native is authoritative, skip OCR.
-            return native_text, "high", False
+            text, confidence, was_ocr = native_text, "high", False
+        else:
+            # Mixed page (DocuSign, form background, etc.) — also run OCR so
+            # image-embedded content (e.g. label text) is captured too.
+            try:
+                ocr_text, ocr_word_scores = ocr_region_image_scored(page, rect)
+            except Exception:
+                ocr_text, ocr_word_scores = "", []
+            if ocr_text and ocr_text.strip().lower() != native_text.strip().lower():
+                text, confidence, was_ocr = f"{native_text}\n{ocr_text}", "high", True
+                scores = ocr_word_scores
+                value_from_ocr = True
+            else:
+                text, confidence, was_ocr = native_text, "high", False
+    else:
+        # No native text — try the cached OCR words before paying for a fresh
+        # OCR pass. The background indexer has usually already produced these.
+        cached_text = _words_in_rect_text(cached_words, rect)
+        if cached_text:
+            text, confidence, was_ocr = cached_text, "high", True
+        else:
+            # Cache miss → pure OCR path (scanned page or image-only region).
+            try:
+                ocr_text, ocr_word_scores = ocr_region_image_scored(page, rect)
+            except Exception:
+                ocr_text, ocr_word_scores = "", []
+            if not ocr_text:
+                text, confidence, was_ocr = "", "low", True
+            else:
+                text, confidence, was_ocr = ocr_text, "high", True
+                scores = ocr_word_scores
+                value_from_ocr = True
 
-        # Mixed page (DocuSign, form background, etc.) — also run OCR so
-        # image-embedded content (e.g. label text) is captured too.
-        try:
-            ocr_text = ocr_region_image(page, rect)
-        except Exception:
-            ocr_text = ""
-        if ocr_text and ocr_text.strip().lower() != native_text.strip().lower():
-            combined = f"{native_text}\n{ocr_text}"
-            return combined, "high", True
-        return native_text, "high", False
-
-    # No native text — try the cached OCR words before paying for a fresh
-    # OCR pass. The background indexer has usually already produced these.
-    cached_text = _words_in_rect_text(cached_words, rect)
-    if cached_text:
-        return cached_text, "high", True
-
-    # Cache miss → pure OCR path (scanned page or image-only region).
+    # Diagnostics must never break an extraction that otherwise succeeded.
     try:
-        ocr_text = ocr_region_image(page, rect)
+        diagnostics = cell_quality.assess_region(
+            rect_box=(rect.x0, rect.y0, rect.x1, rect.y1),
+            page=page,
+            cached_words=cached_words,
+            scores=scores if value_from_ocr else None,
+        )
     except Exception:
-        ocr_text = ""
-    if not ocr_text:
-        return "", "low", True
-    return ocr_text, "high", True
+        diagnostics = {}
+
+    return {
+        "text": text,
+        "confidence": confidence,
+        "was_ocr": was_ocr,
+        "diagnostics": diagnostics,
+    }
+
+
+def extract_region(
+    page: fitz.Page,
+    rect: fitz.Rect,
+    cached_words=None,
+) -> tuple[str, str, bool]:
+    """Smart region extraction. Returns (text, confidence, was_ocr).
+
+    Thin wrapper over ``extract_region_detailed`` — see that function for the
+    strategy. Kept so existing callers are unaffected by the diagnostics work.
+    """
+    d = extract_region_detailed(page, rect, cached_words=cached_words)
+    return d["text"], d["confidence"], d["was_ocr"]
 
 
 # ---------------------------------------------------------------------------
@@ -734,7 +806,9 @@ def extract_regions(req: ExtractRegionsRequest):
             cp = sp[hl.page - 1]
             cached_words = getattr(cp, "words", None)
 
-        text, confidence, was_ocr = extract_region(page, clip_rect, cached_words=cached_words)
+        detail = extract_region_detailed(page, clip_rect, cached_words=cached_words)
+        text, confidence, was_ocr = detail["text"], detail["confidence"], detail["was_ocr"]
+        diagnostics = detail.get("diagnostics") or {}
 
         value = text if text else None
 
@@ -752,13 +826,22 @@ def extract_regions(req: ExtractRegionsRequest):
             if normalized != "NONE":
                 value = normalized
 
-        results.append({
+        # Existing keys are unchanged. The quality keys below are additive —
+        # older frontends simply ignore them.
+        row = {
             "page": hl.page,
             "field": hl.field,
             "value": value,
             "confidence": confidence,
             "wasOcr": was_ocr,
-        })
+        }
+        if "ocr_score" in diagnostics:
+            row["ocrScore"] = diagnostics["ocr_score"]
+            row["ocrScoreAvg"] = diagnostics.get("ocr_score_avg")
+        if diagnostics.get("clipped"):
+            row["clipped"] = True
+            row["clippedText"] = diagnostics.get("clipped_text")
+        results.append(row)
 
     return {"results": results}
 

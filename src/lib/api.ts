@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import type { PageInfo, Highlight, ExtractedRow, OcrProgress } from '@/types/utilscraper';
+import type { PageInfo, Highlight, ExtractedRow, OcrProgress, CellIssue } from '@/types/utilscraper';
 import { extractFromRegions } from './pdf-extract';
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000' ;
@@ -321,16 +321,56 @@ function normalizeAmountValue(raw: string): string {
   return num.toFixed(2);
 }
 
+// Cells whose weakest OCR word scored below this are worth a second look.
+// The OCR engine scores clean printed text well above 0.9, so 0.80 catches
+// genuine misreads without flooding the review list with false alarms.
+const LOW_OCR_SCORE = 0.80;
+
+// What a fully-normalised value should look like when its field parsed cleanly.
+const AMOUNT_OK = /^-?\d+\.\d{2}$/;
+const DATE_OK   = /^\d{2}\/\d{2}\/\d{4}$/;
+
+/**
+ * Decide whether an extracted cell deserves human attention.
+ *
+ * This is the piece that makes "low confidence" mean something. The backend's
+ * `confidence` field only distinguishes empty from non-empty, so a clipped or
+ * misread value looks perfectly healthy there. Here we combine the backend's
+ * new structural signals (clip geometry, OCR word scores) with format checks
+ * that only make sense after normalisation.
+ *
+ * Lives in sanitizeResults' path deliberately: that is the single funnel every
+ * extraction goes through — backend results and the client-side pdfjs fast
+ * path alike — so no route can skip assessment.
+ */
+export function assessCell(r: ExtractedRow, normalized: string | null): CellIssue[] {
+  if (!normalized || !normalized.trim()) return ['empty'];
+
+  const issues: CellIssue[] = [];
+  if (r.clipped) issues.push('clipped');
+  if (typeof r.ocrScore === 'number' && r.ocrScore < LOW_OCR_SCORE) issues.push('low_ocr');
+  if (AMOUNT_FIELDS.has(r.field) && !AMOUNT_OK.test(normalized)) issues.push('bad_amount');
+  if (DATE_FIELDS.has(r.field) && !DATE_OK.test(normalized)) issues.push('bad_date');
+  return issues;
+}
+
 function sanitizeResults(results: ExtractedRow[]): ExtractedRow[] {
   return results.map(r => {
     const cleaned = sanitizeValue(r.value);
-    if (!cleaned) return { ...r, value: cleaned };
-    let v = cleaned;
-    if (DATE_FIELDS.has(r.field))         v = normalizeDateValue(v, { takeEnd: r.field === 'billing_date' });
-    else if (AMOUNT_FIELDS.has(r.field))  v = normalizeAmountValue(v);
-    else if (PERCENT_FIELDS.has(r.field)) v = normalizePercentValue(v);
-    else if (YEAR_FIELDS.has(r.field))    v = normalizeYearValue(v);
-    return { ...r, value: v };
+    // Value handling below is unchanged — `issues` is layered on top.
+    let out: ExtractedRow;
+    if (!cleaned) {
+      out = { ...r, value: cleaned };
+    } else {
+      let v = cleaned;
+      if (DATE_FIELDS.has(r.field))         v = normalizeDateValue(v, { takeEnd: r.field === 'billing_date' });
+      else if (AMOUNT_FIELDS.has(r.field))  v = normalizeAmountValue(v);
+      else if (PERCENT_FIELDS.has(r.field)) v = normalizePercentValue(v);
+      else if (YEAR_FIELDS.has(r.field))    v = normalizeYearValue(v);
+      out = { ...r, value: v };
+    }
+    const issues = assessCell(out, out.value);
+    return issues.length ? { ...out, issues } : out;
   });
 }
 
