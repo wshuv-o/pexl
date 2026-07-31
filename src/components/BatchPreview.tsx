@@ -1,6 +1,10 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
-import { X, Loader2, LayoutGrid, Table2 } from 'lucide-react';
-import { getFieldConfig, getFieldLabelsForType, type DocumentType } from '@/types/utilscraper';
+import { X, Loader2 } from 'lucide-react';
+import type ExcelJS from 'exceljs';
+import { getFieldConfig, getFieldLabelsForType, type DocumentType, type ExtractedRow } from '@/types/utilscraper';
+import { buildUtilityWorkbook } from '@/lib/utility-excel-export';
+import { buildBankStatementWorkbook } from '@/lib/bank-excel-export';
+import SheetGrid from '@/components/SheetGrid';
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000';
 
@@ -39,7 +43,6 @@ const cleanName = (f: string) => f.replace(/\.(pdf|docx?)$/i, '');
 export default function BatchPreview({ batchId, batchName, docType, onClose }: Props) {
   const [records, setRecords] = useState<BatchRecord[]>([]);
   const [loading, setLoading] = useState(true);
-  const [tab, setTab] = useState<'template' | 'raw'>('template');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -77,9 +80,8 @@ export default function BatchPreview({ batchId, batchName, docType, onClose }: P
     return seen;
   }, [records]);
 
-  // Template columns: the canonical fields for the batch's doc type (so the
-  // preview mirrors the export template's columns). Falls back to whatever
-  // fields are present when the batch has no doc type.
+  // Template columns: the canonical fields for the batch's doc type. Only
+  // used for doc types that have no dedicated workbook builder below.
   const templateCols = useMemo(() => {
     if (!docType) return presentFields;
     const canonical: string[] = getFieldLabelsForType(docType)
@@ -91,8 +93,76 @@ export default function BatchPreview({ batchId, batchName, docType, onClose }: P
     return [...canonical, ...extra];
   }, [docType, presentFields]);
 
-  const cols = tab === 'template' ? templateCols : presentFields;
+  const cols = templateCols;
   const sessionCount = sessionTint.size;
+
+  // ── Real-template preview ──────────────────────────────────────────────
+  // Utility and bank batches export a purpose-built workbook whose shape has
+  // nothing to do with "one row per record": the utility recon pivots utility
+  // items against month columns, the bank template runs a balance chain with
+  // trailing-period tables. Showing a flat field-per-column grid for those was
+  // simply the wrong document. So we build the actual workbook here and render
+  // it — same code path as the download, so it can't drift.
+  const [workbook, setWorkbook] = useState<ExcelJS.Workbook | null>(null);
+  const [buildError, setBuildError] = useState<string | null>(null);
+  const [building, setBuilding] = useState(false);
+  const [activeSheet, setActiveSheet] = useState(0);
+
+  const hasRealTemplate = docType === 'utility_bill' || docType === 'bank_statement';
+
+  // Batch records store one flat {field: value} map per (session, page).
+  // Rebuild the ExtractedRow[] the exporters expect.
+  const rowsFromRecords = useMemo<ExtractedRow[]>(() => {
+    const out: ExtractedRow[] = [];
+    for (const rec of records) {
+      for (const [field, value] of Object.entries(rec.fields ?? {})) {
+        if (!value) continue;
+        out.push({
+          page: rec.page, field, value,
+          confidence: 'high', wasOcr: false,
+          filename: rec.filename, sessionId: rec.session_id,
+        });
+      }
+    }
+    return out;
+  }, [records]);
+
+  useEffect(() => {
+    if (!hasRealTemplate || records.length === 0) return;
+    let cancelled = false;
+    setBuilding(true);
+    setBuildError(null);
+    (async () => {
+      try {
+        let wb: ExcelJS.Workbook;
+        if (docType === 'bank_statement') {
+          wb = await buildBankStatementWorkbook(rowsFromRecords);
+        } else {
+          const fileMap = new Map<string, ExtractedRow[]>();
+          for (const r of rowsFromRecords) {
+            // Same grouping key the exporter uses.
+            const key = r.filename || 'Unknown';
+            if (!fileMap.has(key)) fileMap.set(key, []);
+            fileMap.get(key)!.push(r);
+          }
+          ({ wb } = await buildUtilityWorkbook(fileMap));
+        }
+        if (cancelled) return;
+        setWorkbook(wb);
+        setActiveSheet(0);
+      } catch (err) {
+        if (cancelled) return;
+        console.error('template preview build failed', err);
+        setBuildError(err instanceof Error ? err.message : String(err));
+      } finally {
+        if (!cancelled) setBuilding(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [hasRealTemplate, docType, rowsFromRecords, records.length]);
+
+  const sheets = workbook?.worksheets ?? [];
+  const showRealTemplate = hasRealTemplate;
 
   return (
     <div className="fixed inset-0 z-[210] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
@@ -103,41 +173,39 @@ export default function BatchPreview({ batchId, batchName, docType, onClose }: P
           <div>
             <h2 className="text-sm font-bold text-foreground">Preview — {batchName}</h2>
             <p className="text-[11px] text-muted-foreground mt-0.5">
-              {records.length} record{records.length !== 1 ? 's' : ''} · {sessionCount} session{sessionCount !== 1 ? 's' : ''} ·
-              each session is tinted a different colour
+              {records.length} record{records.length !== 1 ? 's' : ''} · {sessionCount} session{sessionCount !== 1 ? 's' : ''}
+              {!showRealTemplate && ' · each session is tinted a different colour'}
             </p>
           </div>
-          <div className="flex items-center gap-2">
-            {/* Tab switch */}
-            <div className="flex rounded-lg border border-border overflow-hidden text-[11px] font-medium">
-              <button
-                onClick={() => setTab('template')}
-                className={`flex items-center gap-1.5 px-3 py-1.5 transition-colors ${
-                  tab === 'template' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-muted'
-                }`}
-              >
-                <LayoutGrid className="w-3.5 h-3.5" /> Template
-              </button>
-              <button
-                onClick={() => setTab('raw')}
-                className={`flex items-center gap-1.5 px-3 py-1.5 transition-colors ${
-                  tab === 'raw' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-muted'
-                }`}
-              >
-                <Table2 className="w-3.5 h-3.5" /> Raw
-              </button>
-            </div>
-            <button
-              onClick={onClose}
-              className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-all"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
+          <button
+            onClick={onClose}
+            className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-all"
+          >
+            <X className="w-4 h-4" />
+          </button>
         </div>
 
-        {/* Session legend */}
-        {sessionCount > 0 && (
+        {/* Sheet tabs — the exported workbook usually has several. */}
+        {showRealTemplate && sheets.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 px-5 py-2 border-b border-border shrink-0">
+            {sheets.map((ws, i) => (
+              <button
+                key={ws.id ?? i}
+                onClick={() => setActiveSheet(i)}
+                className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors ${
+                  i === activeSheet
+                    ? 'bg-primary text-primary-foreground'
+                    : 'text-muted-foreground hover:bg-muted border border-border'
+                }`}
+              >
+                {ws.name}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {/* Session legend — only meaningful for the per-record views. */}
+        {!showRealTemplate && sessionCount > 0 && (
           <div className="flex flex-wrap gap-x-4 gap-y-1.5 px-5 py-2.5 border-b border-border shrink-0">
             {Array.from(sessionTint.values()).map((t, i) => (
               <span key={i} className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
@@ -156,6 +224,21 @@ export default function BatchPreview({ batchId, batchName, docType, onClose }: P
             </div>
           ) : records.length === 0 ? (
             <p className="text-center text-xs text-muted-foreground py-16">No records saved in this batch yet.</p>
+          ) : showRealTemplate ? (
+            building ? (
+              <div className="flex items-center justify-center py-16 text-muted-foreground">
+                <Loader2 className="w-5 h-5 animate-spin mr-2" /> Building the export template…
+              </div>
+            ) : buildError ? (
+              <div className="px-5 py-10 text-center text-xs text-muted-foreground">
+                <p className="text-warning font-medium mb-1">Couldn’t build the template preview.</p>
+                <p className="opacity-80">{buildError}</p>
+              </div>
+            ) : sheets[activeSheet] ? (
+              <SheetGrid worksheet={sheets[activeSheet]} />
+            ) : (
+              <p className="text-center text-xs text-muted-foreground py-16">Nothing to preview.</p>
+            )
           ) : (
             <table className="w-full border-collapse text-xs">
               <thead className="sticky top-0 z-10">
@@ -204,9 +287,9 @@ export default function BatchPreview({ batchId, batchName, docType, onClose }: P
         </div>
 
         <div className="px-5 py-2.5 border-t border-border shrink-0 text-[10px] text-muted-foreground">
-          {tab === 'template'
-            ? 'Template view — columns match the export template for this batch’s document type.'
-            : 'Raw view — every saved field, exactly as stored.'}
+          {showRealTemplate
+            ? 'The actual workbook this batch exports, built by the same code as the download. Formula cells (ƒ) are calculated when Excel opens the file.'
+            : 'Canonical columns for this document type — it has no dedicated workbook template.'}
         </div>
       </div>
     </div>

@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import React, { useState, useMemo, useEffect, useCallback } from 'react';
+import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { X, Download, RefreshCw, Pencil, CheckCircle2, ArrowUpDown, ArrowUp, ArrowDown, Trash2, Check, Layers, ChevronDown, Plus, Loader2, Sparkles, AlertTriangle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
@@ -13,6 +13,7 @@ import {
 } from '@/lib/bank-excel-export';
 import MergeDialog from '@/components/bank/MergeDialog';
 import BatchPanel from '@/components/BatchPanel';
+import MergeConflictDialog, { type RecordConflict } from '@/components/batch/MergeConflictDialog';
 import { normalizeDateValue } from '@/lib/api';
 import { FIELD_LABELS } from '@/types/utilscraper';
 import { useAuth } from '@/contexts/AuthContext';
@@ -40,6 +41,11 @@ interface Props {
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000';
 
 const CONF_PCT: Record<string, number> = { high: 95, medium: 65, low: 25 };
+
+// How long to wait after the last edit on a page before pushing it to the
+// batch. Long enough that fixing three cells in a row is one request, short
+// enough that the save feels immediate.
+const AUTO_SAVE_DELAY_MS = 700;
 
 // Plain-English reason shown on a flagged cell, so the warning is actionable
 // rather than mysterious.
@@ -214,16 +220,45 @@ export default function ExcelPanel({
   // the Export click handler) can use them without waiting for React to
   // re-render — setBatchSavedRows schedules a state update but the
   // ongoing async handler still holds the old exportData in closure.
+  // Latest saved rows, readable without making this callback depend on them.
+  //
+  // This callback MUST stay referentially stable. It is a dependency of the
+  // effect below, and it calls setBatchSavedRows with a newly built array on
+  // every run. If `batchSavedRows` were a dependency, each fetch would change
+  // the callback's identity, re-trigger the effect, fetch again — an endless
+  // refetch loop for as long as the panel is open with a batch selected.
+  const batchSavedRowsRef = useRef<ExtractedRow[]>([]);
+  useEffect(() => { batchSavedRowsRef.current = batchSavedRows; }, [batchSavedRows]);
+
+  // Per-record concurrency bookkeeping, keyed by `${sessionId}-${page}`.
+  //   versions — the row version this browser last saw; sent with each save so
+  //              the server can reject a write based on stale data.
+  //   base     — the field values at that version, i.e. the common ancestor.
+  //              Having it turns a conflict into a 3-way merge, so the user is
+  //              only asked about fields *both* sides actually changed.
+  // Refs, not state: pure bookkeeping that must never re-trigger the fetch
+  // effect above.
+  const recordVersionsRef = useRef<Map<string, number>>(new Map());
+  const recordBaseRef = useRef<Map<string, Record<string, string>>>(new Map());
+  const [conflict, setConflict] = useState<RecordConflict | null>(null);
+
   const refreshBatchSavedRows = useCallback(async (batchId: number | null): Promise<ExtractedRow[]> => {
     if (!batchId) { setBatchSavedRows([]); setApprovedKeys(new Set()); return []; }
     try {
       const res = await fetch(`${BACKEND_URL}/api/batches/${batchId}/records`);
       const d = await res.json();
-      if (d.status !== 'ok') return batchSavedRows;
+      if (d.status !== 'ok') return batchSavedRowsRef.current;
       const rows: ExtractedRow[] = [];
       const keys = new Set<string>();
+      recordVersionsRef.current = new Map();
+      recordBaseRef.current = new Map();
       for (const rec of d.records) {
-        keys.add(`${rec.session_id}-${rec.page}`);
+        const key = `${rec.session_id}-${rec.page}`;
+        keys.add(key);
+        // Snapshot the version + values we loaded: the basis for detecting and
+        // merging a concurrent edit later.
+        recordVersionsRef.current.set(key, Number(rec.version ?? 1));
+        recordBaseRef.current.set(key, { ...(rec.fields as Record<string, string>) });
         for (const [field, value] of Object.entries(rec.fields as Record<string, string>)) {
           if (value) rows.push({ page: rec.page, field, value, confidence: 'high', wasOcr: false, filename: rec.filename, sessionId: rec.session_id });
         }
@@ -233,9 +268,9 @@ export default function ExcelPanel({
       return rows;
     } catch {
       /* non-fatal — fall back to whatever's currently in state */
-      return batchSavedRows;
+      return batchSavedRowsRef.current;
     }
-  }, [batchSavedRows]);
+  }, []);
 
   // Fetch saved batch records whenever the active batch changes
   useEffect(() => {
@@ -447,6 +482,177 @@ export default function ExcelPanel({
   // in `data` and the edit silently reverts. Matching the Nth occurrence of
   // (sessionId, page, field) always lands on the real row, so edits stick in
   // the frontend AND flow through to batch saves (which read from `data`).
+  // ── Auto-save edits back into the batch ────────────────────────────────
+  // Once a page has been approved into a batch there is already a server-side
+  // record for it, so a later edit should just update that record — the user
+  // shouldn't have to approve the same page over and over. Only pages that
+  // are already approved in the active batch are touched; anything not yet
+  // approved still needs an explicit approve, which is the user's opt-in.
+  //
+  // The write is a single POST: `upsert_record` on the server is a genuine
+  // INSERT ... ON DUPLICATE KEY UPDATE, so one request atomically replaces
+  // the record's fields. (The manual approve path does DELETE-then-POST;
+  // left alone since it works, but the lone POST has no window in which the
+  // record is missing if the write fails.)
+  const autoSaveTimers  = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const autoSavePending = useRef<Record<string, ExtractedRow[]>>({});
+  const [autoSavingKeys, setAutoSavingKeys] = useState<Set<string>>(new Set());
+
+  // Don't leave timers firing into an unmounted panel.
+  useEffect(() => {
+    const timers = autoSaveTimers.current;
+    return () => { for (const t of Object.values(timers)) clearTimeout(t); };
+  }, []);
+
+  const flushAutoSave = useCallback(async (sessionId: string, page: number) => {
+    const key = `${sessionId}-${page}`;
+    // Take the newest snapshot queued for this page and clear the slot, so a
+    // save that lands mid-flight schedules its own follow-up rather than
+    // being silently dropped.
+    const snapshot = autoSavePending.current[key];
+    delete autoSavePending.current[key];
+    delete autoSaveTimers.current[key];
+    if (!snapshot || !activeBatchId) return;
+
+    const pageRows = snapshot.filter(d => d.sessionId === sessionId && d.page === page);
+    // Same shape the approve path builds: one record per page, repeated
+    // fields joined, valueless rows skipped (so clearing a cell removes it).
+    const fields: Record<string, string> = {};
+    for (const d of pageRows) {
+      if (!d.value) continue;
+      if (fields[d.field]) fields[d.field] += ', ' + d.value;
+      else fields[d.field] = d.value;
+    }
+    const filename = pageRows[0]?.filename ?? '';
+
+    setAutoSavingKeys(prev => new Set([...prev, key]));
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/batches/${activeBatchId}/records`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: sessionId, filename, page, fields,
+          // The version this browser last saw. The server refuses the write if
+          // someone else has saved since, rather than silently overwriting.
+          base_version: recordVersionsRef.current.get(key) ?? null,
+          updated_by: user?.username ?? null,
+        }),
+      });
+
+      if (res.status === 409) {
+        // Someone else got there first. Hand both versions to the merge
+        // dialog instead of losing either side's work.
+        const body = await res.json().catch(() => ({}));
+        const current = body.current ?? {};
+        setConflict({
+          batchId: activeBatchId,
+          sessionId, filename, page,
+          mine: fields,
+          theirs: (current.fields ?? {}) as Record<string, string>,
+          base: recordBaseRef.current.get(key) ?? {},
+          serverVersion: Number(current.version ?? 0),
+          theirsBy: current.updated_by ?? null,
+          theirsAt: current.updated_at ?? null,
+        });
+        toast.warning(`Page ${page} was changed by someone else — review the merge`,
+          { id: 'batch-autosave' });
+        return;
+      }
+
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const saved = await res.json().catch(() => ({}));
+      if (saved.version) {
+        recordVersionsRef.current.set(key, Number(saved.version));
+        recordBaseRef.current.set(key, { ...fields });
+      }
+      // Keep the Export snapshot in step without refetching the whole batch.
+      setBatchSavedRows(prev => [
+        ...prev.filter(r => !(r.sessionId === sessionId && r.page === page)),
+        ...Object.entries(fields).map(([field, value]) => ({
+          page, field, value, confidence: 'high' as const, wasOcr: false,
+          filename, sessionId,
+        })),
+      ]);
+      // Stable toast id so a burst of edits replaces one toast instead of
+      // stacking a tower of them.
+      toast.success(`Batch updated — page ${page}`, { id: 'batch-autosave' });
+    } catch (err) {
+      console.error('auto-save to batch failed', err);
+      toast.error(`Couldn't update the batch for page ${page} — click Approve to retry`,
+        { id: 'batch-autosave' });
+    } finally {
+      setAutoSavingKeys(prev => { const n = new Set(prev); n.delete(key); return n; });
+    }
+  }, [activeBatchId, user?.username]);
+
+  // Write the user's merge decision, based on the server's current version so
+  // the save is guaranteed to apply, then bring the panel in line with it.
+  const resolveConflict = useCallback(async (merged: Record<string, string>) => {
+    if (!conflict) return;
+    const { batchId, sessionId, filename, page, serverVersion } = conflict;
+    const key = `${sessionId}-${page}`;
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/batches/${batchId}/records`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: sessionId, filename, page, fields: merged,
+          base_version: serverVersion, updated_by: user?.username ?? null,
+        }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const saved = await res.json().catch(() => ({}));
+      recordVersionsRef.current.set(key, Number(saved.version ?? serverVersion + 1));
+      recordBaseRef.current.set(key, { ...merged });
+
+      // Show the merged result in the table. Values are applied to the first
+      // occurrence of each field; repeated fields (saved joined with ", ")
+      // keep their extra occurrences untouched.
+      const applied = new Set<string>();
+      const next = data.map(r => {
+        if (r.sessionId !== sessionId || r.page !== page) return r;
+        if (applied.has(r.field)) return r;
+        applied.add(r.field);
+        const v = merged[r.field] ?? '';
+        return v === r.value ? r : { ...r, value: v };
+      });
+      for (const [field, value] of Object.entries(merged)) {
+        if (!applied.has(field) && value) {
+          next.push({ page, field, value, confidence: 'high', wasOcr: false, filename, sessionId });
+        }
+      }
+      onDataChange(next);
+
+      setBatchSavedRows(prev => [
+        ...prev.filter(r => !(r.sessionId === sessionId && r.page === page)),
+        ...Object.entries(merged).map(([field, value]) => ({
+          page, field, value, confidence: 'high' as const, wasOcr: false, filename, sessionId,
+        })),
+      ]);
+      setConflict(null);
+      toast.success(`Page ${page} merged and saved`);
+    } catch (err) {
+      console.error('merge save failed', err);
+      toast.error('Could not save the merged record — try again');
+    }
+  }, [conflict, data, onDataChange, user]);
+
+  // Abandon this browser's version and adopt whatever the server holds.
+  const discardMine = useCallback(() => {
+    setConflict(null);
+    void refreshBatchSavedRows(activeBatchId);
+    toast('Your changes were discarded — showing the saved version', { icon: 'ℹ️' });
+  }, [activeBatchId, refreshBatchSavedRows]);
+
+  const scheduleAutoSave = useCallback((sessionId: string, page: number, snapshot: ExtractedRow[]) => {
+    const key = `${sessionId}-${page}`;
+    // Not in a batch, or this page was never approved → nothing to update.
+    if (!activeBatchId || !approvedKeys.has(key)) return;
+    autoSavePending.current[key] = snapshot;
+    clearTimeout(autoSaveTimers.current[key]);
+    autoSaveTimers.current[key] = setTimeout(() => { void flushAutoSave(sessionId, page); }, AUTO_SAVE_DELAY_MS);
+  }, [activeBatchId, approvedKeys, flushAutoSave]);
+
   const handleEdit = (
     sessionId: string, page: number, field: string, occ: number, newValue: string,
   ) => {
@@ -469,6 +675,8 @@ export default function ExcelPanel({
       });
     }
     onDataChange(next);
+    // If this page is already in the batch, push the edit straight through.
+    scheduleAutoSave(sessionId, page, next);
     setEditingKey(null);
   };
 
@@ -909,6 +1117,14 @@ export default function ExcelPanel({
       {/* Shared merge dialog — gates either Export or Save-to-batch, depending
           on pendingMergeAction. On confirm we apply the chosen merges, then
           run whichever action opened the dialog. */}
+      {conflict && (
+        <MergeConflictDialog
+          conflict={conflict}
+          onCancel={discardMine}
+          onResolve={merged => { void resolveConflict(merged); }}
+        />
+      )}
+
       {mergeGroups && (
         <MergeDialog
           groups={mergeGroups}
@@ -1044,6 +1260,9 @@ export default function ExcelPanel({
                     const approveKey = `${row.sessionId}-${row.page}`;
                     const isApproved = approvedKeys.has(approveKey);
                     const isApproving = approvingKey === approveKey;
+                    // An edit on an already-approved page is being pushed to
+                    // the batch right now.
+                    const isAutoSaving = autoSavingKeys.has(approveKey);
                     return (
                       <tr
                         key={rowKey}
@@ -1081,10 +1300,18 @@ export default function ExcelPanel({
                                     ? 'text-green-500 bg-green-500/15 hover:bg-green-500/25'
                                     : 'text-muted-foreground hover:text-green-500 hover:bg-green-500/10'
                                 } ${isApproving ? 'opacity-40 pointer-events-none' : ''}`}
-                                title={isApproved ? 'Approved — click to un-approve' : 'Approve this row'}
+                                title={
+                                  isAutoSaving
+                                    ? 'Saving your edit to the batch…'
+                                    : isApproved
+                                      ? 'Approved — edits save to the batch automatically. Click to un-approve.'
+                                      : 'Approve this row'
+                                }
                                 onClick={e => { e.stopPropagation(); void toggleApprove(row); }}
                               >
-                                <Check className="w-3 h-3" />
+                                {isAutoSaving
+                                  ? <Loader2 className="w-3 h-3 animate-spin" />
+                                  : <Check className="w-3 h-3" />}
                               </button>
                             </div>
                           )}
@@ -1119,12 +1346,15 @@ export default function ExcelPanel({
                                     onBlur={e => {
                                       const val = e.target.value.trim();
                                       if (val) {
-                                        onDataChange([...data, {
+                                        const next = [...data, {
                                           page: row.page, field: f, value: val,
-                                          confidence: 'high', wasOcr: false,
+                                          confidence: 'high' as const, wasOcr: false,
                                           filename: row.filename, sessionId: row.sessionId,
                                           edited: true,
-                                        }]);
+                                        }];
+                                        onDataChange(next);
+                                        // Filling a blank counts as an edit too.
+                                        scheduleAutoSave(row.sessionId, row.page, next);
                                       }
                                       setEditingKey(null);
                                     }}

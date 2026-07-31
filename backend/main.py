@@ -39,6 +39,15 @@ from ocr_lazy import get_ocr_engine
 import cell_quality
 
 app = FastAPI(title="PDF OCR API")
+
+# Additive, idempotent: adds record versioning + the history table when absent.
+# Logs and continues on failure — without it the app just falls back to
+# last-write-wins, exactly as before.
+try:
+    bs.ensure_schema()
+except Exception as _exc:  # pragma: no cover - defensive
+    logging.getLogger(__name__).error("batch schema migration skipped: %s", _exc)
+
 app.include_router(table_extract_router)
 app.include_router(table_calibrate_router)
 app.include_router(utility_import_router)
@@ -887,6 +896,11 @@ class UpsertRecordBody(BaseModel):
     filename: str
     page: int
     fields: dict
+    # Version the client last saw. Omit for last-write-wins (legacy callers);
+    # send it to get a 409 + the server's current row instead of a silent
+    # overwrite when someone else edited the same record.
+    base_version: Optional[int] = None
+    updated_by: Optional[str] = None
 
 @app.get("/api/batches")
 def api_list_batches():
@@ -934,16 +948,31 @@ def api_get_records(batch_id: int):
 @app.post("/api/batches/{batch_id}/records")
 def api_upsert_record(batch_id: int, body: UpsertRecordBody):
     try:
-        rid = bs.upsert_record(batch_id, body.session_id, body.filename, body.page, body.fields)
-        return {"status": "ok", "id": rid}
+        result = bs.upsert_record(
+            batch_id, body.session_id, body.filename, body.page, body.fields,
+            base_version=body.base_version, updated_by=body.updated_by,
+        )
+        if result.get("status") == "conflict":
+            # 409 so the client can open a merge dialog instead of clobbering.
+            return JSONResponse(status_code=409, content=result)
+        return {"status": "ok", "id": result.get("id"), "version": result.get("version")}
     except Exception as e:
         return JSONResponse(status_code=500, content={"detail": str(e)})
 
 @app.delete("/api/batches/{batch_id}/records/{session_id}/{page}")
-def api_delete_record(batch_id: int, session_id: str, page: int):
+def api_delete_record(batch_id: int, session_id: str, page: int, deleted_by: str | None = None):
     try:
-        ok = bs.delete_record(batch_id, session_id, page)
+        ok = bs.delete_record(batch_id, session_id, page, deleted_by=deleted_by)
         return {"status": "ok", "deleted": ok}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"detail": str(e)})
+
+@app.get("/api/batches/{batch_id}/history")
+def api_batch_history(batch_id: int, session_id: str | None = None,
+                      page: int | None = None, limit: int = 200):
+    """Change log for a batch — every saved version, newest first."""
+    try:
+        return {"status": "ok", "history": bs.get_record_history(batch_id, session_id, page, limit)}
     except Exception as e:
         return JSONResponse(status_code=500, content={"detail": str(e)})
 

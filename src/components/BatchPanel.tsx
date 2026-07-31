@@ -1,9 +1,10 @@
 import { useState, useEffect, useCallback } from 'react';
-import { X, Pencil, Trash2, ChevronDown, ChevronRight, Check, Loader2, CheckCircle2, Download, Eye } from 'lucide-react';
+import { X, Pencil, Trash2, ChevronDown, ChevronRight, Check, Loader2, CheckCircle2, Download, Eye, History } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { DOCUMENT_TYPES, type DocumentType, type ExtractedRow } from '@/types/utilscraper';
 import { exportToExcel } from '@/lib/excel-export';
 import BatchPreview from '@/components/BatchPreview';
+import BatchHistory from '@/components/batch/BatchHistory';
 import { toast } from 'sonner';
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000';
@@ -53,6 +54,7 @@ export default function BatchPanel({ username, activeBatchId, onClose, onSelect 
 
   const [downloadingId, setDownloadingId] = useState<number | null>(null);
   const [previewBatch, setPreviewBatch] = useState<Batch | null>(null);
+  const [historyBatch, setHistoryBatch] = useState<Batch | null>(null);
 
   // Fetch a batch's records and export using the doc type baked in at
   // batch-creation time. No per-download picker — the batch's own
@@ -303,6 +305,13 @@ export default function BatchPanel({ username, activeBatchId, onClose, onSelect 
                         >
                           <Eye className="w-3 h-3" />
                         </button>
+                        <button
+                          className="p-1 rounded text-muted-foreground hover:text-primary hover:bg-primary/10 transition-all"
+                          title="Version history — who changed what, and when"
+                          onClick={e => { e.stopPropagation(); setHistoryBatch(b); }}
+                        >
+                          <History className="w-3 h-3" />
+                        </button>
                         {/* Download batch as Excel using the doc type baked in
                             at creation. No picker — one click, one file.
                             Pre-migration batches (doc_type = NULL) show
@@ -426,6 +435,15 @@ export default function BatchPanel({ username, activeBatchId, onClose, onSelect 
           batchName={previewBatch.name}
           docType={previewBatch.doc_type ?? null}
           onClose={() => setPreviewBatch(null)}
+        />
+      )}
+
+      {/* Change log — every saved version of every record in the batch */}
+      {historyBatch && (
+        <BatchHistory
+          batchId={historyBatch.id}
+          batchName={historyBatch.name}
+          onClose={() => setHistoryBatch(null)}
         />
       )}
     </div>

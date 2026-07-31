@@ -702,7 +702,15 @@ const addRollupTable = (
 };
 
 // ─── Main: Build the bank statement workbook from Pexl data ──────────────────
-export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilename: string) => {
+/**
+ * Build the bank-statement workbook without delivering it.
+ *
+ * The whole template — per-property sheets, the running-balance chain, the
+ * T-1..T-12 trailing tables and the roll-up. ``downloadBankStatementExcel``
+ * just saves what this returns, so the batch preview can show exactly the
+ * workbook the user is about to download.
+ */
+export const buildBankStatementWorkbook = async (data: ExtractedRow[]): Promise<ExcelJS.Workbook> => {
   const wb = new ExcelJS.Workbook();
 
   const fileMap = new Map<string, { filename: string; rows: ExtractedRow[] }>();
@@ -1017,6 +1025,12 @@ export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilen
     });
   }
 
+  return wb;
+};
+
+/** Build the bank-statement workbook and download it. */
+export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilename: string) => {
+  const wb = await buildBankStatementWorkbook(data);
   const buffer = await wb.xlsx.writeBuffer();
   const now = new Date();
   const dateStr = now.toISOString().slice(0, 16).replace(/[T:]/g, '-');

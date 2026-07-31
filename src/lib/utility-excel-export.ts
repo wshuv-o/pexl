@@ -909,7 +909,15 @@ function buildRollupSheet(
 /** Which scraped field decides the month a bill lands under. */
 export type UtilityDateField = 'billing_date' | 'date' | 'auto';
 
-export async function downloadUtilityExcel(
+/**
+ * Build the utility workbook without delivering it.
+ *
+ * This is the whole export — every sheet, header, month column and total.
+ * ``downloadUtilityExcel`` is a thin wrapper that saves what this returns, so
+ * the two can never diverge, and the batch preview can render exactly the
+ * workbook the user is about to download.
+ */
+export async function buildUtilityWorkbook(
   fileMap: Map<string, ExtractedRow[]>,
   /**
    * Controls how each page is bucketed into a month column.
@@ -921,7 +929,7 @@ export async function downloadUtilityExcel(
    *    in the data; otherwise fall back to ``date`` with no adjustment.
    */
   dateField: UtilityDateField = 'auto',
-): Promise<void> {
+): Promise<{ wb: ExcelJS.Workbook; isPortfolio: boolean }> {
 
   // ── Decide which scraped field to consult for each page ─────────────────────
   // For 'auto', look at the whole dataset once: if anything has billing_date
@@ -1208,7 +1216,16 @@ export async function downloadUtilityExcel(
     });
   }
 
-  // ── Step 7: download ──────────────────────────────────────────────────────────
+  return { wb, isPortfolio };
+}
+
+/** Build the utility workbook and download it. */
+export async function downloadUtilityExcel(
+  fileMap: Map<string, ExtractedRow[]>,
+  dateField: UtilityDateField = 'auto',
+): Promise<void> {
+  const { wb, isPortfolio } = await buildUtilityWorkbook(fileMap, dateField);
+
   const now     = new Date();
   const dateStr = now.toISOString().slice(0, 16).replace(/[T:]/g, '-');
   const buf     = await wb.xlsx.writeBuffer();
