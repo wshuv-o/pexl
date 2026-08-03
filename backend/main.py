@@ -241,6 +241,92 @@ def ocr_image_array(img_array: np.ndarray) -> str:
     return ocr_image_array_scored(img_array)[0]
 
 
+def ocr_image_boxes(img_array: np.ndarray) -> list[tuple[tuple[float, float, float, float], str, float]]:
+    """Run OCR and return ``[(box, text, score)]`` with boxes in image pixels.
+
+    The engine already reports where each word sits; ``ocr_image_array`` throws
+    that away because it only needs the text. Geometry work — line clustering,
+    region alignment — needs the positions, hence this variant.
+    """
+    engine = get_ocr_engine()
+    if engine is None:
+        return []
+    try:
+        results = engine.ocr(img_array, cls=True)
+    except (RuntimeError, Exception):
+        return []
+    if not results or not results[0]:
+        return []
+    out = []
+    for line in results[0]:
+        try:
+            poly, (text, score) = line[0], line[1]
+        except (IndexError, TypeError, ValueError):
+            continue
+        t = (text or "").strip()
+        if not t:
+            continue
+        try:
+            xs = [float(p[0]) for p in poly]
+            ys = [float(p[1]) for p in poly]
+        except (TypeError, ValueError):
+            continue
+        out.append(((min(xs), min(ys), max(xs), max(ys)), t, float(score)))
+    return out
+
+
+def ocr_strip_lines(page: fitz.Page, rect: fitz.Rect, pad: float | None = None):
+    """Cluster the text lines around a region by OCRing a narrow band.
+
+    Pages with no text layer — scans, phone photos, and PDFs whose text was
+    converted to vector outlines — yield no word boxes, so the region aligner
+    has nothing to cluster and quietly does nothing. Rendering and OCRing a
+    band around the region gives it the local line structure it needs.
+
+    Only a band is processed, not the page, so the cost stays bounded; this
+    runs on repair passes over already-flagged cells, not on normal extraction.
+    """
+    if get_ocr_engine() is None:
+        return []
+
+    page_rect = page.rect
+    height = max(rect.y1 - rect.y0, 1.0)
+    if pad is None:
+        # Enough room to see the neighbouring lines above and below, which are
+        # the walls the aligner needs.
+        pad = max(height * 3.0, 36.0)
+
+    band = fitz.Rect(
+        page_rect.x0,
+        max(page_rect.y0, rect.y0 - pad),
+        page_rect.x1,
+        min(page_rect.y1, rect.y1 + pad),
+    )
+    if band.is_empty:
+        return []
+
+    scale = RENDER_DPI / 72.0
+    pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), clip=band)
+    try:
+        img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+        if pix.n == 4:
+            img = img[:, :, :3]
+        img = np.ascontiguousarray(img)
+        found = ocr_image_boxes(img)
+    finally:
+        pix = None
+
+    # Map the band's pixel coordinates back into page points.
+    boxes = []
+    for (bx0, by0, bx1, by1), text, _score in found:
+        boxes.append((
+            (band.x0 + bx0 / scale, band.y0 + by0 / scale,
+             band.x0 + bx1 / scale, band.y0 + by1 / scale),
+            text,
+        ))
+    return region_align.cluster_lines(boxes)
+
+
 def ocr_region_image_scored(page: fitz.Page, rect: fitz.Rect) -> tuple[str, list[float]]:
     """Render a specific region of the page at high DPI and OCR it.
 
@@ -403,8 +489,17 @@ def extract_region_detailed(
         try:
             if lines is None:
                 lines = page_text_lines(page, cached_words)
+            if not lines:
+                # No text layer and no OCR index: a scan, a photo, or text
+                # drawn as vector outlines. OCR a band around the region so the
+                # aligner has line structure to work with.
+                lines = ocr_strip_lines(page, rect)
+                if lines:
+                    align_info["line_source"] = "ocr_strip"
             if lines:
-                new_box, align_info = region_align.align_rect_to_lines(original_box, lines)
+                new_box, info = region_align.align_rect_to_lines(original_box, lines)
+                info.update(align_info)
+                align_info = info
                 if align_info.get("realigned"):
                     rect = fitz.Rect(*new_box)
         except Exception:

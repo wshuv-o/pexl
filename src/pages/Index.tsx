@@ -14,8 +14,28 @@ import PDFViewer from '@/components/PDFViewer';
 import ExcelPanel from '@/components/ExcelPanel';
 import BatchPanel from '@/components/BatchPanel';
 import ThemeToggle from '@/components/ThemeToggle';
-import type { PDFSession, Highlight, ExtractedRow, DocumentType } from '@/types/utilscraper';
+import type { PDFSession, Highlight, ExtractedRow, DocumentType, CellQuality } from '@/types/utilscraper';
 import { DOCUMENT_TYPES } from '@/types/utilscraper';
+
+/**
+ * Lift the diagnostic fields off an extraction result so they can ride on the
+ * highlight.
+ *
+ * `extractedData` is rebuilt *from* the highlights after every extraction, so
+ * anything not stored on the highlight is dropped before the results panel
+ * sees it — which silently swallowed every quality flag.
+ */
+const qualityOf = (r: ExtractedRow): CellQuality => ({
+  issues: r.issues,
+  clipped: r.clipped,
+  clippedText: r.clippedText,
+  drifted: r.drifted,
+  driftLines: r.driftLines,
+  ocrScore: r.ocrScore,
+  ocrScoreAvg: r.ocrScoreAvg,
+  realigned: r.realigned,
+  repairedFrom: r.repairedFrom,
+});
 import { processFile, extractRegions, downloadAllOcrPdfsAsZip, getOcrProgress, triggerForceOcr, rotateSessionPdf, fetchConvertedPdf, extractTableRegion } from '@/lib/api';
 import { rasterizeIfVectorOnly } from '@/lib/vector-pdf-rasterizer';
 import { sessionsCache } from '@/lib/sessions-cache';
@@ -690,7 +710,7 @@ export default function Index() {
       for (const [pageNum, pageHls] of Object.entries(newHighlights)) {
         newHighlights[Number(pageNum)] = pageHls.map(h => {
           const r = results[idx++];
-          return r ? { ...h, extractedValue: r.value, confidence: r.confidence, wasOcr: r.wasOcr } : h;
+          return r ? { ...h, extractedValue: r.value, confidence: r.confidence, wasOcr: r.wasOcr, quality: qualityOf(r) } : h;
         });
       }
       const sessResults: ExtractedRow[] = Object.values(newHighlights).flat()
@@ -699,6 +719,7 @@ export default function Index() {
           page: h.page, field: h.field, value: h.extractedValue ?? null,
           confidence: h.confidence ?? 'low', wasOcr: h.wasOcr ?? false,
           filename: sess.filename, folderName: sess.folderName, sessionId: liveId,
+          ...(h.quality ?? {}),
         }));
       return { sess, newHighlights, sessResults, liveId };
     };
@@ -834,7 +855,7 @@ export default function Index() {
         const newHls = { ...s.highlights };
         newHls[page] = (s.highlights[page] ?? []).map((h, i) => {
           const r = results[i];
-          return r ? { ...h, extractedValue: r.value, confidence: r.confidence, wasOcr: r.wasOcr } : h;
+          return r ? { ...h, extractedValue: r.value, confidence: r.confidence, wasOcr: r.wasOcr, quality: qualityOf(r) } : h;
         });
         const allResults: ExtractedRow[] = Object.values(newHls).flat()
           .filter(h => h.extractedValue !== undefined)
@@ -842,6 +863,7 @@ export default function Index() {
             page: h.page, field: h.field, value: h.extractedValue ?? null,
             confidence: h.confidence ?? 'low', wasOcr: h.wasOcr ?? false,
             filename: s.filename, folderName: s.folderName, sessionId: s.id,
+            ...(h.quality ?? {}),
           }));
         // Preserve any manually-edited values for OTHER pages
         const editedOtherPages = s.extractedData.filter(r => r.page !== page && r.edited);
@@ -928,7 +950,16 @@ export default function Index() {
             const newHls = { ...s.highlights };
             newHls[page] = (s.highlights[page] ?? []).map(h => {
               const ch = changes.get(h.id);
-              return ch ? { ...h, extractedValue: ch.value ?? undefined, confidence: 'high' as const } : h;
+              if (!ch) return h;
+              return {
+                ...h,
+                extractedValue: ch.value ?? undefined,
+                confidence: 'high' as const,
+                // Persist on the highlight too — extractedData gets rebuilt
+                // from highlights, so a repair recorded only on the row would
+                // vanish on the next re-extract.
+                quality: { realigned: true, repairedFrom: ch.from, issues: undefined },
+              };
             });
             const changedFields = new Set(
               (s.highlights[page] ?? []).filter(h => changes.has(h.id)).map(h => h.field),
@@ -997,13 +1028,14 @@ export default function Index() {
         const hls = { ...s.highlights };
         for (const [pageNum, pageHls] of Object.entries(hls))
           hls[Number(pageNum)] = pageHls.map(h => h.id === highlightId
-            ? { ...h, extractedValue: result.value, confidence: result.confidence, wasOcr: result.wasOcr } : h);
+            ? { ...h, extractedValue: result.value, confidence: result.confidence, wasOcr: result.wasOcr, quality: qualityOf(result) } : h);
         const allResults: ExtractedRow[] = Object.values(hls).flat()
           .filter(h => h.extractedValue !== undefined)
           .map(h => ({
             page: h.page, field: h.field, value: h.extractedValue ?? null,
             confidence: h.confidence ?? 'low', wasOcr: h.wasOcr ?? false,
             filename: s.filename, folderName: s.folderName, sessionId: s.id,
+            ...(h.quality ?? {}),
           }));
         return { ...s, highlights: hls, extractedData: allResults };
       }));

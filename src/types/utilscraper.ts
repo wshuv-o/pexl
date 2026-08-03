@@ -69,6 +69,27 @@ export interface Highlight {
   confidence?: 'high' | 'medium' | 'low';
   wasOcr?: boolean;
   isAutoExtracted?: boolean;  // true = coords are approximate, skip on Re-Extract
+  /**
+   * Quality diagnostics from the last extraction of this region.
+   *
+   * These live on the highlight because `extractedData` is rebuilt *from* the
+   * highlights after every extraction — anything not stored here is silently
+   * dropped before the results panel ever sees it.
+   */
+  quality?: CellQuality;
+}
+
+/** The diagnostic half of an extraction result, carried alongside the value. */
+export interface CellQuality {
+  issues?: CellIssue[];
+  clipped?: boolean;
+  clippedText?: string[];
+  drifted?: boolean;
+  driftLines?: number;
+  ocrScore?: number;
+  ocrScoreAvg?: number;
+  realigned?: boolean;
+  repairedFrom?: string | null;
 }
 
 export type FieldLabel =

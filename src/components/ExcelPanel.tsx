@@ -885,6 +885,14 @@ export default function ExcelPanel({
   );
   const suspectCount = suspectRows.length;
 
+  // Everything the repair pass can act on. Empty cells belong here even though
+  // they are not "suspect looking" — a box that drifted off its line reads as
+  // empty, and realigning it is exactly what recovers the value.
+  const repairTargets = useMemo(
+    () => data.filter(r => r.sessionId && (!r.value || (r.issues?.length ?? 0) > 0)),
+    [data],
+  );
+
   // "Review only" view — narrows the table to rows containing a flagged cell
   // so the user can work through just those. Off by default; when off this is
   // the untouched sortedGroups reference, so the normal table is unaffected.
@@ -981,20 +989,19 @@ export default function ExcelPanel({
                 {showOnlySuspect && <span className="opacity-70">· filtering</span>}
               </button>
             )}
-            {suspectCount > 0 && onRepairFlagged && (
+            {repairTargets.length > 0 && onRepairFlagged && (
               <button
                 type="button"
                 onClick={() => {
-                  const cells = suspectRows
-                    .filter(r => r.sessionId)
-                    .map(r => ({ sessionId: r.sessionId!, page: r.page, field: r.field }));
-                  void onRepairFlagged(cells);
+                  void onRepairFlagged(repairTargets.map(r => ({
+                    sessionId: r.sessionId!, page: r.page, field: r.field,
+                  })));
                 }}
-                title="Re-read only these cells, giving each box slack within its text line so a page whose text shifted a few mm still reads correctly. Cells that extracted cleanly are not touched, and anything that changes is marked for review."
+                title="Re-read only the empty and flagged cells, giving each box slack within its text line so a page whose text shifted a few mm still reads correctly. Cells that extracted cleanly are not touched, and anything that changes is marked for review."
                 className="mt-1.5 ml-2 inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-[11px] font-medium border border-primary/40 text-primary hover:bg-primary/10 transition-colors"
               >
                 <Wand2 className="w-3 h-3" />
-                Try to fix {suspectCount === 1 ? 'it' : 'them'}
+                Try to fix {repairTargets.length} cell{repairTargets.length !== 1 ? 's' : ''}
               </button>
             )}
           </div>
