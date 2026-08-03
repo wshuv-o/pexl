@@ -50,6 +50,16 @@ describe('assessCell — which cells deserve a second look', () => {
     expect(assessCell(row({ field: 'statement_date' }), 'NONE')).toContain('bad_date');
   });
 
+  it('flags a value read from the wrong row', () => {
+    // The dangerous case: the page's text shifted, the box landed squarely on
+    // a neighbouring line, and the value it returned is a perfectly valid
+    // amount. Nothing else in the assessment would question it.
+    const issues = assessCell(row({ field: 'ending_balance', drifted: true }), '3905.11');
+    expect(issues).toContain('drifted');
+    // ...and it must not be mistaken for a formatting problem.
+    expect(issues).not.toContain('bad_amount');
+  });
+
   it('reports every applicable reason at once', () => {
     const issues = assessCell(
       row({ field: 'total_credits', clipped: true, ocrScore: 0.3, wasOcr: true }),

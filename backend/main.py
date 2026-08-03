@@ -37,6 +37,7 @@ from searchable_pdf import make_searchable_pdf
 from text_pipeline import build_structured_pages
 from ocr_lazy import get_ocr_engine
 import cell_quality
+import region_align
 
 app = FastAPI(title="PDF OCR API")
 
@@ -138,6 +139,10 @@ class HighlightItem(BaseModel):
 class ExtractRegionsRequest(BaseModel):
     session_id: str
     highlights: list[HighlightItem]
+    # Opt-in region repair. Off by default: the normal extraction path is
+    # unchanged, and the frontend only sets this when re-reading cells it has
+    # already flagged as suspect.
+    snap_to_line: bool = False
 
 
 class AutomapMatchRequest(BaseModel):
@@ -343,10 +348,22 @@ def _words_in_rect_text(cached_words, rect: fitz.Rect) -> str:
     return " ".join(out)
 
 
+def page_text_lines(page: fitz.Page, cached_words=None):
+    """Cluster a page's words into text lines. Callers cache this per page —
+    clustering once per page instead of once per region keeps the cost off the
+    extraction hot path."""
+    boxes = cell_quality.word_boxes_from_cache(cached_words)
+    if not boxes:
+        boxes = cell_quality.word_boxes_from_page(page)
+    return region_align.cluster_lines(boxes) if boxes else []
+
+
 def extract_region_detailed(
     page: fitz.Page,
     rect: fitz.Rect,
     cached_words=None,
+    snap_to_line: bool = False,
+    lines=None,
 ) -> dict:
     """Smart region extraction, plus per-cell quality diagnostics.
 
@@ -375,6 +392,24 @@ def extract_region_detailed(
     # supplementary OCR pass on a mixed page whose text we then discard must
     # not tag the value with that pass's scores.
     value_from_ocr = False
+
+    # Opt-in: give the region slack within its line's gutters before reading,
+    # so a page whose text drifted a few mm still lands inside the box. Walled
+    # off from the neighbouring lines, so it can never read the wrong row.
+    # Off by default — the original rect is used unless a caller asks for this.
+    align_info: dict = {}
+    original_box = (rect.x0, rect.y0, rect.x1, rect.y1)
+    if snap_to_line:
+        try:
+            if lines is None:
+                lines = page_text_lines(page, cached_words)
+            if lines:
+                new_box, align_info = region_align.align_rect_to_lines(original_box, lines)
+                if align_info.get("realigned"):
+                    rect = fitz.Rect(*new_box)
+        except Exception:
+            # Alignment is an enhancement; never let it break an extraction.
+            align_info = {}
 
     native_text = _strip_docusign(extract_native_text_in_rect(page, rect))
 
@@ -432,6 +467,25 @@ def extract_region_detailed(
         )
     except Exception:
         diagnostics = {}
+
+    # Geometric drift: did the region read a line it was not aimed at? This is
+    # the tell for the one failure nothing else catches — a box that landed
+    # squarely on the wrong row returns a perfectly valid-looking value and
+    # would otherwise never be questioned. Only computed when the caller has
+    # already paid for line clustering, so the plain path stays as fast as ever.
+    try:
+        if lines:
+            if region_align.is_drifted(original_box, lines):
+                diagnostics["drifted"] = True
+                d = region_align.rect_drift(original_box, lines)
+                if d is not None:
+                    diagnostics["drift_lines"] = round(d, 2)
+    except Exception:
+        pass
+
+    if align_info.get("realigned"):
+        diagnostics["realigned"] = True
+        diagnostics["align"] = align_info
 
     return {
         "text": text,
@@ -785,6 +839,7 @@ def extract_regions(req: ExtractRegionsRequest):
         return JSONResponse(status_code=404, content={"error": "Session expired. Re-upload the file."})
 
     results = []
+    line_cache: dict[int, list] = {}
 
     for hl in req.highlights:
         if hl.page < 1 or hl.page > pdf_doc.page_count:
@@ -815,7 +870,17 @@ def extract_regions(req: ExtractRegionsRequest):
             cp = sp[hl.page - 1]
             cached_words = getattr(cp, "words", None)
 
-        detail = extract_region_detailed(page, clip_rect, cached_words=cached_words)
+        # Cluster this page's text lines once and reuse across every highlight
+        # on it — clustering per region would be wasted work.
+        if hl.page not in line_cache:
+            line_cache[hl.page] = page_text_lines(page, cached_words)
+
+        detail = extract_region_detailed(
+            page, clip_rect,
+            cached_words=cached_words,
+            snap_to_line=req.snap_to_line,
+            lines=line_cache[hl.page],
+        )
         text, confidence, was_ocr = detail["text"], detail["confidence"], detail["was_ocr"]
         diagnostics = detail.get("diagnostics") or {}
 
@@ -850,6 +915,12 @@ def extract_regions(req: ExtractRegionsRequest):
         if diagnostics.get("clipped"):
             row["clipped"] = True
             row["clippedText"] = diagnostics.get("clipped_text")
+        if diagnostics.get("drifted"):
+            row["drifted"] = True
+            row["driftLines"] = diagnostics.get("drift_lines")
+        if diagnostics.get("realigned"):
+            row["realigned"] = True
+            row["alignInfo"] = diagnostics.get("align")
         results.append(row)
 
     return {"results": results}

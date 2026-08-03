@@ -856,6 +856,116 @@ export default function Index() {
     setExtracting(false);
   }, [sessions]);
 
+  /**
+   * Repair pass over flagged cells only.
+   *
+   * Re-reads just the regions the quality layer marked as suspect — empty,
+   * clipped, weak OCR, unparseable, or drifted onto the wrong row — with the
+   * backend's line-gutter alignment enabled. Cells that extracted cleanly are
+   * never touched, so this cannot disturb a value that was already right.
+   *
+   * Nothing is overwritten silently: any value the pass changes is marked
+   * `realigned` and keeps its previous value in `repairedFrom`, so the panel
+   * can show what moved and you can judge it.
+   */
+  const handleRepairFlagged = useCallback(async (
+    cells: { sessionId: string; page: number; field: string }[],
+  ) => {
+    if (!cells.length) return;
+
+    // Group the flagged cells by session, then by page.
+    const bySession = new Map<string, Map<number, Set<string>>>();
+    for (const c of cells) {
+      if (!bySession.has(c.sessionId)) bySession.set(c.sessionId, new Map());
+      const pages = bySession.get(c.sessionId)!;
+      if (!pages.has(c.page)) pages.set(c.page, new Set());
+      pages.get(c.page)!.add(c.field);
+    }
+
+    setExtracting(true);
+    let repaired = 0;
+    let attempted = 0;
+    let skippedNoFile = 0;
+
+    try {
+      for (const [sessionId, pages] of bySession) {
+        const sess = sessions.find(s => s.id === sessionId);
+        if (!sess) continue;
+        if (!sess.file) { skippedNoFile++; continue; }
+
+        let liveId = sessionId;
+
+        for (const [page, fields] of pages) {
+          const pageHls = (sess.highlights[page] ?? []).filter(h => fields.has(h.field));
+          if (!pageHls.length) continue;
+          attempted += pageHls.length;
+
+          const results = await extractRegions(liveId, pageHls, sess.file, {
+            strict: true,
+            snapToLine: true,
+            onSessionRenewed: (oldId, newId) => {
+              liveId = newId;
+              setSessions(prev => prev.map(s => s.id === oldId ? { ...s, id: newId } : s));
+            },
+          });
+
+          // Only accept a result that actually produced something different.
+          const changes = new Map<string, { value: string | null; from: string | null }>();
+          pageHls.forEach((h, i) => {
+            const r = results[i];
+            if (!r) return;
+            const before = h.extractedValue ?? null;
+            const after = r.value ?? null;
+            if (after && after !== before) {
+              changes.set(h.id, { value: after, from: before });
+            }
+          });
+          if (!changes.size) continue;
+          repaired += changes.size;
+
+          setSessions(prev => prev.map(s => {
+            if (s.id !== liveId) return s;
+            const newHls = { ...s.highlights };
+            newHls[page] = (s.highlights[page] ?? []).map(h => {
+              const ch = changes.get(h.id);
+              return ch ? { ...h, extractedValue: ch.value ?? undefined, confidence: 'high' as const } : h;
+            });
+            const changedFields = new Set(
+              (s.highlights[page] ?? []).filter(h => changes.has(h.id)).map(h => h.field),
+            );
+            const nextData = s.extractedData.map(r => {
+              if (r.page !== page || !changedFields.has(r.field)) return r;
+              const hl = (newHls[page] ?? []).find(h => h.field === r.field && changes.has(h.id));
+              if (!hl) return r;
+              const ch = changes.get(hl.id)!;
+              return {
+                ...r,
+                value: ch.value,
+                realigned: true,
+                repairedFrom: ch.from,
+                // The repair answers the flags that sent it here.
+                issues: undefined,
+              };
+            });
+            return { ...s, highlights: newHls, extractedData: nextData };
+          }));
+        }
+      }
+
+      if (skippedNoFile > 0 && repaired === 0) {
+        toast.error('Original file is no longer in this tab — re-upload to repair these cells');
+      } else if (repaired === 0) {
+        toast(`No change — the ${attempted} flagged cell${attempted !== 1 ? 's' : ''} could not be improved`, { icon: 'ℹ️' });
+      } else {
+        toast.success(`Repaired ${repaired} of ${attempted} flagged cell${attempted !== 1 ? 's' : ''} — review the highlighted changes`);
+      }
+    } catch (err: any) {
+      toast.error(`Repair failed: ${err?.message ?? err}`);
+    } finally {
+      setExtracting(false);
+    }
+  }, [sessions]);
+
   const handleReExtractHighlight = useCallback(async (highlightId: string) => {
     if (!activeSession?.file) return;
     // Read the highlight's bounds from the LATEST session state (not the stale
@@ -2149,6 +2259,7 @@ export default function Index() {
                       onClose={() => setShowExcel(false)}
                       onReExtract={handleExtract}
                       onReExtractPage={handleReExtractPage}
+                      onRepairFlagged={handleRepairFlagged}
                       onDataChange={(d: ExtractedRow[]) => {
                         setSessions(prev => prev.map(s => ({
                           ...s,

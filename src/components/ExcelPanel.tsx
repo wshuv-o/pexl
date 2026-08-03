@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
-import { X, Download, RefreshCw, Pencil, CheckCircle2, ArrowUpDown, ArrowUp, ArrowDown, Trash2, Check, Layers, ChevronDown, Plus, Loader2, Sparkles, AlertTriangle } from 'lucide-react';
+import { X, Download, RefreshCw, Pencil, CheckCircle2, ArrowUpDown, ArrowUp, ArrowDown, Trash2, Check, Layers, ChevronDown, Plus, Loader2, Sparkles, AlertTriangle, Wand2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
@@ -26,6 +26,8 @@ interface Props {
   onClose: () => void;
   onReExtract: () => void;
   onReExtractPage?: (sessionId: string, page: number) => void;
+  /** Re-read only the flagged cells with line-gutter alignment enabled. */
+  onRepairFlagged?: (cells: { sessionId: string; page: number; field: string }[]) => void | Promise<void>;
   onDataChange: (data: ExtractedRow[]) => void;
   multiFile?: boolean;
   onDownload?: () => void;
@@ -55,6 +57,7 @@ const ISSUE_LABELS: Record<CellIssue, string> = {
   low_ocr:    'Weak OCR confidence on this value',
   bad_amount: 'Does not parse as an amount',
   bad_date:   'Not a valid MM/DD/YYYY date',
+  drifted:    'This box read a line it was not aimed at — the page’s text may have shifted',
 };
 
 // Count fields per doc type using only fields that are exclusive to a
@@ -181,7 +184,7 @@ const parseDateValue = (val: string): number => {
 const isDateField = (field: string): boolean => /date$/i.test(field);
 
 export default function ExcelPanel({
-  data, filename, provider, onClose, onReExtract, onReExtractPage, onDataChange, multiFile, onDownload, onRowClick, onDeleteRow, externalBatchId, forceDocType,
+  data, filename, provider, onClose, onReExtract, onReExtractPage, onRepairFlagged, onDataChange, multiFile, onDownload, onRowClick, onDeleteRow, externalBatchId, forceDocType,
 }: Props) {
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const [mergeGroups, setMergeGroups] = useState<MergeGroup[] | null>(null);
@@ -978,6 +981,22 @@ export default function ExcelPanel({
                 {showOnlySuspect && <span className="opacity-70">· filtering</span>}
               </button>
             )}
+            {suspectCount > 0 && onRepairFlagged && (
+              <button
+                type="button"
+                onClick={() => {
+                  const cells = suspectRows
+                    .filter(r => r.sessionId)
+                    .map(r => ({ sessionId: r.sessionId!, page: r.page, field: r.field }));
+                  void onRepairFlagged(cells);
+                }}
+                title="Re-read only these cells, giving each box slack within its text line so a page whose text shifted a few mm still reads correctly. Cells that extracted cleanly are not touched, and anything that changes is marked for review."
+                className="mt-1.5 ml-2 inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-[11px] font-medium border border-primary/40 text-primary hover:bg-primary/10 transition-colors"
+              >
+                <Wand2 className="w-3 h-3" />
+                Try to fix {suspectCount === 1 ? 'it' : 'them'}
+              </button>
+            )}
           </div>
           <button
             className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-200"
@@ -1378,12 +1397,16 @@ export default function ExcelPanel({
                           // header, so we don't badge those too.
                           const cellIssues = (!isNull && cell.issues) ? cell.issues : [];
                           const hasIssues  = cellIssues.length > 0;
+                          // Changed by the repair pass — the value moved without
+                          // anyone typing it, so it must stay conspicuous until
+                          // a human has looked at it.
+                          const wasRepaired = !!cell.realigned;
 
                           return (
                             <td
                               key={f}
                               className={`px-3 py-2 cursor-text border-l border-border/40 min-w-[120px] select-text
-                                ${hasIssues ? 'bg-warning/10' : ''}`}
+                                ${wasRepaired ? 'bg-blue-500/15 shadow-[inset_2px_0_0_0_#3b82f6]' : hasIssues ? 'bg-warning/10' : ''}`}
                               onDoubleClick={() => setEditingKey(cellKey)}
                               onMouseDown={e => e.stopPropagation()}
                               title={isNull ? 'Double-click to edit' : String(cell.value)}
@@ -1424,7 +1447,24 @@ export default function ExcelPanel({
                                       </TooltipContent>
                                     </Tooltip>
                                   )}
-                                  {hasIssues && (
+                                  {wasRepaired && (
+                                    <Tooltip>
+                                      <TooltipTrigger asChild>
+                                        <Wand2 className="w-3 h-3 text-blue-500 shrink-0" />
+                                      </TooltipTrigger>
+                                      <TooltipContent side="left" className="text-xs max-w-[280px]">
+                                        <div className="space-y-1">
+                                          <div className="font-semibold">Repaired — please confirm</div>
+                                          <div>The box was realigned to its text line and re-read.</div>
+                                          <div className="opacity-80">
+                                            was: {cell.repairedFrom ? `"${cell.repairedFrom}"` : '(empty)'}
+                                          </div>
+                                          <div className="opacity-80">now: "{cell.value}"</div>
+                                        </div>
+                                      </TooltipContent>
+                                    </Tooltip>
+                                  )}
+                                  {hasIssues && !wasRepaired && (
                                     <Tooltip>
                                       <TooltipTrigger asChild>
                                         <AlertTriangle className="w-3 h-3 text-warning shrink-0" />

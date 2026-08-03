@@ -348,6 +348,9 @@ export function assessCell(r: ExtractedRow, normalized: string | null): CellIssu
 
   const issues: CellIssue[] = [];
   if (r.clipped) issues.push('clipped');
+  // The value may parse perfectly and still be from the wrong row — this is
+  // the only signal that catches it.
+  if (r.drifted) issues.push('drifted');
   if (typeof r.ocrScore === 'number' && r.ocrScore < LOW_OCR_SCORE) issues.push('low_ocr');
   if (AMOUNT_FIELDS.has(r.field) && !AMOUNT_OK.test(normalized)) issues.push('bad_amount');
   if (DATE_FIELDS.has(r.field) && !DATE_OK.test(normalized)) issues.push('bad_date');
@@ -963,7 +966,18 @@ export async function extractRegions(
   sessionId: string,
   highlights: Highlight[],
   file?: File,
-  opts: { strict?: boolean; onSessionRenewed?: (oldId: string, newId: string) => void } = {},
+  opts: {
+    strict?: boolean;
+    onSessionRenewed?: (oldId: string, newId: string) => void;
+    /**
+     * Repair mode. Lets the backend give each region slack within its text
+     * line's gutters before reading, recovering values on pages whose text
+     * drifted a few mm. Only ever set when re-reading cells already flagged as
+     * suspect — the normal extraction path never uses it, and this also forces
+     * the backend round-trip because the client-side pdfjs path cannot do it.
+     */
+    snapToLine?: boolean;
+  } = {},
 ): Promise<ExtractedRow[]> {
 
   // Must have at least one highlight
@@ -991,6 +1005,7 @@ export async function extractRegions(
         body: JSON.stringify({
           session_id: id,
           strict,
+          snap_to_line: opts.snapToLine === true,
           highlights: hls.map(h => ({
             page: h.page, field: h.field,
             x: h.x, y: h.y, width: h.width, height: h.height,
@@ -1032,7 +1047,8 @@ export async function extractRegions(
   // null` (either an OCR page or a native page where no text sat inside
   // the rectangle) is still sent to the backend — so backend accuracy is
   // fully preserved for anything the client couldn't answer.
-  if (strict && file && backendOnline && !sessionId.startsWith('local-')) {
+  // Repair mode must go to the backend — line-gutter alignment lives there.
+  if (strict && file && backendOnline && !sessionId.startsWith('local-') && !opts.snapToLine) {
     try {
       const clientResults = await extractFromRegions(
         file,

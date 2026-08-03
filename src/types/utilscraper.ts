@@ -236,7 +236,9 @@ export function getFieldConfig(field: string): FieldLabelOption {
 //   low_ocr     the OCR engine's own weakest word score for this cell was low
 //   bad_amount  an amount field whose value will not parse as a number
 //   bad_date    a date field that did not normalise to MM/DD/YYYY
-export type CellIssue = 'empty' | 'clipped' | 'low_ocr' | 'bad_amount' | 'bad_date';
+//   drifted     the box read a line it wasn't aimed at — the page's text moved,
+//               so the value can be perfectly valid yet come from the wrong row
+export type CellIssue = 'empty' | 'clipped' | 'low_ocr' | 'bad_amount' | 'bad_date' | 'drifted';
 
 export interface ExtractedRow {
   page: number;
@@ -253,6 +255,10 @@ export interface ExtractedRow {
   ocrScoreAvg?: number;  // mean per-word OCR confidence, 0–1
   clipped?: boolean;     // rectangle truncated a word
   clippedText?: string[];// which words were cut, for the review UI
+  drifted?: boolean;     // box centre sits away from the line it actually read
+  driftLines?: number;   // signed drift, in line-heights
+  realigned?: boolean;   // a repair pass snapped this region to its text line
+  repairedFrom?: string | null;  // the value before repair, for the review UI
   issues?: CellIssue[];  // computed verdict; empty/absent = nothing suspicious
 }
 
