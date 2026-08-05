@@ -2,6 +2,7 @@
 import { useCallback, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { Upload, Plus, Trash2, ScanLine, Download, Loader2, ChevronLeft, ChevronRight, Info } from 'lucide-react';
+import { useAuth } from '@/contexts/AuthContext';
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000';
 
@@ -25,6 +26,9 @@ export default function TableScrape() {
   const [firstRowHeader, setFirstRowHeader] = useState(true);
   const [drag, setDrag] = useState<DragState>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
+  // Uploaded-at stamp so the usage record can measure how long the job took.
+  const startedAtRef = useRef<number>(Date.now());
+  const { trackDownload, trackTableExtract } = useAuth();
 
   const scale = useMemo(() => (natural.w ? Math.min(DISPLAY_MAX_W, natural.w) / natural.w : 1), [natural.w]);
   const dispW = natural.w * scale;
@@ -52,6 +56,7 @@ export default function TableScrape() {
 
   const onFile = useCallback(async (file: File) => {
     setUploading(true);
+    startedAtRef.current = Date.now();   // job clock starts at upload
     setTable(null); setColumns([]); setRows([]); setSessionId(null);
     setSrcName((file.name || 'table').replace(/\.[^.]+$/, '') || 'table');
     try {
@@ -144,11 +149,16 @@ export default function TableScrape() {
       const a = document.createElement('a');
       a.href = url; a.download = `${srcName}.xlsx`; a.click();   // same name as the uploaded PDF
       URL.revokeObjectURL(url);
+      // Usage: this is both a table extraction and a spreadsheet download, and
+      // it counted as neither before. Failures here must never surface to the
+      // user — the export already succeeded.
+      trackTableExtract(startedAtRef.current, Date.now()).catch(() => {});
+      trackDownload(startedAtRef.current, Date.now()).catch(() => {});
       toast.success(`Excel downloaded — ${nRows} rows from ${nPages} page${nPages !== '1' ? 's' : ''}`);
     } catch (e: any) {
       toast.error('Excel error: ' + String(e).slice(0, 120));
     }
-  }, [sessionId, columns, rows, natural.w, natural.h, firstRowHeader, srcName]);
+  }, [sessionId, columns, rows, natural.w, natural.h, firstRowHeader, srcName, trackDownload, trackTableExtract]);
 
   return (
     <div className="min-h-screen bg-background text-foreground p-5">

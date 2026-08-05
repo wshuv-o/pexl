@@ -2,6 +2,7 @@
 import { useCallback, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { Images, Loader2, FileDown, X, ArrowUp, ArrowDown, FolderOpen } from 'lucide-react';
+import { useAuth } from '@/contexts/AuthContext';
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000';
 const IMAGE_RE = /\.(png|jpe?g|tif|tiff|bmp|webp|gif)$/i;
@@ -15,6 +16,7 @@ export default function ImagesToPdf() {
   const [result, setResult] = useState<Result | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const folderRef = useRef<HTMLInputElement>(null);
+  const { trackUsage, trackDownload } = useAuth();
 
   const attachDir = useCallback((el: HTMLInputElement | null) => {
     folderRef.current = el;
@@ -44,6 +46,7 @@ export default function ImagesToPdf() {
 
   const convert = useCallback(async () => {
     if (!files.length) return;
+    const startedAt = Date.now();
     setBusy(true); setResult(null);
     try {
       const fd = new FormData();
@@ -67,13 +70,17 @@ export default function ImagesToPdf() {
       a.href = url; a.download = 'images.pdf'; a.click();
       URL.revokeObjectURL(url);
       setResult(r);
+      // Usage: images consumed + one produced file. Never surfaced on failure —
+      // the conversion already succeeded.
+      trackUsage(files.length, 0, ['images_to_pdf'], startedAt, Date.now()).catch(() => {});
+      trackDownload(startedAt, Date.now()).catch(() => {});
       toast.success(`PDF created — ${r.pages} page${r.pages !== 1 ? 's' : ''} at full resolution`);
     } catch (e: any) {
       toast.error('Convert error: ' + String(e).slice(0, 140));
     } finally {
       setBusy(false);
     }
-  }, [files, dpi]);
+  }, [files, dpi, trackUsage, trackDownload]);
 
   return (
     <div className="min-h-screen bg-background text-foreground p-6">

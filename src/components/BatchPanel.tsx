@@ -5,6 +5,7 @@ import { DOCUMENT_TYPES, type DocumentType, type ExtractedRow } from '@/types/ut
 import { exportToExcel } from '@/lib/excel-export';
 import BatchPreview from '@/components/BatchPreview';
 import BatchHistory from '@/components/batch/BatchHistory';
+import { useAuth } from '@/contexts/AuthContext';
 import { toast } from 'sonner';
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000';
@@ -38,6 +39,7 @@ interface Props {
 }
 
 export default function BatchPanel({ username, activeBatchId, onClose, onSelect }: Props) {
+  const { trackDownload } = useAuth();
   const [batches, setBatches]         = useState<Batch[]>([]);
   const [loading, setLoading]         = useState(true);
 
@@ -66,6 +68,7 @@ export default function BatchPanel({ username, activeBatchId, onClose, onSelect 
   // safer than defaulting to utility_bill, which would mislabel an old
   // Bank Statement / Appraisal batch.
   const handleDownload = async (batch: Batch) => {
+    const startedAt = Date.now();
     setDownloadingId(batch.id);
     try {
       const res = await fetch(`${BACKEND_URL}/api/batches/${batch.id}/records`);
@@ -92,6 +95,9 @@ export default function BatchPanel({ username, activeBatchId, onClose, onSelect 
       // let the exporter's field-count heuristic pick the template.
       const opts = batch.doc_type ? { forceDocType: batch.doc_type } : {};
       await exportToExcel(rows, safeStem, safeStem, opts);
+      // Usage: batch exports were invisible before — this is the main way a
+      // finished batch leaves the app. Never surfaced on failure.
+      trackDownload(startedAt, Date.now()).catch(() => {});
       const label = batch.doc_type
         ? (DOCUMENT_TYPES.find(t => t.value === batch.doc_type)?.label ?? batch.doc_type)
         : 'auto-detected template';
