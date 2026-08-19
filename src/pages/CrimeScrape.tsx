@@ -2,6 +2,7 @@
 import { useCallback, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { FolderOpen, Loader2, ScanLine, Download, FileSpreadsheet } from 'lucide-react';
+import { useAuth } from '@/contexts/AuthContext';
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000';
 const IMAGE_RE = /\.(png|jpe?g|tif|tiff|bmp|webp|gif)$/i;
@@ -9,10 +10,14 @@ const IMAGE_RE = /\.(png|jpe?g|tif|tiff|bmp|webp|gif)$/i;
 type Summary = { rows: number; images: number; communities: number; errors: number };
 
 export default function CrimeScrape() {
+  const { trackPagesExtracted } = useAuth();
   const [picked, setPicked] = useState<{ files: File[]; folder: string } | null>(null);
   const [scraping, setScraping] = useState(false);
   const [summary, setSummary] = useState<Summary | null>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
+  // Folder-pick time stands in for "uploaded_at" here — there's no upload
+  // step, the files go up with the scrape request itself.
+  const pickedAtRef = useRef<number | undefined>(undefined);
 
   // webkitdirectory must be set via DOM (not in React's typings).
   const attachDir = useCallback((el: HTMLInputElement | null) => {
@@ -27,6 +32,7 @@ export default function CrimeScrape() {
     const first = (imgs[0] as any).webkitRelativePath || imgs[0].name;
     const folder = first.split('/')[0] || 'folder';
     setPicked({ files: imgs, folder });
+    pickedAtRef.current = Date.now();
     setSummary(null);
     toast.success(`${imgs.length} image${imgs.length !== 1 ? 's' : ''} ready from "${folder}"`);
     e.target.value = '';
@@ -65,12 +71,17 @@ export default function CrimeScrape() {
       URL.revokeObjectURL(url);
       setSummary(s);
       toast.success(`Scraped ${s.rows} rows from ${s.communities} communities — Excel downloaded`);
+      // One screenshot = one page of extracted content here (these are image
+      // folders, not PDFs). X-Crime-Images is the count the backend actually
+      // read, so failed images aren't billed as pages.
+      trackPagesExtracted(s.images - s.errors, pickedAtRef.current, Date.now())
+        .catch(() => {});
     } catch (e: any) {
       toast.error('Scrape error: ' + String(e).slice(0, 140));
     } finally {
       setScraping(false);
     }
-  }, [picked]);
+  }, [picked, trackPagesExtracted]);
 
   return (
     <div className="min-h-screen bg-background text-foreground p-6">

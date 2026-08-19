@@ -614,6 +614,10 @@ export default function PDFViewer({
     // this the user just sees a spinner and assumes it's stuck.
     const toastId = toast.loading('Preparing OCR PDF…', { duration: Infinity });
     let pollStopped = false;
+    // Pages the backend actually OCR'd, learned from the progress poll —
+    // more truthful than the viewer's page count for a lazy/partial OCR.
+    // Falls back to the document's page count if the poll never landed.
+    let ocrPagesSeen = 0;
     const pollProgress = async () => {
       const started = Date.now();
       while (!pollStopped) {
@@ -622,6 +626,7 @@ export default function PDFViewer({
         if (prog && prog.total_pages > 0) {
           const cur = prog.current_page ?? 0;
           const tot = prog.total_pages;
+          ocrPagesSeen = tot;
           const secs = Math.max(prog.elapsed_sec ?? 0, Math.floor((Date.now() - started) / 1000));
           if (prog.done || cur >= tot) {
             toast.loading(`Finalising OCR PDF… (${tot}/${tot} pages · ${secs}s)`, { id: toastId });
@@ -652,10 +657,12 @@ export default function PDFViewer({
       void blob; void filename;
       toast.dismiss(toastId);
       toast.success('OCR\'d PDF downloaded');
-      // Bump the per-user OCR-download counter (Odin /pexl/usage).
+      // Bump the per-user OCR-download counter (Odin /pexl/usage), along
+      // with the pages OCR'd for odin-ems' per-page reporting.
       // Pass session.uploadedAt + now so the backend records the time
       // span; Errors are swallowed so telemetry never blocks the UX.
-      trackOcrDownload(session.uploadedAt, Date.now()).catch(() => {});
+      const ocrPages = ocrPagesSeen || numPages || session.total_pages || 0;
+      trackOcrDownload(session.uploadedAt, Date.now(), ocrPages).catch(() => {});
     } catch (err: unknown) {
       pollStopped = true;
       toast.dismiss(toastId);
@@ -663,7 +670,8 @@ export default function PDFViewer({
       toast.error(msg);
     }
     setDownloadingOcr(false);
-  }, [session.id, session.filename, session.file, session.uploadedAt, onSessionRenewed, trackOcrDownload]);
+  }, [session.id, session.filename, session.file, session.uploadedAt, session.total_pages,
+      numPages, onSessionRenewed, trackOcrDownload]);
 
   const pageRefs  = useRef<Record<number, HTMLDivElement | null>>({});
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -2006,7 +2014,9 @@ export default function PDFViewer({
                         },
                       );
                       // Region Excel export counts as a table extract too.
-                      trackTableExtract(session.uploadedAt, Date.now()).catch(() => {});
+                      // A region lives on exactly one page, so that's 1 page
+                      // extracted regardless of how many rows came out.
+                      trackTableExtract(session.uploadedAt, Date.now(), 1).catch(() => {});
                     } catch (err: unknown) {
                       toast.error(err instanceof Error ? err.message : 'Export failed');
                     }

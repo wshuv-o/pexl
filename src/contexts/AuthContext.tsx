@@ -27,6 +27,17 @@ export interface UsageStats {
   /** Number of table extracts performed
    *  (table-region Excel export + full-document "Convert to Table" Excel). */
   table_extracts: number;
+  /**
+   * Number of PDF pages actually extracted from — i.e. pages that carried
+   * highlights and were run through extraction, NOT the page count of the
+   * uploaded documents. A 40-page appraisal with boxes on 3 pages counts 3.
+   *
+   * Consumed by odin-ems for per-page usage reporting, so the definition
+   * must stay "pages we did work on". Every tracker below reports it for
+   * its own flow (batch extract, OCR download, table extract, folder /
+   * calibrated-grid scrapes).
+   */
+  pages_extracted: number;
   last_used: string | null;
 }
 
@@ -59,12 +70,19 @@ interface AuthContextType {
     docTypes?: string[],
     uploadedAt?: UsageTime,
     finishedAt?: UsageTime,
+    pagesExtracted?: number,
   ) => Promise<void>;
   trackDownload:     (uploadedAt?: UsageTime, finishedAt?: UsageTime) => Promise<void>;
-  /** Bumps the ocr_downloads counter by 1. */
-  trackOcrDownload:  (uploadedAt?: UsageTime, finishedAt?: UsageTime) => Promise<void>;
-  /** Bumps the table_extracts counter by 1. */
-  trackTableExtract: (uploadedAt?: UsageTime, finishedAt?: UsageTime) => Promise<void>;
+  /** Bumps the ocr_downloads counter by 1, plus the pages OCR'd. */
+  trackOcrDownload:  (uploadedAt?: UsageTime, finishedAt?: UsageTime, pagesExtracted?: number) => Promise<void>;
+  /** Bumps the table_extracts counter by 1, plus the pages scraped. */
+  trackTableExtract: (uploadedAt?: UsageTime, finishedAt?: UsageTime, pagesExtracted?: number) => Promise<void>;
+  /**
+   * Pages-only usage record, for flows that have no file/statement counter of
+   * their own (Table Scrape's calibrated-grid runs, Crime folder scrapes).
+   * Posts nothing when ``pagesExtracted`` is 0 — an empty scrape isn't usage.
+   */
+  trackPagesExtracted: (pagesExtracted: number, uploadedAt?: UsageTime, finishedAt?: UsageTime) => Promise<void>;
 }
 
 const EMPTY_USAGE: UsageStats = {
@@ -73,6 +91,7 @@ const EMPTY_USAGE: UsageStats = {
   downloads: 0,
   ocr_downloads: 0,
   table_extracts: 0,
+  pages_extracted: 0,
   last_used: null,
 };
 const AuthContext = createContext<AuthContextType | null>(null);
@@ -195,6 +214,15 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     return t;  // already a string — assume ISO
   };
 
+  // ── pages_extracted normalisation ────────────────────────────────
+  // Omitted from the body unless it's a positive integer, so older Odin
+  // builds that don't know the column yet keep working, and a flow that
+  // genuinely touched no pages doesn't write a 0-page row.
+  const pagesPayload = (pagesExtracted?: number) => {
+    const n = Math.trunc(pagesExtracted ?? 0);
+    return Number.isFinite(n) && n > 0 ? { pages_extracted: n } : {};
+  };
+
   const timingPayload = (uploadedAt?: UsageTime, finishedAt?: UsageTime) => {
     const out: { uploaded_at?: string; finished_at?: string } = {};
     const u = toIso(uploadedAt);
@@ -210,6 +238,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     docTypes?: string[],
     uploadedAt?: UsageTime,
     finishedAt?: UsageTime,
+    pagesExtracted?: number,
   ): Promise<void> => {
     // doc_types is an array, one entry per session processed (e.g.
     // ['appraisal', 'utility_bill', 'appraisal']) so the backend can
@@ -219,6 +248,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
       statements_extracted: statementsCount,
       downloads: 0,
       ...(docTypes && docTypes.length > 0 ? { doc_types: docTypes } : {}),
+      ...pagesPayload(pagesExtracted),
       ...timingPayload(uploadedAt, finishedAt),
     });
     setUsage(await apiFetchUsage());
@@ -240,12 +270,14 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const trackOcrDownload = async (
     uploadedAt?: UsageTime,
     finishedAt?: UsageTime,
+    pagesExtracted?: number,
   ): Promise<void> => {
     await apiPostUsage({
       files_processed: 0,
       statements_extracted: 0,
       downloads: 0,
       ocr_downloads: 1,
+      ...pagesPayload(pagesExtracted),
       ...timingPayload(uploadedAt, finishedAt),
     });
     setUsage(await apiFetchUsage());
@@ -254,12 +286,31 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const trackTableExtract = async (
     uploadedAt?: UsageTime,
     finishedAt?: UsageTime,
+    pagesExtracted?: number,
   ): Promise<void> => {
     await apiPostUsage({
       files_processed: 0,
       statements_extracted: 0,
       downloads: 0,
       table_extracts: 1,
+      ...pagesPayload(pagesExtracted),
+      ...timingPayload(uploadedAt, finishedAt),
+    });
+    setUsage(await apiFetchUsage());
+  };
+
+  const trackPagesExtracted = async (
+    pagesExtracted: number,
+    uploadedAt?: UsageTime,
+    finishedAt?: UsageTime,
+  ): Promise<void> => {
+    const pages = pagesPayload(pagesExtracted);
+    if (!('pages_extracted' in pages)) return;   // nothing scraped — no row
+    await apiPostUsage({
+      files_processed: 0,
+      statements_extracted: 0,
+      downloads: 0,
+      ...pages,
       ...timingPayload(uploadedAt, finishedAt),
     });
     setUsage(await apiFetchUsage());
@@ -270,6 +321,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
       user, usage, authLoading,
       login, logout,
       trackUsage, trackDownload, trackOcrDownload, trackTableExtract,
+      trackPagesExtracted,
     }}>
       {children}
     </AuthContext.Provider>

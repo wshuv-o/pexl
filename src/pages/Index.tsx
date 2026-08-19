@@ -649,6 +649,11 @@ export default function Index() {
     setBatchProgress({ done: 0, total: targets.length });
     let totalExtracted = 0;
     let totalNull = 0;
+    // Pages we actually extracted from, summed over the run — the unit
+    // odin-ems reports on. Counted per file as "distinct pages carrying at
+    // least one highlight", not the PDF's page count, so a 40-page appraisal
+    // with boxes on 3 pages contributes 3.
+    let totalPagesExtracted = 0;
 
     // Bounded worker pool. The old `Promise.allSettled(targets.map(...))`
     // fired all N requests simultaneously, which just stacked up in the
@@ -712,6 +717,10 @@ export default function Index() {
       const { sess, newHighlights, sessResults, liveId } = value;
       totalExtracted += sessResults.length;
       totalNull      += sessResults.filter(r => !r.value).length;
+      // Tally here rather than at the end: a stopped run then reports only
+      // the pages of the files it actually got through, matching how
+      // `processed` below is capped at `done`.
+      totalPagesExtracted += Object.values(newHighlights).filter(hls => hls.length > 0).length;
       setSessions(prev => prev.map(s =>
         s.id === sess.id
           ? { ...s, id: liveId, highlights: newHighlights, extractedData: sessResults, status: 'extracted' as const }
@@ -794,7 +803,7 @@ export default function Index() {
       .map(t => t.uploadedAt)
       .filter((n): n is number => typeof n === 'number');
     const batchUploadedAt = uploadStarts.length > 0 ? Math.min(...uploadStarts) : undefined;
-    trackUsage(processed.length, totalExtracted, docTypes, batchUploadedAt, Date.now())
+    trackUsage(processed.length, totalExtracted, docTypes, batchUploadedAt, Date.now(), totalPagesExtracted)
       .catch(() => {});
   }, [sessions, openTabs, trackUsage]);
 

@@ -2,6 +2,7 @@
 import { useCallback, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { Upload, Plus, Trash2, ScanLine, Download, Loader2, ChevronLeft, ChevronRight, Info } from 'lucide-react';
+import { useAuth } from '@/contexts/AuthContext';
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000';
 
@@ -11,6 +12,7 @@ type DragState = { axis: 'col' | 'row'; index: number } | null;
 const DISPLAY_MAX_W = 1100; // px the page image is scaled to on screen
 
 export default function TableScrape() {
+  const { trackPagesExtracted } = useAuth();
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
@@ -25,6 +27,9 @@ export default function TableScrape() {
   const [firstRowHeader, setFirstRowHeader] = useState(true);
   const [drag, setDrag] = useState<DragState>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
+  // When the current file was uploaded — the "uploaded_at" anchor for usage
+  // rows, so odin-ems can compute time-saved the same way the main app does.
+  const uploadedAtRef = useRef<number | undefined>(undefined);
 
   const scale = useMemo(() => (natural.w ? Math.min(DISPLAY_MAX_W, natural.w) / natural.w : 1), [natural.w]);
   const dispW = natural.w * scale;
@@ -52,6 +57,7 @@ export default function TableScrape() {
 
   const onFile = useCallback(async (file: File) => {
     setUploading(true);
+    uploadedAtRef.current = Date.now();
     setTable(null); setColumns([]); setRows([]); setSessionId(null);
     setSrcName((file.name || 'table').replace(/\.[^.]+$/, '') || 'table');
     try {
@@ -118,12 +124,16 @@ export default function TableScrape() {
       const j = await res.json();
       setTable(j.rows);
       toast.success(`Scraped ${j.rows.length} rows across ${j.page_count} page${j.page_count !== 1 ? 's' : ''}`);
+      // Calibrated lines are applied to every page, so the whole document is
+      // extracted on each run — report the pages the backend actually walked.
+      trackPagesExtracted(Number(j.page_count) || 0, uploadedAtRef.current, Date.now())
+        .catch(() => {});
     } catch (e: any) {
       toast.error('Scrape error: ' + String(e).slice(0, 120));
     } finally {
       setScraping(false);
     }
-  }, [sessionId, columns, rows, natural.w, natural.h]);
+  }, [sessionId, columns, rows, natural.w, natural.h, trackPagesExtracted]);
 
   // Download the whole PDF (all pages) as one Excel with the same lines.
   const downloadExcel = useCallback(async () => {
@@ -145,6 +155,9 @@ export default function TableScrape() {
       a.href = url; a.download = `${srcName}.xlsx`; a.click();   // same name as the uploaded PDF
       URL.revokeObjectURL(url);
       toast.success(`Excel downloaded — ${nRows} rows from ${nPages} page${nPages !== '1' ? 's' : ''}`);
+      // Deliberately NOT tracked: excel-all re-walks every page server-side,
+      // but pages are counted once at the scrape (doScrape). Recording the
+      // export too would bill the same pages twice for one piece of work.
     } catch (e: any) {
       toast.error('Excel error: ' + String(e).slice(0, 120));
     }
