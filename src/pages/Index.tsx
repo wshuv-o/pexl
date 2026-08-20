@@ -17,6 +17,7 @@ import ThemeToggle from '@/components/ThemeToggle';
 import type { PDFSession, Highlight, ExtractedRow, DocumentType } from '@/types/utilscraper';
 import { DOCUMENT_TYPES } from '@/types/utilscraper';
 import { processFile, extractRegions, downloadAllOcrPdfsAsZip, getOcrProgress, triggerForceOcr, rotateSessionPdf, fetchConvertedPdf, extractTableRegion } from '@/lib/api';
+import { highlightSlots, applyRegionUpdates } from '@/lib/extract-merge';
 import { rasterizeIfVectorOnly } from '@/lib/vector-pdf-rasterizer';
 import { sessionsCache } from '@/lib/sessions-cache';
 import { useAuth } from '@/contexts/AuthContext';
@@ -674,6 +675,23 @@ export default function Index() {
       liveId: string;
     };
 
+    // Rows for the results panel, built from whatever values have landed so
+    // far. Highlights still waiting on a page carry `extractedValue ===
+    // undefined` and are simply absent, so the same builder serves both the
+    // page-by-page partials and the final apply.
+    const rowsOf = (
+      hls: Record<number, Highlight[]>,
+      sess: PDFSession,
+      sessionId: string,
+    ): ExtractedRow[] =>
+      Object.values(hls).flat()
+        .filter(h => h.extractedValue !== undefined)
+        .map(h => ({
+          page: h.page, field: h.field, value: h.extractedValue ?? null,
+          confidence: h.confidence ?? 'low', wasOcr: h.wasOcr ?? false,
+          filename: sess.filename, folderName: sess.folderName, sessionId,
+        }));
+
     const runOne = async (sess: PDFSession): Promise<WorkerResult> => {
       const clearedHighlights: Record<number, Highlight[]> = {};
       for (const [pageNum, pageHls] of Object.entries(sess.highlights)) {
@@ -682,13 +700,46 @@ export default function Index() {
         }));
       }
       const allHl = Object.values(clearedHighlights).flat();
+
+      // Reverse route from a flat result index back to its page slot —
+      // partial results name their slot because pages finish out of order.
+      const slots = highlightSlots(clearedHighlights);
+
+      // Working copy the partials fold into, held outside React state so a
+      // burst of pages coalesces into one render.
+      let live: Record<number, Highlight[]> = clearedHighlights;
+      let flushTimer: ReturnType<typeof setTimeout> | null = null;
+      const flush = () => {
+        flushTimer = null;
+        const snapshot = live;
+        setSessions(prev => prev.map(s =>
+          s.id === sess.id
+            ? { ...s, highlights: snapshot, extractedData: rowsOf(snapshot, sess, s.id) }
+            : s,
+        ));
+      };
+
       let liveId = sess.id;
       const results = await extractRegions(liveId, allHl, sess.file!, {
         strict: true,
         onSessionRenewed: (_oldId, newId) => {
           liveId = newId;
         },
+        // Values for one page of this PDF, the moment that page resolves.
+        // This is what makes a single multi-page document fill in as it goes
+        // instead of sitting empty until its last page returns.
+        onPartial: updates => {
+          const next = applyRegionUpdates(live, slots, updates);
+          if (next === live) return;          // nothing matched — no repaint
+          live = next;
+          // Coalesce: a 300-page document would otherwise fire 300
+          // setSessions calls, each one mapping the whole session list.
+          if (flushTimer === null) flushTimer = setTimeout(flush, 120);
+        },
       });
+      // Drop any pending flush — applyOne runs next with the authoritative
+      // state, and a late timer would repaint a stale snapshot over it.
+      if (flushTimer !== null) { clearTimeout(flushTimer); flushTimer = null; }
 
       const newHighlights = { ...clearedHighlights };
       let idx = 0;
@@ -698,13 +749,7 @@ export default function Index() {
           return r ? { ...h, extractedValue: r.value, confidence: r.confidence, wasOcr: r.wasOcr } : h;
         });
       }
-      const sessResults: ExtractedRow[] = Object.values(newHighlights).flat()
-        .filter(h => h.extractedValue !== undefined)
-        .map(h => ({
-          page: h.page, field: h.field, value: h.extractedValue ?? null,
-          confidence: h.confidence ?? 'low', wasOcr: h.wasOcr ?? false,
-          filename: sess.filename, folderName: sess.folderName, sessionId: liveId,
-        }));
+      const sessResults = rowsOf(newHighlights, sess, liveId);
       return { sess, newHighlights, sessResults, liveId };
     };
 

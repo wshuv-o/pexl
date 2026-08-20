@@ -240,4 +240,20 @@ export interface ExtractedRow {
   sessionId?: string;    // which session this row belongs to
 }
 
+/**
+ * One extracted row plus the slot it belongs to in the caller's original
+ * `highlights` array.
+ *
+ * Extraction reports these page by page as each page resolves, so a caller
+ * holding an ordered list of highlights can merge results in as they land
+ * instead of waiting for the whole document. The index is what keeps a
+ * partial update unambiguous — pages finish out of order, so position in
+ * the callback payload means nothing on its own.
+ */
+export interface RegionUpdate {
+  /** Index into the `highlights` array that was passed to the extractor. */
+  index: number;
+  row: ExtractedRow;
+}
+
 export type ViewerTool = 'cursor' | 'highlight' | 'eraser' | 'text-select' | 'select' | 'table-select';

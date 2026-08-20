@@ -1,7 +1,7 @@
 /* eslint-disable no-useless-escape */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { pdfjs } from 'react-pdf';
-import type { ExtractedRow, FieldLabel, Highlight } from '@/types/utilscraper';
+import type { ExtractedRow, FieldLabel, Highlight, RegionUpdate } from '@/types/utilscraper';
 
 // Set worker once at module load — covers calls from Index.tsx dynamic imports
 // that happen before (or without) PDFViewer mounting.
@@ -581,29 +581,41 @@ function findTextPosition(
 export async function extractFromRegions(
   file: File,
   highlights: { page: number; field: string; x: number; y: number; width: number; height: number }[],
+  opts: {
+    /**
+     * Called with one page's rows the moment that page finishes, before the
+     * returned promise settles. Lets a caller paint results page by page
+     * instead of staring at an empty panel until the last page lands — which
+     * is the whole difference on a 40-page document.
+     */
+    onPageChunk?: (updates: RegionUpdate[]) => void;
+  } = {},
 ): Promise<ExtractedRow[]> {
   const pdf = await getDocumentCached(file);
 
-  // Group highlights by page so we open each page only once.
-  const byPage = new Map<number, typeof highlights>();
-  for (const h of highlights) {
+  // Group highlights by page so we open each page only once. The highlight's
+  // original array index rides along: pages resolve out of order, so a
+  // partial update has to name the slot it fills rather than relying on
+  // position in the callback payload.
+  const byPage = new Map<number, { hl: (typeof highlights)[number]; index: number }[]>();
+  highlights.forEach((h, index) => {
     if (!byPage.has(h.page)) byPage.set(h.page, []);
-    byPage.get(h.page)!.push(h);
-  }
+    byPage.get(h.page)!.push({ hl: h, index });
+  });
 
   // Process all pages concurrently — each page is an independent pdfjs worker call.
   const pageChunks = await Promise.all(
-    Array.from(byPage.entries()).map(async ([, pageHighlights]) => {
-      const pg = pageHighlights[0].page;
+    Array.from(byPage.values()).map(async pageEntries => {
+      const pg = pageEntries[0].hl.page;
       const { items, vp: viewport } = await getPageContentCached(file, pdf, pg);
       const pageWidth  = viewport.width;
       const pageHeight = viewport.height;
       const scanned    = isScannedPage(items);
-      const chunk: ExtractedRow[] = [];
+      const chunk: RegionUpdate[] = [];
 
-      for (const hl of pageHighlights) {
+      for (const { hl, index } of pageEntries) {
         if (scanned) {
-          chunk.push({ page: hl.page, field: hl.field, value: null, confidence: 'low', wasOcr: true });
+          chunk.push({ index, row: { page: hl.page, field: hl.field, value: null, confidence: 'low', wasOcr: true } });
           continue;
         }
 
@@ -659,18 +671,35 @@ export async function extractFromRegions(
           .trim() || null;
 
         chunk.push({
-          page:       hl.page,
-          field:      hl.field,
-          value,
-          confidence: value && value.length > 2 ? 'high' : value ? 'medium' : 'low',
-          wasOcr:     false,
+          index,
+          row: {
+            page:       hl.page,
+            field:      hl.field,
+            value,
+            confidence: value && value.length > 2 ? 'high' : value ? 'medium' : 'low',
+            wasOcr:     false,
+          },
         });
       }
+      // Hand this page's rows over before the sibling pages finish. The
+      // callback runs inside the Promise.all, so the caller sees page 3's
+      // values while pages 4-40 are still parsing.
+      opts.onPageChunk?.(chunk);
       return chunk;
     }),
   );
 
-  return pageChunks.flat();
+  // Rebuild in the caller's original highlight order. The old code returned
+  // `pageChunks.flat()`, which is page-grouped — that only matched the input
+  // order when the input was already sorted by page. Callers index the result
+  // positionally against `highlights`, so anything interleaved across pages
+  // (e.g. [p1, p2, p1]) came back mismatched. Indexing by slot removes the
+  // assumption entirely.
+  const ordered = new Array<ExtractedRow>(highlights.length);
+  for (const chunk of pageChunks) {
+    for (const { index, row } of chunk) ordered[index] = row;
+  }
+  return ordered;
 }
 
 /**

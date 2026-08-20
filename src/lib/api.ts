@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import type { PageInfo, Highlight, ExtractedRow, OcrProgress } from '@/types/utilscraper';
+import type { PageInfo, Highlight, ExtractedRow, OcrProgress, RegionUpdate } from '@/types/utilscraper';
 import { extractFromRegions } from './pdf-extract';
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000' ;
@@ -923,7 +923,20 @@ export async function extractRegions(
   sessionId: string,
   highlights: Highlight[],
   file?: File,
-  opts: { strict?: boolean; onSessionRenewed?: (oldId: string, newId: string) => void } = {},
+  opts: {
+    strict?: boolean;
+    onSessionRenewed?: (oldId: string, newId: string) => void;
+    /**
+     * Fires with each page's rows as that page resolves, ahead of the
+     * returned promise. Rows carry the index of the highlight they answer,
+     * so a caller can merge them into its own ordered state.
+     *
+     * Values handed to this callback are already sanitized/normalized, so a
+     * partially-applied row is identical to the one the final result carries
+     * — nothing shifts under the user when the run completes.
+     */
+    onPartial?: (updates: RegionUpdate[]) => void;
+  } = {},
 ): Promise<ExtractedRow[]> {
 
   // Must have at least one highlight
@@ -934,6 +947,51 @@ export async function extractRegions(
   // `strict` tells the backend to just read text inside the rect — no
   // label-adjacent smart detection.
   const strict = opts.strict === true;
+
+  // Push a batch of rows to the caller mid-run. Sanitizing here (rather than
+  // only at the end) is what keeps the live value equal to the final one.
+  const emit = (updates: RegionUpdate[]) => {
+    if (!opts.onPartial || updates.length === 0) return;
+    const rows = sanitizeResults(updates.map(u => u.row));
+    opts.onPartial(updates.map((u, i) => ({ index: u.index, row: rows[i] })));
+  };
+
+  // Split a list of highlight indices into per-page groups, preserving the
+  // order pages first appear in. One backend request per page is what lets
+  // results arrive page by page.
+  const groupByPage = (idxs: number[]): number[][] => {
+    const byPage = new Map<number, number[]>();
+    for (const i of idxs) {
+      const pg = highlights[i].page;
+      if (!byPage.has(pg)) byPage.set(pg, []);
+      byPage.get(pg)!.push(i);
+    }
+    return Array.from(byPage.values());
+  };
+
+  // Bounded pool over those page groups. Browsers cap ~6 connections per
+  // host and the backend's OCR semaphore defaults to 2, so firing one
+  // request per page at once only builds a queue. 3 keeps pages flowing
+  // without starving the sibling files a batch extract runs in parallel.
+  const PAGE_CONCURRENCY = 3;
+  const runPages = async (
+    groups: number[][],
+    run: (group: number[]) => Promise<void>,
+  ): Promise<void> => {
+    const queue = [...groups];
+    await Promise.all(
+      Array.from({ length: Math.min(PAGE_CONCURRENCY, queue.length) }, async () => {
+        for (let g = queue.shift(); g !== undefined; g = queue.shift()) await run(g);
+      }),
+    );
+  };
+
+  // Live backend session id, shared across the per-page requests below. When
+  // one page's POST 404s and triggers a reupload, the pages still queued
+  // behind it pick up the renewed id instead of each paying their own 404.
+  // (reprocessFile already dedupes concurrent reuploads of the same File, so
+  // the in-flight ones converge on the same new id rather than racing.)
+  let currentId = sessionId;
 
   // Helper: POST highlights to the backend. Handles the 404-renewal reupload
   // once. Returns the parsed results array on success, `null` on failure.
@@ -982,6 +1040,7 @@ export async function extractRegions(
     }
     if (!res.ok) return null;
     const data = await res.json();
+    currentId = liveId;
     return { liveId, results: sanitizeResults(data.results) };
   };
 
@@ -1000,6 +1059,13 @@ export async function extractRegions(
           page: h.page, field: h.field,
           x: h.x, y: h.y, width: h.width, height: h.height,
         })),
+        {
+          // Report what the text layer already answered, page by page. Rows
+          // the client came up empty on are deliberately held back: the
+          // backend is still going to answer those, and showing a blank row
+          // first and filling it a moment later reads as a failed extraction.
+          onPageChunk: chunk => emit(chunk.filter(u => u.row.value !== null)),
+        },
       );
 
       // Indices where the client had no value — those need the backend.
@@ -1013,24 +1079,31 @@ export async function extractRegions(
       // pdfjs text is raw and MUST go through it, same as backend results.
       if (missingIdx.length === 0) return sanitizeResults(clientResults);
 
-      // Ask the backend for just the missing ones and merge into the
-      // client-side result array in-place, preserving original order.
-      const backendCall = await postExtract(
-        sessionId,
-        missingIdx.map(i => highlights[i]),
-      );
-      if (backendCall) {
-        const merged = [...clientResults];
-        missingIdx.forEach((origIdx, backendIdx) => {
+      // Ask the backend for the missing ones, one request per page rather
+      // than a single POST covering the whole document. On a scanned PDF the
+      // client answers nothing, so that single POST was the entire wait —
+      // every page's OCR had to finish before any value appeared. Per-page
+      // requests return independently and each one lands in the UI as it
+      // arrives.
+      const merged = [...clientResults];
+      await runPages(groupByPage(missingIdx), async group => {
+        const backendCall = await postExtract(currentId, group.map(i => highlights[i]));
+        if (!backendCall) return;   // this page failed; its rows stay as the client left them
+        const updates: RegionUpdate[] = [];
+        group.forEach((origIdx, backendIdx) => {
           const br = backendCall.results[backendIdx];
-          if (br) merged[origIdx] = br;
+          if (br) {
+            merged[origIdx] = br;
+            updates.push({ index: origIdx, row: br });
+          }
         });
-        return sanitizeResults(merged);
-      }
+        emit(updates);
+      });
 
-      // Backend call failed — return what we have. Nulls stay null,
-      // which is the same accuracy as the old client-side-fallback path.
-      return sanitizeResults(clientResults);
+      // Pages whose request failed keep their client-side row (null), which
+      // is the same accuracy the old all-or-nothing path degraded to — except
+      // now one bad page no longer discards the pages that did succeed.
+      return sanitizeResults(merged);
     } catch (err) {
       console.warn('Client-first extraction failed, falling back to backend-first:', err);
       // Fall through to the legacy path below.
@@ -1043,7 +1116,7 @@ export async function extractRegions(
   // blob to feed pdfjs.
   try {
     if (backendOnline && !sessionId.startsWith('local-')) {
-      const backendCall = await postExtract(sessionId, highlights);
+      const backendCall = await postExtract(currentId, highlights);
       if (backendCall) return backendCall.results;
     }
   } catch {
