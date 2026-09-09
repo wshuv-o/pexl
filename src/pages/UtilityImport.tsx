@@ -12,7 +12,13 @@ type ImportResult = {
   batch_name: string;
   inserted: number;
   skipped_blank: number;
+  /** Rows dropped because no money column was recognised in them. */
+  skipped_no_amount?: number;
+  /** Cells whose own arithmetic (=1.2+2.3) is carried into the report. */
+  retained_formulas?: number;
   detected_headers: string[];
+  /** Headers the importer didn't understand — the usual cause of a thin report. */
+  unmapped_headers?: string[];
   mapped_fields: string[];
 };
 
@@ -82,7 +88,7 @@ export default function UtilityImport() {
         >
           {file
             ? <><FileSpreadsheet className="w-8 h-8 text-primary mb-2" /><p className="text-sm font-semibold">{file.name}</p><p className="text-xs text-muted-foreground">{(file.size / 1024 / 1024).toFixed(1)} MB · click to change</p></>
-            : <><UploadCloud className="w-8 h-8 text-muted-foreground mb-2" /><p className="text-sm font-semibold">Click to choose or drop a .xlsx file</p><p className="text-xs text-muted-foreground mt-1">Expected columns: Property Name · Provider Name · Account · Service Start/End Date · Current Charges · Utility Type</p></>}
+            : <><UploadCloud className="w-8 h-8 text-muted-foreground mb-2" /><p className="text-sm font-semibold">Click to choose or drop a .xlsx file</p><p className="text-xs text-muted-foreground mt-1">Either layout works — a column per utility (Property Name · Provider · Account Number · Invoice Date · Electricity · Gas · Water · Sewer · Trash), or a row per utility (… Current Charges · Utility Type). Cell formulas like <span className="font-mono">=1.2+2.3</span> are carried into the report.</p></>}
           <input ref={inputRef} type="file" accept=".xlsx,.xlsm,.xls" className="hidden"
                  onChange={e => { const f = e.target.files?.[0] || null; pickFile(f); e.currentTarget.value = ''; }} />
         </div>
@@ -114,11 +120,30 @@ export default function UtilityImport() {
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">
               <Stat label="Rows inserted" value={result.inserted.toLocaleString()} />
               <Stat label="Blank rows skipped" value={String(result.skipped_blank)} />
+              <Stat label="Formulas retained" value={String(result.retained_formulas ?? 0)} />
               <Stat label="Batch ID" value={String(result.batch_id)} />
-              <Stat label="Batch name" value={result.batch_name} />
             </div>
+
+            {/* Loud about the two ways an import looks fine but exports thin:
+                rows with no recognised money column, and headers we ignored. */}
+            {(result.skipped_no_amount ?? 0) > 0 && (
+              <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-xs text-amber-800 dark:text-amber-300">
+                <span className="font-semibold">{result.skipped_no_amount} row(s) had no recognised amount</span>{' '}
+                and were skipped. Name each money column after its utility
+                (Electricity, Gas, Water, Sewer, Trash, Internet, Phone), or use a
+                single "Current Charges" column alongside a "Utility Type" column.
+              </div>
+            )}
+            {(result.unmapped_headers?.length ?? 0) > 0 && (
+              <div className="text-xs text-muted-foreground">
+                <span className="font-medium text-foreground">Ignored columns:</span>{' '}
+                {result.unmapped_headers!.join(' · ')}
+              </div>
+            )}
+
             <div className="text-xs text-muted-foreground">
-              <div><span className="font-medium text-foreground">Detected columns:</span> {result.detected_headers.join(' · ')}</div>
+              <div><span className="font-medium text-foreground">Batch:</span> {result.batch_name}</div>
+              <div className="mt-1"><span className="font-medium text-foreground">Detected columns:</span> {result.detected_headers.join(' · ')}</div>
               <div className="mt-1"><span className="font-medium text-foreground">Mapped fields:</span> {result.mapped_fields.join(', ')}</div>
             </div>
             <p className="text-xs text-muted-foreground">

@@ -107,6 +107,30 @@ function monthKeyLabel(key: string): string {
   return `${MONTH_NAMES[parseInt(m, 10) - 1]}-${y.slice(2)}`;
 }
 
+/**
+ * Sanity-check a retained arithmetic expression before it is written into
+ * the workbook as a formula. Returns '' to mean "use the plain number".
+ *
+ * The utility importer stores the literal arithmetic a source cell held
+ * (``=1.2+2.3`` → ``'1.2+2.3'``) so the user's own sum survives into the
+ * report instead of being flattened to a total. The importer has already
+ * guaranteed the expression evaluates to the amount stored beside it and
+ * that it references no cells or functions, so this is a last line of
+ * defence over the characters themselves, not a re-derivation: a stray
+ * cell reference or function call must never reach the output workbook,
+ * where Excel would resolve it against unrelated cells.
+ */
+function safeExpr(raw: string | undefined): string {
+  if (!raw) return '';
+  const expr = raw.replace(/\s+/g, '');
+  if (!/^[0-9.+\-*/()]+$/.test(expr)) return '';
+  if (!/\d/.test(expr)) return '';
+  // Needs a real operator past a leading sign — a bare number has nothing
+  // to itemise, and '**' is not an Excel operator.
+  if (!/[+\-*/]/.test(expr.slice(1)) || expr.includes('**')) return '';
+  return expr;
+}
+
 function mostCommon(values: string[]): string {
   const counts = new Map<string, number>();
   for (const v of values) { if (v) counts.set(v, (counts.get(v) ?? 0) + 1); }
@@ -122,6 +146,13 @@ type TableRow = {
   provider: string; account: string;
   monthValues:     Map<string, number>;
   monthValuesList: Map<string, number[]>;
+  /**
+   * Per bill in ``monthValuesList``, the literal arithmetic the source cell
+   * held (``'1.2+2.3'``) or ``''`` when it was a plain number. Same length
+   * and order as ``monthValuesList``, so index i describes bill i. Lets a
+   * month cell be written as the user's own sum instead of the total.
+   */
+  monthExprList:   Map<string, string[]>;
   otherCharges:    Map<string, number[]>;
   taxes:           Map<string, number[]>;
 };
@@ -402,17 +433,31 @@ function buildSheet(wb: ExcelJS.Workbook, sheetName: string, p: SheetParams): Bu
         const mk      = sortedMonths[i];
         const cell    = G(currentRow, FIXED_COLS + 1 + i);
         const bills   = row.monthValuesList.get(mk) ?? [];
+        const exprs   = row.monthExprList.get(mk)   ?? [];
         const oc      = isRecon ? (row.otherCharges.get(mk) ?? []) : [];
         const tax     = isRecon ? (row.taxes.get(mk)        ?? []) : [];
         const allVals = [...bills, ...oc, ...tax];
-        if (allVals.length > 1) {
-          cell.value  = { formula: allVals.map(n => n.toFixed(2)).join('+'), result: allVals.reduce((a, b) => a + b, 0) };
+        // Each bill contributes either the arithmetic its source cell held
+        // or its plain total; other charges and taxes are always numbers.
+        // Multi-term expressions get parenthesised so a leading sign can't
+        // change the meaning of the joined formula.
+        const hasExpr = exprs.some(e => e);
+        const terms   = [
+          ...bills.map((n, i) => (exprs[i] ? `(${exprs[i]})` : n.toFixed(2))),
+          ...oc.map(n => n.toFixed(2)),
+          ...tax.map(n => n.toFixed(2)),
+        ];
+        if (terms.length > 1 || (terms.length === 1 && hasExpr)) {
+          cell.value  = {
+            formula: terms.join('+').replace(/^\((.*)\)$/, '$1'),
+            result: allVals.reduce((a, b) => a + b, 0),
+          };
           cell.numFmt = '"$"#,##0.00';
-        } else if (allVals.length === 1) {
+        } else if (terms.length === 1) {
           cell.value  = allVals[0];
           cell.numFmt = '"$"#,##0.00';
         }
-        cell.fill      = (isRecon && allVals.length > 1) ? yellowFill : whiteFill;
+        cell.fill      = (isRecon && (allVals.length > 1 || hasExpr)) ? yellowFill : whiteFill;
         cell.font      = { name: 'Calibri', size: 10 };
         cell.alignment = { horizontal: 'center', vertical: 'middle' };
       }
@@ -988,6 +1033,7 @@ export async function downloadUtilityExcel(
     folder: string; fileName: string; provider: string; account: string;
     monthValues:     Map<string, number>;
     monthValuesList: Map<string, number[]>;
+    monthExprList:   Map<string, string[]>;
     otherCharges:    Map<string, number[]>;
     taxes:           Map<string, number[]>;
   };
@@ -1015,7 +1061,7 @@ export async function downloadUtilityExcel(
         const rowKey = `${pg.provider}__${pg.account || pg.fileName}`;
         let tr = table.rows.get(rowKey);
         if (!tr) {
-          tr = { folder: pg.folder, fileName: pg.fileName, provider: pg.provider, account: pg.account, monthValues: new Map(), monthValuesList: new Map(), otherCharges: new Map(), taxes: new Map() };
+          tr = { folder: pg.folder, fileName: pg.fileName, provider: pg.provider, account: pg.account, monthValues: new Map(), monthValuesList: new Map(), monthExprList: new Map(), otherCharges: new Map(), taxes: new Map() };
           table.rows.set(rowKey, tr);
         } else {
           if (!tr.folder && pg.folder) tr.folder = pg.folder;
@@ -1026,6 +1072,11 @@ export async function downloadUtilityExcel(
           tr.monthValues.set(pg.monthKey, (tr.monthValues.get(pg.monthKey) ?? 0) + num);
           if (!tr.monthValuesList.has(pg.monthKey)) tr.monthValuesList.set(pg.monthKey, []);
           tr.monthValuesList.get(pg.monthKey)!.push(num);
+          // Carry the source cell's own arithmetic alongside its total. The
+          // importer writes it to `<field>_expr`; a scraped PDF has none, so
+          // this is '' and the cell falls back to the plain number.
+          if (!tr.monthExprList.has(pg.monthKey)) tr.monthExprList.set(pg.monthKey, []);
+          tr.monthExprList.get(pg.monthKey)!.push(safeExpr(pg.fieldValues[`${field}_expr`]));
           table.monthKeys.add(pg.monthKey);
           const ocRaw  = pg.fieldValues['other_charges'];
           if (ocRaw)  { const v = parseFloat(ocRaw.replace(/[$,\s]/g,  '')); if (!isNaN(v)) { if (!tr.otherCharges.has(pg.monthKey)) tr.otherCharges.set(pg.monthKey, []); tr.otherCharges.get(pg.monthKey)!.push(v); } }
