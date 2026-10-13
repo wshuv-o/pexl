@@ -183,6 +183,17 @@ class ExportTests(unittest.TestCase):
         other = {'Authorization': 'Bearer ' + OTHER_KEY}
         self.assertEqual(self.client.get(created['download_path'], headers=other).status_code, 404)
 
+    def test_works_under_pm2_node_ipc_env(self):
+        # pm2 sets NODE_CHANNEL_FD for the backend; node must not inherit it.
+        integration_api._doc_types.cache_clear()
+        with patch.dict(os.environ, {'NODE_CHANNEL_FD': '3', 'NODE_CHANNEL_SERIALIZATION_MODE': 'json'}):
+            env = integration_api.export_env()
+            self.assertNotIn('NODE_CHANNEL_FD', env)
+            self.assertNotIn('NODE_CHANNEL_SERIALIZATION_MODE', env)
+            self.assertEqual(env.get('PEXL_API_KEYS'), os.environ['PEXL_API_KEYS'])
+            self.assertEqual(self.client.get('/api/v1/doc-types').status_code, 200)
+            self.export(FIXTURES['tax'])
+
     def test_missing_runtime_is_503(self):
         with patch.dict(os.environ, {'PEXL_EXPORT_SCRIPT': str(Path(self.temp.name) / 'missing.mjs')}):
             self.assertEqual(self.client.post('/api/v1/exports', json=FIXTURES['tax']).status_code, 503)

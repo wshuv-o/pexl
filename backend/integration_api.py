@@ -304,10 +304,21 @@ def export_command(command: str) -> list[str]:
     return [node, str(script), command]
 
 
+def export_env() -> dict[str, str]:
+    """The backend's environment minus Node's IPC variables.
+
+    pm2 starts the backend with NODE_CHANNEL_FD set; a node child that
+    inherits it tries to open that fd as an IPC channel and aborts (exit -6).
+    """
+    return {k: v for k, v in os.environ.items()
+            if k not in ('NODE_CHANNEL_FD', 'NODE_CHANNEL_SERIALIZATION_MODE')}
+
+
 def run_export(command: str, payload: dict | None = None) -> dict | list:
     try:
         proc = subprocess.run(export_command(command), capture_output=True, timeout=EXPORT_TIMEOUT_SECONDS,
-                              input=json.dumps(payload).encode() if payload is not None else b'')
+                              input=json.dumps(payload).encode() if payload is not None else b'',
+                              env=export_env())
     except subprocess.TimeoutExpired:
         raise HTTPException(503, 'Workbook export timed out')
     except OSError:
