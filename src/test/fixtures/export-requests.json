@@ -1,0 +1,146 @@
+{
+  "utility_bill": {
+    "doc_type": "utility_bill",
+    "external_reference": "finai-util-1",
+    "options": { "date_field": "auto" },
+    "files": [
+      { "filename": "maple-electric.pdf", "folder_name": "Maple", "rows": [
+        { "page": 1, "field": "property_name", "value": "Maple Apts" },
+        { "page": 1, "field": "address", "value": "1 Maple St" },
+        { "page": 1, "field": "provider_name", "value": "ConEd" },
+        { "page": 1, "field": "account_number", "value": "111-222" },
+        { "page": 1, "field": "billing_date", "value": "01/20/2026" },
+        { "page": 1, "field": "total_electricity_bill", "value": "41.32" },
+        { "page": 1, "field": "other_charges", "value": "2.50" },
+        { "page": 2, "field": "billing_date", "value": "02/18/2026" },
+        { "page": 2, "field": "total_electricity_bill", "value": "$1,204.10" },
+        { "page": 2, "field": "taxes", "value": "3.10" },
+        { "page": 3, "field": "billing_date", "value": "03/05/2026" },
+        { "page": 3, "field": "total_electricity_bill", "value": "3.5" },
+        { "page": 3, "field": "total_electricity_bill_expr", "value": "1.25+2.25" }
+      ]},
+      { "filename": "maple-gas.pdf", "folder_name": "Maple", "rows": [
+        { "page": 1, "field": "provider_name", "value": "National Grid" },
+        { "page": 1, "field": "account_number", "value": "999" },
+        { "page": 1, "field": "property_name", "value": "Maple Apts" },
+        { "page": 1, "field": "billing_date", "value": "01/25/2026" },
+        { "page": 1, "field": "total_gas_bill", "value": "80" },
+        { "page": 2, "field": "billing_date", "value": "02/25/2026" },
+        { "page": 2, "field": "total_gas_bill", "value": "75.25" },
+        { "page": 2, "field": "total_water_bill", "value": "" }
+      ]}
+    ]
+  },
+  "utility_portfolio": {
+    "doc_type": "utility_bill",
+    "external_reference": "finai-util-2",
+    "files": [
+      { "filename": "a.pdf", "rows": [
+        { "page": 1, "field": "property_name", "value": "Oak Court" },
+        { "page": 1, "field": "provider_name", "value": "PSEG" },
+        { "page": 1, "field": "billing_date", "value": "05/20/2026" },
+        { "page": 1, "field": "total_electricity_bill", "value": "10" }
+      ]},
+      { "filename": "b.pdf", "rows": [
+        { "page": 1, "field": "property_name", "value": "Pine House" },
+        { "page": 1, "field": "provider_name", "value": "PSEG" },
+        { "page": 1, "field": "billing_date", "value": "06/20/2026" },
+        { "page": 1, "field": "total_electricity_bill", "value": "20" },
+        { "page": 1, "field": "total_water_bill", "value": "5" }
+      ]}
+    ]
+  },
+  "bank_statement": {
+    "doc_type": "bank_statement",
+    "external_reference": "finai-bank-1",
+    "files": [
+      { "filename": "chase-jan.pdf", "rows": [
+        { "page": 1, "field": "property_name", "value": "Maple Apts" },
+        { "page": 1, "field": "account_number", "value": "0001" },
+        { "page": 1, "field": "statement_date", "value": "Jan 1, 2026 - Jan 31, 2026" },
+        { "page": 1, "field": "beginning_balance", "value": "1,000.00" },
+        { "page": 1, "field": "total_credits", "value": "500" },
+        { "page": 1, "field": "total_debits", "value": "200" },
+        { "page": 1, "field": "ending_balance", "value": "1300" }
+      ]},
+      { "filename": "chase-feb.pdf", "rows": [
+        { "page": 1, "field": "property_name", "value": "Maple Apts" },
+        { "page": 1, "field": "account_number", "value": "0001" },
+        { "page": 1, "field": "statement_date", "value": "02/28/2026" },
+        { "page": 1, "field": "beginning_balance", "value": "1300" },
+        { "page": 1, "field": "total_credits", "value": "250.75" },
+        { "page": 1, "field": "total_debits", "value": "100" },
+        { "page": 1, "field": "ending_balance", "value": "1450.75" }
+      ]},
+      { "filename": "chase-jan.pdf", "rows": [
+        { "page": 1, "field": "property_name", "value": "Oak Court" },
+        { "page": 1, "field": "account_number", "value": "0002" },
+        { "page": 1, "field": "statement_date", "value": "01/31/2026" },
+        { "page": 1, "field": "beginning_balance", "value": "50" },
+        { "page": 1, "field": "total_credits", "value": "10" },
+        { "page": 1, "field": "total_debits", "value": "5" },
+        { "page": 1, "field": "ending_balance", "value": "55" }
+      ]}
+    ]
+  },
+  "appraisal": {
+    "doc_type": "appraisal",
+    "external_reference": "finai-appr-1",
+    "files": [
+      { "filename": "appraisal.pdf", "folder_name": "Deals", "rows": [
+        { "page": 1, "field": "property_name", "value": "Maple Apts" },
+        { "page": 1, "field": "appraised_date", "value": "03/15/2026" },
+        { "page": 1, "field": "appraised_as_is_value", "value": "$4,250,000" },
+        { "page": 2, "field": "property_type", "value": "Multifamily" },
+        { "page": 2, "field": "cap_rate", "value": "6.5" },
+        { "page": 2, "field": "total_gas_bill", "value": "12" }
+      ]}
+    ]
+  },
+  "lease_contract": {
+    "doc_type": "lease_contract",
+    "external_reference": "finai-lease-1",
+    "files": [
+      { "filename": "lease-4b.pdf", "folder_name": "Leases", "rows": [
+        { "page": 1, "field": "lease_date", "value": "01/02/2026" },
+        { "page": 1, "field": "parties", "value": "Jane Roe" },
+        { "page": 1, "field": "lease_begin_date", "value": "02/01/2026" },
+        { "page": 1, "field": "lease_end_date", "value": "01/31/2027" },
+        { "page": 1, "field": "monthly_rent", "value": "$2,100.00" },
+        { "page": 1, "field": "security_deposit", "value": "2100" },
+        { "page": 2, "field": "utilities_included", "value": "Heat, Water" }
+      ]},
+      { "filename": "lease-5c.pdf", "rows": [
+        { "page": 1, "field": "lease_begin_date", "value": "03/01/2026" },
+        { "page": 1, "field": "lease_end_date", "value": "02/28/2027" },
+        { "page": 1, "field": "monthly_rent", "value": "1800" }
+      ]}
+    ]
+  },
+  "tax": {
+    "doc_type": "tax",
+    "external_reference": "finai-tax-1",
+    "files": [
+      { "filename": "tax-2026.pdf", "rows": [
+        { "page": 1, "field": "tax_year", "value": "2026" },
+        { "page": 1, "field": "tax_bill_date", "value": "07/01/2026" },
+        { "page": 1, "field": "tax_due_date", "value": "08/01/2026" },
+        { "page": 1, "field": "parcel_id", "value": "12-345-678" },
+        { "page": 1, "field": "assessed_value", "value": "1,000,000" },
+        { "page": 1, "field": "total_tax_due", "value": "21,345.67" }
+      ]}
+    ]
+  },
+  "others": {
+    "doc_type": "others",
+    "external_reference": "finai-other-1",
+    "files": [
+      { "filename": "invoice.pdf", "rows": [
+        { "page": 1, "field": "Invoice No", "value": "INV-1" },
+        { "page": 1, "field": "Amount", "value": "99.95" },
+        { "page": 2, "field": "Invoice No", "value": "INV-2" },
+        { "page": 2, "field": "Vendor", "value": "Acme" }
+      ]}
+    ]
+  }
+}

@@ -10,7 +10,8 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "build:export": "vite build --config vite.export.config.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",

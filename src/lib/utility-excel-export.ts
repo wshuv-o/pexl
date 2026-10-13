@@ -1,6 +1,7 @@
 import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
 import type { ExtractedRow } from '@/types/utilscraper';
+import type { BuiltWorkbook } from './bank-excel-export';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -954,7 +955,7 @@ function buildRollupSheet(
 /** Which scraped field decides the month a bill lands under. */
 export type UtilityDateField = 'billing_date' | 'date' | 'auto';
 
-export async function downloadUtilityExcel(
+export async function buildUtilityWorkbook(
   fileMap: Map<string, ExtractedRow[]>,
   /**
    * Controls how each page is bucketed into a month column.
@@ -966,7 +967,7 @@ export async function downloadUtilityExcel(
    *    in the data; otherwise fall back to ``date`` with no adjustment.
    */
   dateField: UtilityDateField = 'auto',
-): Promise<void> {
+): Promise<BuiltWorkbook> {
 
   // ── Decide which scraped field to consult for each page ─────────────────────
   // For 'auto', look at the whole dataset once: if anything has billing_date
@@ -1259,13 +1260,21 @@ export async function downloadUtilityExcel(
     });
   }
 
-  // ── Step 7: download ──────────────────────────────────────────────────────────
+  // ── Step 7: serialise ─────────────────────────────────────────────────────────
   const now     = new Date();
   const dateStr = now.toISOString().slice(0, 16).replace(/[T:]/g, '-');
-  const buf     = await wb.xlsx.writeBuffer();
+  const buffer  = await wb.xlsx.writeBuffer() as ArrayBuffer;
   const stem    = isPortfolio ? 'Pexl_Portfolio_UtilityRecon' : 'Pexl_UtilityRecon';
+  return { buffer, filename: `${stem}_${dateStr}.xlsx` };
+}
+
+export async function downloadUtilityExcel(
+  fileMap: Map<string, ExtractedRow[]>,
+  dateField: UtilityDateField = 'auto',
+): Promise<void> {
+  const { buffer, filename } = await buildUtilityWorkbook(fileMap, dateField);
   saveAs(
-    new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }),
-    `${stem}_${dateStr}.xlsx`,
+    new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }),
+    filename,
   );
 }

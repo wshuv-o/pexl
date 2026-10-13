@@ -12,10 +12,10 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_DIR"
 
-echo "==> [1/5] git pull"
+echo "==> [1/6] git pull"
 git pull --ff-only
 
-echo "==> [2/5] ensure LibreOffice (DOC/DOCX -> PDF conversion)"
+echo "==> [2/6] ensure LibreOffice (DOC/DOCX -> PDF conversion)"
 # The backend converts uploaded .doc/.docx to PDF by shelling out to
 # LibreOffice headless (see backend/services/doc_converter.py). Without it,
 # every Word upload fails with a 500. Install once; idempotent on re-deploy.
@@ -35,13 +35,19 @@ else
   echo "    Install LibreOffice manually to enable Word support."
 fi
 
-echo "==> [3/5] npm install"
+echo "==> [3/6] npm install"
 npm install
 
-echo "==> [4/5] npm run build"
+echo "==> [4/6] npm run build"
 npm run build
 
-echo "==> [5/5] pm2 restart (with --update-env)"
+echo "==> [5/6] npm run build:export"
+# Server-side Excel export runtime (dist-server/export-workbook.mjs). The
+# backend's POST /api/v1/exports runs it with Node to build the same workbook
+# as the browser Export button; without it that route returns 503.
+npm run build:export
+
+echo "==> [6/6] pm2 restart (with --update-env)"
 pm2 restart pexl-backend  --update-env
 pm2 restart pexl-frontend --update-env
 pm2 save

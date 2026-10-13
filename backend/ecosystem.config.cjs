@@ -88,6 +88,13 @@ module.exports = {
         OMP_NUM_THREADS:     '2',
         OPENBLAS_NUM_THREADS:'2',
         MKL_NUM_THREADS:     '2',
+
+        // FinAi export-by-doc-type (POST /api/v1/exports) runs the bundled
+        // TypeScript exporter with Node. Defaults: `node` on PATH and
+        // ../dist-server/export-workbook.mjs (built by deploy.sh). Set these
+        // only if PM2's PATH lacks node or the bundle lives elsewhere.
+        // PEXL_NODE_BIN:      '/usr/bin/node',
+        // PEXL_EXPORT_SCRIPT: '/path/to/pexl/dist-server/export-workbook.mjs',
       },
     },
   ],

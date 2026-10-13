@@ -1,0 +1,9 @@
+# Standalone HTTP API and optional MCP bridge (no OCR dependencies required).
+fastapi==0.115.12
+pydantic==2.11.7
+pydantic-settings==2.10.1
+uvicorn==0.34.2
+python-multipart==0.0.20
+openpyxl>=3.1,<4
+httpx>=0.28,<0.29
+mcp==1.12.4
