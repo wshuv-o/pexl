@@ -59,6 +59,7 @@ app.include_router(images_to_pdf_router)
 # a new frontend host comes online without needing a code redeploy.
 _default_origins = [
     "https://pexl.bulkscraper.cloud",
+    "https://pexl.odinbd.com",
     "http://localhost:5173",
     "http://localhost:8080",
     "http://localhost:3000",
