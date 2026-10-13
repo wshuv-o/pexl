@@ -26,4 +26,10 @@ dist-ssr
 
 .env
 .claude
+.venv-integration/
+backend/integration-data/
+__pycache__/
 .env.production
+
+# Server-side export runtime (npm run build:export)
+dist-server

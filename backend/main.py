@@ -36,8 +36,10 @@ from automap import match_headers
 from searchable_pdf import make_searchable_pdf
 from text_pipeline import build_structured_pages
 from ocr_lazy import get_ocr_engine
+from integration_api import router as integration_router
 
 app = FastAPI(title="PDF OCR API")
+app.include_router(integration_router)
 app.include_router(table_extract_router)
 app.include_router(table_calibrate_router)
 app.include_router(utility_import_router)

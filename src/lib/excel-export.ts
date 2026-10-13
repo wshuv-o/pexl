@@ -3,8 +3,8 @@ import * as XLSX from 'xlsx-js-style';
 import JSZip from 'jszip';
 import type { ExtractedRow } from '@/types/utilscraper';
 import { getFieldLabelsForType, FIELD_LABELS, type DocumentType } from '@/types/utilscraper';
-import { downloadBankStatementExcel } from './bank-excel-export';
-import { downloadUtilityExcel, type UtilityDateField } from './utility-excel-export';
+import { buildBankStatementWorkbook, downloadBankStatementExcel, type BuiltWorkbook } from './bank-excel-export';
+import { buildUtilityWorkbook, downloadUtilityExcel, type UtilityDateField } from './utility-excel-export';
 
 const C = {
   whiteBg:     'FFFFFF',
@@ -745,44 +745,55 @@ function buildRawSheet(fileMap: Map<string, ExtractedRow[]>): XLSX.WorkSheet {
   return ws;
 }
 
-export async function exportToExcel(
-  data: ExtractedRow[],
-  _filename: string,
-  provider: string,
-  _options: {
-    utilityMerge?: UtilityMergeOptions;
-    dateField?: UtilityDateField;
-    /** Explicit doc type to use for the templated sheet. Bypasses the
-     *  field-count auto-detection. Set when the user has manually picked
-     *  a type after upload — auto-detect would otherwise still see the
-     *  old type's extracted field names and pick the wrong template. */
-    forceDocType?: DocumentType;
-  } = {},
-) {
-  const now     = new Date();
-  const dateStr = now.toISOString().slice(0, 16).replace(/[T:]/g, '-');
-  const wb      = XLSX.utils.book_new();
+/** Options shared by the browser Export button and the server export API. */
+export interface ExportOptions {
+  utilityMerge?: UtilityMergeOptions;
+  dateField?: UtilityDateField;
+  /** Explicit doc type to use for the templated sheet. Bypasses the
+   *  field-count auto-detection. Set when the user has manually picked
+   *  a type after upload — auto-detect would otherwise still see the
+   *  old type's extracted field names and pick the wrong template. */
+  forceDocType?: DocumentType;
+}
 
-  // Group data by filename
+function groupByFilename(data: ExtractedRow[]): Map<string, ExtractedRow[]> {
   const fileMap = new Map<string, ExtractedRow[]>();
   for (const row of data) {
     const key = row.filename || 'Unknown';
     if (!fileMap.has(key)) fileMap.set(key, []);
     fileMap.get(key)!.push(row);
   }
+  return fileMap;
+}
 
-  // Pick the doc type: explicit user choice wins, otherwise auto-detect.
-  const allRows = Array.from(fileMap.values()).flat();
-  const overallType = _options.forceDocType ?? detectDocType(allRows);
+// Pick the doc type: explicit user choice wins, otherwise auto-detect.
+function resolveDocType(fileMap: Map<string, ExtractedRow[]>, options: ExportOptions): DocumentType {
+  return options.forceDocType ?? detectDocType(Array.from(fileMap.values()).flat());
+}
+
+/**
+ * Build the export workbook without touching the DOM. This is the one
+ * implementation of every per-type layout: the browser Export button saves
+ * its result, and the server export API (src/server/export-cli.ts) returns
+ * it to FinAi.
+ */
+export async function buildExportWorkbook(
+  data: ExtractedRow[],
+  provider: string,
+  options: ExportOptions = {},
+): Promise<BuiltWorkbook> {
+  const now     = new Date();
+  const dateStr = now.toISOString().slice(0, 16).replace(/[T:]/g, '-');
+  const wb      = XLSX.utils.book_new();
+
+  // Group data by filename
+  const fileMap = groupByFilename(data);
+  const overallType = resolveDocType(fileMap, options);
 
   if (overallType === 'bank_statement') {
     // Bank statement uses the dedicated ExcelJS-based exporter with formulas,
     // running balance chain, T-12 trailing metrics, and roll-up sheet.
-    // It downloads the workbook itself — early return.
-    downloadBankStatementExcel(data, provider).catch(err => {
-      console.error('Bank statement export failed:', err);
-    });
-    return;
+    return buildBankStatementWorkbook(data, provider);
   } else if (overallType === 'appraisal') {
     const ws = buildUnifiedSheet(fileMap, 'appraisal');
     XLSX.utils.book_append_sheet(wb, ws, 'Appraisals');
@@ -793,9 +804,7 @@ export async function exportToExcel(
     XLSX.utils.book_append_sheet(wb, buildRawSheet(fileMap), 'Plain Data');
 
   } else if (overallType === 'utility_bill') {
-    downloadUtilityExcel(fileMap, _options.dateField ?? 'auto')
-      .catch(err => console.error('Utility export failed:', err));
-    return;
+    return buildUtilityWorkbook(fileMap, options.dateField ?? 'auto');
 
   } else if (overallType === 'lease_contract') {
     const ws = buildLeaseSheet(fileMap);
@@ -853,7 +862,33 @@ export async function exportToExcel(
     zip.file(`xl/worksheets/sheet${i + 1}.xml`, xml);
   }
 
-  const patched = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
+  const bytes  = await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
+  const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+  return { buffer, filename };
+}
+
+export async function exportToExcel(
+  data: ExtractedRow[],
+  _filename: string,
+  provider: string,
+  _options: ExportOptions = {},
+) {
+  const overallType = resolveDocType(groupByFilename(data), _options);
+
+  if (overallType === 'bank_statement') {
+    // The ExcelJS exporters download the workbook themselves — early return.
+    downloadBankStatementExcel(data, provider).catch(err => {
+      console.error('Bank statement export failed:', err);
+    });
+    return;
+  } else if (overallType === 'utility_bill') {
+    downloadUtilityExcel(groupByFilename(data), _options.dateField ?? 'auto')
+      .catch(err => console.error('Utility export failed:', err));
+    return;
+  }
+
+  const { buffer, filename } = await buildExportWorkbook(data, provider, _options);
+  const patched = new Blob([buffer], { type: 'application/zip' });
   const url = URL.createObjectURL(patched);
   const a   = document.createElement('a');
   a.href     = url;

@@ -2,7 +2,7 @@
 import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
 import type { ExtractedRow } from '@/types/utilscraper';
-import { normalizeDateValue } from './api';
+import { normalizeDateValue } from './date-normalize';
 
 // ─── Sheet name helper ───────────────────────────────────────────────────────
 const uniqueSheetName = (wb: ExcelJS.Workbook, base: string): string => {
@@ -702,7 +702,13 @@ const addRollupTable = (
 };
 
 // ─── Main: Build the bank statement workbook from Pexl data ──────────────────
-export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilename: string) => {
+/** A finished workbook plus the filename the browser would save it under. */
+export interface BuiltWorkbook {
+  buffer: ArrayBuffer;
+  filename: string;
+}
+
+export const buildBankStatementWorkbook = async (data: ExtractedRow[], baseFilename: string): Promise<BuiltWorkbook> => {
   const wb = new ExcelJS.Workbook();
 
   const fileMap = new Map<string, { filename: string; rows: ExtractedRow[] }>();
@@ -1017,9 +1023,14 @@ export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilen
     });
   }
 
-  const buffer = await wb.xlsx.writeBuffer();
+  const buffer = await wb.xlsx.writeBuffer() as ArrayBuffer;
   const now = new Date();
   const dateStr = now.toISOString().slice(0, 16).replace(/[T:]/g, '-');
   const filename = `Pexl_${baseFilename.replace(/\s+/g, '')}_${dateStr}.xlsx`;
+  return { buffer, filename };
+};
+
+export const downloadBankStatementExcel = async (data: ExtractedRow[], baseFilename: string) => {
+  const { buffer, filename } = await buildBankStatementWorkbook(data, baseFilename);
   saveAs(new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), filename);
 };
